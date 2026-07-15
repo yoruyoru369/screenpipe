@@ -81,6 +81,17 @@ pub struct TriggerConfig {
     /// event the scheduler consumes. See [`SourceTrigger`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<SourceTrigger>,
+    /// Require explicit user confirmation before running, when fired by an
+    /// event (custom trigger, workflow event, meeting start/end, or a
+    /// completed-pipe chain). Instead of auto-running, the scheduler posts a
+    /// dismissible "Run" notification and the pipe only executes if the user
+    /// clicks it. Opt-in (default false) — existing pipes keep running
+    /// automatically. Does NOT apply to `sources` (connection triggers): those
+    /// commit their delivery cursor on `pipe_completed`, so a run the user
+    /// never confirms would leave the cursor stuck re-polling the same item.
+    /// Has no effect on schedule/manual runs, which are already explicit.
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 fn is_empty_str_map(m: &std::collections::HashMap<String, String>) -> bool {
@@ -4538,6 +4549,11 @@ impl PipeManager {
                 // high-frequency system events (ui_frame, window_ocr, etc.).
                 let mut event_triggered: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
+                // Pipes already sent a confirm-mode "run this?" prompt this
+                // tick — prevents two matching events from double-notifying
+                // the same pipe in one pass.
+                let mut notified_this_tick: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 {
                     use futures::FutureExt;
 
@@ -4594,6 +4610,28 @@ impl PipeManager {
                                         .get("trigger")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("?");
+                                    if requires_confirmation(config) {
+                                        if notified_this_tick.insert(name.clone()) {
+                                            let app = e
+                                                .data
+                                                .get("app")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            info!(
+                                                "scheduler: custom trigger '{}' matched pipe '{}' — awaiting confirmation",
+                                                trigger, name
+                                            );
+                                            send_confirm_notification(
+                                                name,
+                                                &format!("run \"{}\"?", name),
+                                                &format!(
+                                                    "matched trigger \"{}\" (in {})",
+                                                    trigger, app
+                                                ),
+                                            );
+                                        }
+                                        continue;
+                                    }
                                     info!(
                                         "scheduler: custom trigger '{}' fired pipe '{}'",
                                         trigger, name
@@ -4608,7 +4646,7 @@ impl PipeManager {
                     // Expire old chain cooldowns
                     recent_chain.retain(|_, ts| ts.elapsed() < CHAIN_COOLDOWN);
 
-                    for (event_name, _data) in &pending_events {
+                    for (event_name, data) in &pending_events {
                         for (name, config, _body) in &pipe_snapshot {
                             if !config.enabled {
                                 continue;
@@ -4625,7 +4663,13 @@ impl PipeManager {
 
                                 // Circular chain detection: if pipe X was triggered by
                                 // pipe_completed:Y within the cooldown, don't let
-                                // pipe_completed:X trigger Y back.
+                                // pipe_completed:X trigger Y back. The link itself is
+                                // only recorded once we're actually about to run —
+                                // a confirm-mode pipe that merely gets *offered* a run
+                                // (see below) hasn't consumed its slot in the chain and
+                                // shouldn't poison the reverse-suppression check for a
+                                // pipe that runs moments later via the user's click.
+                                let mut chain_key: Option<String> = None;
                                 if let Some(source_pipe) = pipe_completed_source(event_name) {
                                     let reverse_key = format!("{}→{}", name, source_pipe);
                                     if recent_chain.contains_key(&reverse_key) {
@@ -4635,9 +4679,7 @@ impl PipeManager {
                                         );
                                         continue;
                                     }
-                                    // Record this chain link
-                                    let chain_key = format!("{}→{}", source_pipe, name);
-                                    recent_chain.insert(chain_key, Instant::now());
+                                    chain_key = Some(format!("{}→{}", source_pipe, name));
                                 }
 
                                 let already_running = {
@@ -4650,6 +4692,21 @@ impl PipeManager {
                                         event_name, name
                                     );
                                     continue;
+                                }
+                                if requires_confirmation(config) {
+                                    if notified_this_tick.insert(name.clone()) {
+                                        let (title, body) =
+                                            describe_event_for_confirm(name, event_name, data);
+                                        info!(
+                                            "scheduler: event '{}' matched pipe '{}' — awaiting confirmation",
+                                            event_name, name
+                                        );
+                                        send_confirm_notification(name, &title, &body);
+                                    }
+                                    continue;
+                                }
+                                if let Some(key) = chain_key {
+                                    recent_chain.insert(key, Instant::now());
                                 }
                                 info!(
                                     "scheduler: event '{}' triggered pipe '{}'",
@@ -6043,6 +6100,99 @@ fn is_pipe_completed_event(event_name: &str) -> bool {
 
 fn is_pipe_completed_for_pipe(event_name: &str, pipe_name: &str) -> bool {
     matches!(pipe_completed_source(event_name), Some(source_pipe) if source_pipe == pipe_name)
+}
+
+/// Whether an event match for this pipe must be offered to the user instead
+/// of run automatically. Pulled out as its own function — shared by every
+/// event-driven firing path (custom_trigger, workflow/meeting events,
+/// pipe_completed chains) and independently testable — so the "does this
+/// pipe defer to a notification" decision doesn't drift between call sites.
+/// Deliberately NOT consulted by the connection_trigger firing path — see the
+/// module-level rationale on `TriggerConfig::confirm`.
+fn requires_confirmation(config: &PipeConfig) -> bool {
+    config
+        .trigger
+        .as_ref()
+        .map(|t| t.confirm)
+        .unwrap_or(false)
+}
+
+/// Human-readable (title, body) for a confirm-mode "run this?" notification,
+/// built from the event that matched. Pure and independently testable — the
+/// scheduler only calls this and posts the result.
+fn describe_event_for_confirm(
+    pipe_name: &str,
+    event_name: &str,
+    data: &serde_json::Value,
+) -> (String, String) {
+    let title = format!("run \"{pipe_name}\"?");
+    let body = if event_name == "meeting_started" {
+        "a meeting just started.".to_string()
+    } else if event_name == "meeting_ended" {
+        "a meeting just ended.".to_string()
+    } else if let Some(source_pipe) = pipe_completed_source(event_name) {
+        format!("pipe \"{source_pipe}\" just finished.")
+    } else {
+        // workflow_event (event_name is the classified event_type) or any
+        // other event matched via `trigger.events`.
+        match data.get("description").and_then(|v| v.as_str()) {
+            Some(d) if !d.is_empty() => format!("detected: {event_name} — {d}"),
+            _ => format!("detected: {event_name}"),
+        }
+    };
+    (title, body)
+}
+
+/// Port of the desktop app's local notification server ("focus" server) —
+/// separate from the main screenpipe API port. Same env var and default the
+/// app itself reads in `main.rs`.
+fn confirm_notify_port() -> u16 {
+    std::env::var("SCREENPIPE_FOCUS_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(11435)
+}
+
+/// Fire-and-forget "run this pipe?" prompt for a `trigger.confirm: true`
+/// pipe. Only reachable when the desktop app's local notification server is
+/// running — a bare CLI run has nowhere to deliver it, so the pipe simply
+/// never fires (the same constraint pipe-authored `POST /notify` calls
+/// already have). Clicking "Run" hits the existing `POST /pipes/:name/run`
+/// action executor client-side; clicking "Dismiss" (or ignoring it) does
+/// nothing — no code path here ever runs the pipe on its own.
+fn send_confirm_notification(pipe_name: &str, title: &str, body: &str) {
+    let payload = serde_json::json!({
+        "title": title,
+        "body": body,
+        "type": "pipe",
+        "pipe_name": pipe_name,
+        "actions": [
+            { "label": "Run", "type": "pipe", "pipe": pipe_name, "primary": true },
+            { "label": "Dismiss", "type": "dismiss" },
+        ],
+    });
+    let port = confirm_notify_port();
+    let pipe_name = pipe_name.to_string();
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if let Err(e) = client
+            .post(format!("http://127.0.0.1:{port}/notify"))
+            .json(&payload)
+            .send()
+            .await
+        {
+            debug!(
+                "confirm-mode: failed to deliver run prompt for pipe '{}': {}",
+                pipe_name, e
+            );
+        }
+    });
 }
 
 /// Parsed schedule — fixed interval, cron, or a single fire-once timestamp.
@@ -8667,6 +8817,7 @@ mod tests {
         let trigger = config.trigger.as_ref().unwrap();
         assert_eq!(trigger.events, vec!["crm_update", "meeting_end"]);
         assert_eq!(trigger.custom, vec!["when I open slack"]);
+        assert!(!trigger.confirm, "confirm should default to false");
 
         let serialized = serialize_pipe(&config, &body).unwrap();
 
@@ -8684,6 +8835,19 @@ mod tests {
         let trigger2 = config2.trigger.as_ref().unwrap();
         assert_eq!(trigger2.events, vec!["crm_update", "meeting_end"]);
         assert_eq!(trigger2.custom, vec!["when I open slack"]);
+        assert!(!trigger2.confirm);
+    }
+
+    #[test]
+    fn test_roundtrip_trigger_confirm_true() {
+        let content = "---\nschedule: manual\nenabled: true\ntrigger:\n  custom:\n    - when I open an invoice email\n  confirm: true\n---\n\nDraft a reply";
+        let (config, body) = parse_frontmatter(content).unwrap();
+        let trigger = config.trigger.as_ref().unwrap();
+        assert!(trigger.confirm);
+
+        let serialized = serialize_pipe(&config, &body).unwrap();
+        let (config2, _) = parse_frontmatter(&serialized).unwrap();
+        assert!(config2.trigger.as_ref().unwrap().confirm);
     }
 
     #[test]
@@ -8752,6 +8916,7 @@ mod tests {
             events: vec!["my_event".to_string()],
             custom: vec![],
             sources: vec![],
+            confirm: false,
         });
 
         // Also sneak it into the extras HashMap (simulating the bug)
@@ -9159,5 +9324,100 @@ mod tests {
         // Corrupt content: both the first read and the single retry fail.
         std::fs::write(&path, "{truncated").unwrap();
         assert!(read_store_bin(&path).is_none());
+    }
+
+    // ── confirm-mode ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_describe_event_for_confirm_meeting_events() {
+        let empty = serde_json::json!({});
+        let (title, body) = describe_event_for_confirm("standup-notes", "meeting_started", &empty);
+        assert_eq!(title, "run \"standup-notes\"?");
+        assert_eq!(body, "a meeting just started.");
+
+        let (_, body) = describe_event_for_confirm("recap", "meeting_ended", &empty);
+        assert_eq!(body, "a meeting just ended.");
+    }
+
+    #[test]
+    fn test_describe_event_for_confirm_pipe_chain() {
+        let empty = serde_json::json!({});
+        let event_name = format!("{}summarizer", PIPE_COMPLETED_EVENT_PREFIX);
+        let (title, body) = describe_event_for_confirm("crm-updater", &event_name, &empty);
+        assert_eq!(title, "run \"crm-updater\"?");
+        assert_eq!(body, "pipe \"summarizer\" just finished.");
+    }
+
+    #[test]
+    fn test_describe_event_for_confirm_workflow_event_with_description() {
+        let data = serde_json::json!({ "description": "user moved from LinkedIn to CRM" });
+        let (_, body) = describe_event_for_confirm("crm-sync", "crm_update_from_social", &data);
+        assert_eq!(
+            body,
+            "detected: crm_update_from_social — user moved from LinkedIn to CRM"
+        );
+    }
+
+    #[test]
+    fn test_describe_event_for_confirm_workflow_event_without_description() {
+        let empty = serde_json::json!({});
+        let (_, body) = describe_event_for_confirm("crm-sync", "debugging_session", &empty);
+        assert_eq!(body, "detected: debugging_session");
+    }
+
+    #[test]
+    fn test_confirm_notify_port_defaults_and_respects_env() {
+        // Serialize env mutation across this process — std::env::set_var is
+        // process-global, and cargo test runs tests in threads by default.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        std::env::remove_var("SCREENPIPE_FOCUS_PORT");
+        assert_eq!(confirm_notify_port(), 11435);
+
+        std::env::set_var("SCREENPIPE_FOCUS_PORT", "9999");
+        assert_eq!(confirm_notify_port(), 9999);
+        std::env::remove_var("SCREENPIPE_FOCUS_PORT");
+    }
+
+    #[test]
+    fn test_trigger_config_confirm_defaults_false() {
+        let trigger = TriggerConfig {
+            events: vec![],
+            custom: vec![],
+            sources: vec![],
+            confirm: false,
+        };
+        assert!(!trigger.confirm);
+    }
+
+    fn pipe_config_with_confirm(confirm: bool) -> PipeConfig {
+        let content = "---\nschedule: manual\nenabled: true\n---\n\nbody";
+        let (mut config, _) = parse_frontmatter(content).unwrap();
+        config.trigger = Some(TriggerConfig {
+            events: vec!["some_event".to_string()],
+            custom: vec![],
+            sources: vec![],
+            confirm,
+        });
+        config
+    }
+
+    #[test]
+    fn test_requires_confirmation_true() {
+        assert!(requires_confirmation(&pipe_config_with_confirm(true)));
+    }
+
+    #[test]
+    fn test_requires_confirmation_false() {
+        assert!(!requires_confirmation(&pipe_config_with_confirm(false)));
+    }
+
+    #[test]
+    fn test_requires_confirmation_no_trigger_at_all() {
+        let content = "---\nschedule: every 1h\nenabled: true\n---\n\nbody";
+        let (config, _) = parse_frontmatter(content).unwrap();
+        assert!(config.trigger.is_none());
+        assert!(!requires_confirmation(&config));
     }
 }
