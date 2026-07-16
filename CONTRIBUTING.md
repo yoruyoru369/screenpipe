@@ -208,6 +208,14 @@ before submitting a pull request, run all the tests to ensure nothing has broken
 cargo test
 ```
 
+on macOS, three clipboard round-trip tests mutate the system clipboard and are
+ignored by the default suite. run them from an interactive GUI session and
+serially so the tests do not race over the system clipboard:
+
+```bash
+cargo test -p screenpipe-a11y platform::macos::tests::test_get_clipboard_ -- --ignored --test-threads=1
+```
+
 ## other hacks
 
 ### running dev + prod in the same time
