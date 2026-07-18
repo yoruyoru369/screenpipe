@@ -940,6 +940,10 @@ impl SCServer {
                 .route("/:id", axum::routing::get(crate::pipes_api::get_pipe))
                 .route("/:id", axum::routing::delete(crate::pipes_api::delete_pipe))
                 .route(
+                    "/:id/memory",
+                    axum::routing::get(crate::pipes_api::get_pipe_memory),
+                )
+                .route(
                     "/:id/enable",
                     axum::routing::post(crate::pipes_api::enable_pipe),
                 )

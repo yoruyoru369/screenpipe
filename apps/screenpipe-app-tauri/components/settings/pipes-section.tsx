@@ -602,6 +602,22 @@ interface PipeStatus {
   source_slug?: string;
   installed_version?: number;
   locally_modified?: boolean;
+  memory: PipeMemoryMetadata;
+}
+
+interface PipeMemoryMetadata {
+  exists: boolean;
+  size_bytes: number;
+  line_count: number;
+  updated_at: string | null;
+  over_limit: boolean;
+}
+
+interface PipeMemoryState extends PipeMemoryMetadata {
+  content: string;
+  loading: boolean;
+  loaded: boolean;
+  error?: string;
 }
 
 interface PipeRunLog {
@@ -1053,6 +1069,7 @@ export function PipesSection() {
   const [runningPipe, setRunningPipe] = useState<string | null>(null);
   const [stoppingPipe, setStoppingPipe] = useState<string | null>(null);
   const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
+  const [pipeMemories, setPipeMemories] = useState<Record<string, PipeMemoryState>>({});
   const [saveStatus, setSaveStatus] = useState<Record<string, "saving" | "saved" | "error">>({});
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const [refreshing, setRefreshing] = useState(false);
@@ -1225,6 +1242,66 @@ export function PipesSection() {
 
   const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
   const isRemote = !!selectedDevice;
+
+  useEffect(() => {
+    setPipeMemories({});
+  }, [selectedDevice]);
+
+  const loadPipeMemory = async (pipeName: string) => {
+    const current = pipeMemories[pipeName];
+    if (current?.loading || current?.loaded) return;
+
+    setPipeMemories((previous) => ({
+      ...previous,
+      [pipeName]: {
+        exists: false,
+        size_bytes: 0,
+        line_count: 0,
+        updated_at: null,
+        over_limit: false,
+        content: "",
+        loaded: false,
+        loading: true,
+      },
+    }));
+
+    try {
+      const encodedName = encodeURIComponent(pipeName);
+      const endpoint = isRemote
+        ? `${apiBase}/pipes/${encodedName}/memory`
+        : `/pipes/${encodedName}/memory`;
+      const response = await localFetch(endpoint);
+      const payload = await response.json();
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error || `memory api returned ${response.status}`);
+      }
+      setPipeMemories((previous) => ({
+        ...previous,
+        [pipeName]: {
+          ...payload.data,
+          loaded: true,
+          loading: false,
+        },
+      }));
+    } catch (error) {
+      setPipeMemories((previous) => ({
+        ...previous,
+        [pipeName]: {
+          ...(previous[pipeName] ?? {
+            exists: false,
+            size_bytes: 0,
+            line_count: 0,
+            updated_at: null,
+            over_limit: false,
+            content: "",
+          }),
+          loaded: false,
+          loading: false,
+          error: error instanceof Error ? error.message : "failed to load memory",
+        },
+      }));
+    }
+  };
 
   const fetchPipes = useCallback(async () => {
     try {
@@ -3096,6 +3173,49 @@ export function PipesSection() {
 
                       {/* ═══ ADVANCED TAB ═══ */}
                       <TabsContent value="advanced" className="mt-3 space-y-3">
+                      <details
+                        className="border"
+                        onToggle={(event) => {
+                          if (event.currentTarget.open) {
+                            void loadPipeMemory(pipe.config.name);
+                          }
+                        }}
+                      >
+                        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium">
+                          <span>Memory</span>
+                          <span className="text-[11px] font-normal text-muted-foreground">
+                            {pipe.memory.exists
+                              ? `${pipe.memory.line_count} lines · ${pipe.memory.size_bytes} bytes`
+                              : "not created"}
+                          </span>
+                        </summary>
+                        <div className="space-y-2 border-t px-3 py-3">
+                          {(pipe.memory.over_limit || pipeMemories[pipe.config.name]?.over_limit) && (
+                            <div className="flex items-start gap-2 border border-amber-500/40 bg-amber-500/5 px-2 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+                              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                              memory.md exceeds 150 lines or 8 KB. Existing content was preserved; review it before adding more.
+                            </div>
+                          )}
+                          {pipeMemories[pipe.config.name]?.loading ? (
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" /> loading memory...
+                            </div>
+                          ) : pipeMemories[pipe.config.name]?.error ? (
+                            <p className="text-xs text-destructive">
+                              {pipeMemories[pipe.config.name]?.error}
+                            </p>
+                          ) : pipeMemories[pipe.config.name]?.content ? (
+                            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words border bg-muted/20 p-2 text-[11px]">
+                              {pipeMemories[pipe.config.name]?.content}
+                            </pre>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              No memory yet. Durable lessons will appear here after a pipe learns one.
+                            </p>
+                          )}
+                        </div>
+                      </details>
+
                       {/* Notification API permission */}
                       <div className="flex items-center justify-between gap-3 border px-3 py-2.5">
                         <div className="min-w-0">

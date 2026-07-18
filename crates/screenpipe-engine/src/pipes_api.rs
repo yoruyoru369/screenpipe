@@ -8,6 +8,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use screenpipe_connect::{connections, mcp_servers};
 use screenpipe_core::pipes::{
@@ -107,6 +108,36 @@ pub async fn get_pipe(State(pm): State<SharedPipeManager>, Path(id): Path<String
     match mgr.get_pipe(&id).await {
         Some(pipe) => Json(json!({ "data": pipe })),
         None => Json(json!({ "error": format!("pipe '{}' not found", id) })),
+    }
+}
+
+/// GET /pipes/:id/memory — lazily read up to 8 KB from memory.md.
+pub async fn get_pipe_memory(
+    State(pm): State<SharedPipeManager>,
+    Path(id): Path<String>,
+) -> Response {
+    let mgr = pm.lock().await;
+    if let Err(error) = mgr.reload_pipes().await {
+        tracing::warn!("failed to reload pipes from disk: {}", error);
+    }
+
+    match mgr.read_pipe_memory(&id).await {
+        Ok(Some(memory)) => (StatusCode::OK, Json(json!({ "data": memory }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("pipe '{}' not found", id) })),
+        )
+            .into_response(),
+        Err(error) if error.to_string() == "invalid pipe name" => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid pipe name" })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("failed to read pipe memory: {error}") })),
+        )
+            .into_response(),
     }
 }
 
@@ -440,7 +471,7 @@ mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use axum::Router;
     use screenpipe_core::agents::{
         install_spawned_pid, AgentExecutor, AgentOutput, ExecutionHandle, SharedPid,
@@ -610,7 +641,74 @@ mod tests {
     fn test_router(pm: SharedPipeManager) -> Router {
         Router::new()
             .route("/pipes/:id/stop", post(stop_pipe))
+            .route("/pipes/:id/memory", get(get_pipe_memory))
             .with_state(pm)
+    }
+
+    #[tokio::test]
+    async fn memory_api_returns_metadata_content_empty_state_and_not_found() {
+        let dir = TempDir::new().unwrap();
+        write_test_pipe(&dir, "with-memory");
+        write_test_pipe(&dir, "empty-memory");
+        std::fs::write(
+            dir.path().join("with-memory/memory.md"),
+            "# memory\n- durable lesson\n",
+        )
+        .unwrap();
+        let pm = std::sync::Arc::new(Mutex::new(PipeManager::new(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            None,
+            3030,
+        )));
+        pm.lock().await.load_pipes().await.unwrap();
+        let app = test_router(pm);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/pipes/with-memory/memory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(payload["data"]["exists"], true);
+        assert_eq!(payload["data"]["line_count"], 2);
+        assert_eq!(payload["data"]["content"], "# memory\n- durable lesson\n");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/pipes/empty-memory/memory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(payload["data"]["exists"], false);
+        assert_eq!(payload["data"]["content"], "");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipes/missing/memory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     async fn stop_payload(app: Router, pipe_name: &str) -> Value {

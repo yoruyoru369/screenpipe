@@ -16,6 +16,7 @@ pub mod custom_triggers;
 pub mod favorites;
 pub mod mcp_access;
 pub mod permissions;
+pub mod pipe_memory;
 pub mod preset_fallback;
 pub mod sync;
 pub(crate) mod trajectory;
@@ -1085,6 +1086,8 @@ pub struct PipeStatus {
     /// Whether the user has edited pipe.md since install (source_hash mismatch).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locally_modified: Option<bool>,
+    /// Metadata-only summary for this pipe's optional memory.md.
+    pub memory: pipe_memory::PipeMemoryMetadata,
 }
 
 // ---------------------------------------------------------------------------
@@ -2221,6 +2224,32 @@ impl PipeManager {
         &self.pipes_dir
     }
 
+    /// Read at most 8 KB from a loaded pipe's memory.md.
+    ///
+    /// Pipe names must be one plain path component. A missing pipe returns
+    /// `Ok(None)`; a pipe without memory.md returns an empty document.
+    pub async fn read_pipe_memory(
+        &self,
+        name: &str,
+    ) -> Result<Option<pipe_memory::PipeMemoryDocument>> {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\')
+            || Path::new(name).components().count() != 1
+        {
+            return Err(anyhow!("invalid pipe name"));
+        }
+
+        if !self.pipes.lock().await.contains_key(name) {
+            return Ok(None);
+        }
+
+        let path = self.pipes_dir.join(name).join("memory.md");
+        pipe_memory::read_document(&path).map(Some)
+    }
+
     /// Set extra context that gets appended to every pipe prompt.
     /// Used by the server to inject connected integrations info.
     pub fn set_extra_context(&mut self, ctx: String) {
@@ -2528,6 +2557,9 @@ impl PipeManager {
                         source_slug: config.source_slug.clone(),
                         installed_version: config.installed_version,
                         locally_modified,
+                        memory: pipe_memory::metadata_for_path(
+                            &self.pipes_dir.join(name).join("memory.md"),
+                        ),
                     };
                     (name.clone(), status)
                 })
@@ -2702,6 +2734,9 @@ impl PipeManager {
                     source_slug: config.source_slug.clone(),
                     installed_version: config.installed_version,
                     locally_modified,
+                    memory: pipe_memory::metadata_for_path(
+                        &self.pipes_dir.join(name).join("memory.md"),
+                    ),
                 }
             })
         }?;
@@ -5953,6 +5988,19 @@ pub fn parse_frontmatter(content: &str) -> Result<(PipeConfig, String)> {
 /// caller can skip the disk write otherwise. Idempotent: running it on
 /// already-fixed content is a no-op.
 fn migrate_builtin_pipe_text(name: &str, original: &str) -> Option<String> {
+    let is_memory_builtin = matches!(
+        name,
+        "ai-habits"
+            | "ai-prompt-journal"
+            | "automate-my-work"
+            | "day-recap"
+            | "meeting-summary"
+            | "missed-todos"
+            | "standup-update"
+            | "time-breakdown"
+            | "video-export"
+    );
+
     // (old, new) fragment swaps per builtin pipe.
     let replacements: &[(&str, &str)] = match name {
         // the meeting-summary pipe shipped instructions to PATCH
@@ -5963,10 +6011,13 @@ fn migrate_builtin_pipe_text(name: &str, original: &str) -> Option<String> {
             "-X PATCH \"http://localhost:3030/meetings/",
             "-X PUT \"http://localhost:3030/meetings/",
         )],
-        _ => return None,
+        _ => &[],
     };
 
     let mut updated = original.to_string();
+    if is_memory_builtin {
+        updated = updated.replace(pipe_memory::LEGACY_MEMORY_BLOCK, "");
+    }
     for (old, new) in replacements {
         updated = updated.replace(old, new);
     }
@@ -6066,6 +6117,8 @@ fn render_pipe_system_prompt(
     sys.push_str(&format!(
         "CRITICAL: You ARE this pipe. You are already running inside it. NEVER run `screenpipe pipe run` — that would create a recursive duplicate. Execute the task directly using the tools available to you (bash, file I/O, HTTP requests, etc.).\n\nOS: {os}\nOutput directory: ./output/\nScreenpipe API: http://localhost:{api_port}{api_auth_note}\nPrefer bun/TypeScript for scripts. Python may not be installed.\nSend notifications via POST http://localhost:11435/notify with {{\"title\": \"...\", \"body\": \"...\"}}. Body supports markdown. File links MUST use absolute paths (e.g. [View log](/Users/me/file.md)), never relative paths like ./output/file.md — relative paths break the notification link handler.\nNotifications support action buttons (`\"actions\": [...]`) so you can ASK the user instead of sending a passive FYI — when a human decision or follow-up would help (send/share/draft/fix/dig deeper), attach actions rather than doing nothing or acting unilaterally. Schema + examples: screenpipe-api skill, Notifications section.\n\n"
     ));
+    sys.push_str(pipe_memory::PIPE_MEMORY_SYSTEM_PROMPT);
+    sys.push('\n');
     sys.push_str(body);
 
     if let Some(ctx) = connections_context {
@@ -7323,6 +7376,47 @@ mod tests {
         // other builtins and unrelated content are left alone.
         assert!(migrate_builtin_pipe_text("day-recap", stale).is_none());
         assert!(migrate_builtin_pipe_text("meeting-summary", "no api calls here").is_none());
+    }
+
+    #[test]
+    fn migrate_builtin_pipe_removes_only_legacy_memory_instructions() {
+        let stale = format!(
+            "prefix\n{}\n\ncustom user instructions",
+            pipe_memory::LEGACY_MEMORY_BLOCK
+        );
+        let fixed = migrate_builtin_pipe_text("automate-my-work", &stale)
+            .expect("legacy memory block should migrate");
+        assert!(!fixed.contains("Continuous improvement (memory)"));
+        assert!(fixed.contains("prefix"));
+        assert!(fixed.contains("custom user instructions"));
+        assert!(migrate_builtin_pipe_text("automate-my-work", &fixed).is_none());
+        assert!(migrate_builtin_pipe_text("custom-pipe", &stale).is_none());
+    }
+
+    #[tokio::test]
+    async fn pipe_memory_metadata_and_read_reject_path_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipe_dir = temp.path().join("demo");
+        std::fs::create_dir_all(&pipe_dir).unwrap();
+        std::fs::write(
+            pipe_dir.join("pipe.md"),
+            "---\nschedule: manual\nenabled: true\n---\nbody",
+        )
+        .unwrap();
+        std::fs::write(pipe_dir.join("memory.md"), "# memory\n- durable lesson\n").unwrap();
+
+        let manager = PipeManager::new(temp.path().to_path_buf(), HashMap::new(), None, 3030);
+        manager.load_pipes().await.unwrap();
+
+        let status = manager.get_pipe("demo").await.unwrap();
+        assert!(status.memory.exists);
+        assert_eq!(status.memory.line_count, 2);
+        let document = manager.read_pipe_memory("demo").await.unwrap().unwrap();
+        assert_eq!(document.content, "# memory\n- durable lesson\n");
+
+        assert!(manager.read_pipe_memory("../demo").await.is_err());
+        assert!(manager.read_pipe_memory("demo/../../secret").await.is_err());
+        assert!(manager.read_pipe_memory("missing").await.unwrap().is_none());
     }
 
     #[test]
@@ -8801,6 +8895,17 @@ mod tests {
     }
 
     #[test]
+    fn test_system_prompt_injects_shared_memory_policy_once() {
+        let sys = render_pipe_system_prompt("task body", 3030, None, None, None);
+        assert_eq!(sys.matches(pipe_memory::MEMORY_PROMPT_MARKER).count(), 1);
+        assert!(sys.contains("read `./memory.md`"));
+        assert!(sys.contains("Append-only"));
+        assert!(sys.contains("150 lines and 8 KB"));
+        assert!(sys.contains("do not auto-delete or curate it"));
+        assert!(!sys.contains("drop the oldest low-value lessons"));
+    }
+
+    #[test]
     fn test_system_prompt_emits_auth_note_when_local_api_key_present() {
         // Pass the key explicitly — the renderer must not depend on parent
         // process env (which is empty in tests and was the root cause of the
@@ -8904,10 +9009,12 @@ mod tests {
             source_slug: None,
             installed_version: None,
             locally_modified: None,
+            memory: pipe_memory::PipeMemoryMetadata::default(),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"current_execution_id\":99"));
         assert!(json.contains("\"consecutive_failures\":5"));
+        assert!(json.contains("\"memory\""));
     }
 
     // -- truncate_string ----------------------------------------------------
