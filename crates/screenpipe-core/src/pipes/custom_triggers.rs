@@ -17,19 +17,18 @@
 //! The matcher polls the local `/search` API on a slow cadence and only runs
 //! scoring when the (app, window) activity set actually changed — so cost is
 //! event-gated in practice: an idle screen costs one local HTTP call per tick
-//! and nothing else. When a trigger scores above [`MIN_SCORE`] against a
+//! and nothing else. When a trigger clears its length-scaled threshold against a
 //! recent activity entry, the matcher writes `.trigger-context.json` into the
 //! pipe's directory (so the pipe prompt can see why it fired) and emits a
 //! `custom_trigger` event addressed to that pipe. The scheduler only
 //! *matches + runs*; they meet at the bus — same split as
 //! [`super::connection_triggers`].
 //!
-//! Matching is fully local and deterministic: a hybrid of token containment
-//! (space-separated scripts), character-bigram containment (CJK — Japanese
-//! has no token boundaries), and whole-phrase substring. This is the v1
-//! scorer; the scoring entry point [`score_trigger`] is deliberately a pure
-//! function so an embedding backend can replace it without touching the
-//! matcher loop (see the hybrid-trigger follow-up).
+//! Matching is always local. `lexical` uses deterministic token containment,
+//! character-bigram containment (CJK — Japanese has no token boundaries), and
+//! whole-phrase substring. `hybrid` adds a pinned local Model2Vec model when it
+//! is available and fails open to the lexical decision while the model is
+//! missing, loading, offline, or corrupt.
 //!
 //! Guardrails:
 //! - **Per-(pipe, trigger) cooldown** ([`FIRE_COOLDOWN_SECS`]) — a trigger
@@ -40,11 +39,17 @@
 //!   entry, keeping each tick's work bounded.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
+use model2vec_rs::model::StaticModel;
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
+
+use super::TriggerMatcher;
 
 /// Poll cadence. Scoring only runs when the activity set changed.
 pub const POLL_INTERVAL_SECS: u64 = 30;
@@ -52,8 +57,13 @@ pub const POLL_INTERVAL_SECS: u64 = 30;
 /// Suppress re-firing the same (pipe, trigger) pair for this long.
 pub const FIRE_COOLDOWN_SECS: u64 = 300;
 
-/// Minimum score for a trigger to fire.
-pub const MIN_SCORE: f32 = 0.5;
+/// Pinned official multilingual Model2Vec revision. Models are never bundled;
+/// hybrid mode lazily downloads these files into the local screenpipe cache.
+pub const MODEL_REPOSITORY: &str = "minishlab/potion-multilingual-128M";
+pub const MODEL_REVISION: &str = "73908c3438cf03b6a01bcb9611d62b23d0726f08";
+
+const MODEL_FILES: &[&str] = &["config.json", "model.safetensors", "tokenizer.json"];
+const MODEL_RETRY_SECS: u64 = 300;
 
 /// Cap on OCR/UI text considered per activity entry.
 pub const MAX_TEXT_PER_ENTRY: usize = 600;
@@ -155,6 +165,38 @@ fn char_bigrams(s: &str) -> HashSet<(char, char)> {
     chars.windows(2).map(|w| (w[0], w[1])).collect()
 }
 
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af)
+}
+
+/// Number of signal-bearing units in a trigger. Space-delimited scripts use
+/// stopword-filtered tokens; CJK uses character bigrams.
+pub fn information_units(trigger: &str) -> usize {
+    let normalized = normalize(trigger);
+    let content = strip_trigger_scaffolding(&normalized);
+    let token_count = token_set(content).len();
+    let cjk: String = content.chars().filter(|c| is_cjk(*c)).collect();
+    let cjk_bigram_count = char_bigrams(&cjk).len();
+    token_count.max(cjk_bigram_count)
+}
+
+pub fn lexical_threshold(trigger: &str) -> f32 {
+    match information_units(trigger) {
+        0..=2 => 0.85,
+        3..=4 => 0.70,
+        _ => 0.50,
+    }
+}
+
+pub fn semantic_threshold(trigger: &str) -> f32 {
+    match information_units(trigger) {
+        0..=2 => 0.86,
+        3..=4 => 0.80,
+        _ => 0.72,
+    }
+}
+
 /// Score how well `activity` covers `trigger`, in [0, 1].
 ///
 /// Containment is asymmetric on purpose: the trigger is short and the
@@ -196,6 +238,47 @@ pub fn score_trigger(trigger: &str, activity: &str) -> f32 {
     token_score.max(bigram_score)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchDecision {
+    pub matched: bool,
+    pub score: f32,
+    pub matcher: &'static str,
+    pub threshold: f32,
+}
+
+/// Apply length-scaled thresholds. `semantic_score=None` is the expected
+/// fail-open path while the hybrid model is missing, loading, offline, or
+/// corrupt: lexical matching remains available and no cloud call is made.
+pub fn evaluate_trigger(
+    trigger: &str,
+    activity: &str,
+    matcher: TriggerMatcher,
+    semantic_score: Option<f32>,
+) -> MatchDecision {
+    let lexical = score_trigger(trigger, activity);
+    let lexical_min = lexical_threshold(trigger);
+    if matcher == TriggerMatcher::Lexical || semantic_score.is_none() {
+        return MatchDecision {
+            matched: lexical >= lexical_min,
+            score: lexical,
+            matcher: "lexical",
+            threshold: lexical_min,
+        };
+    }
+    let semantic = semantic_score.unwrap_or_default().clamp(0.0, 1.0);
+    let semantic_min = semantic_threshold(trigger);
+    MatchDecision {
+        matched: lexical >= lexical_min || semantic >= semantic_min,
+        score: lexical.max(semantic),
+        matcher: "hybrid",
+        threshold: if lexical >= semantic {
+            lexical_min
+        } else {
+            semantic_min
+        },
+    }
+}
+
 /// Best (score, entry index) of a trigger across recent activity entries.
 pub fn best_match(trigger: &str, entries: &[ActivityEntry]) -> Option<(f32, usize)> {
     entries
@@ -204,6 +287,149 @@ pub fn best_match(trigger: &str, entries: &[ActivityEntry]) -> Option<(f32, usiz
         .map(|(i, e)| (score_trigger(trigger, &e.combined()), i))
         .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
         .filter(|(s, _)| *s > 0.0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipeTriggerSpec {
+    pub pipe: String,
+    pub triggers: Vec<String>,
+    pub matcher: TriggerMatcher,
+}
+
+struct SemanticBackend {
+    model: Option<Arc<StaticModel>>,
+    loading: Option<tokio::task::JoinHandle<Result<Arc<StaticModel>, String>>>,
+    retry_after: Option<Instant>,
+}
+
+impl Default for SemanticBackend {
+    fn default() -> Self {
+        Self {
+            model: None,
+            loading: None,
+            retry_after: None,
+        }
+    }
+}
+
+impl SemanticBackend {
+    async fn prepare(&mut self) -> Option<Arc<StaticModel>> {
+        if let Some(model) = &self.model {
+            return Some(model.clone());
+        }
+        if self.loading.as_ref().is_some_and(|task| task.is_finished()) {
+            let task = self
+                .loading
+                .take()
+                .expect("finished model task disappeared");
+            match task.await {
+                Ok(Ok(model)) => {
+                    info!("custom trigger: multilingual semantic model ready");
+                    self.model = Some(model.clone());
+                    self.retry_after = None;
+                    return Some(model);
+                }
+                Ok(Err(error)) => warn!(
+                    "custom trigger: semantic model unavailable; using lexical matcher: {}",
+                    error
+                ),
+                Err(error) => warn!(
+                    "custom trigger: semantic model loader stopped; using lexical matcher: {}",
+                    error
+                ),
+            }
+            self.retry_after = Some(Instant::now() + Duration::from_secs(MODEL_RETRY_SECS));
+        }
+        if self.loading.is_none()
+            && self
+                .retry_after
+                .is_none_or(|retry_after| Instant::now() >= retry_after)
+        {
+            self.loading = Some(tokio::spawn(load_semantic_model()));
+            info!("custom trigger: preparing local multilingual semantic model");
+        }
+        None
+    }
+}
+
+fn model_cache_dir() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| {
+            home.join(".screenpipe")
+                .join("models")
+                .join("potion-multilingual-128M")
+                .join(MODEL_REVISION)
+        })
+        .ok_or_else(|| "home directory is unavailable".to_string())
+}
+
+async fn download_model_file(cache: &Path, file_name: &str) -> Result<(), String> {
+    let destination = cache.join(file_name);
+    if destination.is_file() {
+        return Ok(());
+    }
+    let url =
+        format!("https://huggingface.co/{MODEL_REPOSITORY}/resolve/{MODEL_REVISION}/{file_name}");
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("model download returned {}", response.status()));
+    }
+    let temporary = cache.join(format!(".{file_name}.{}.partial", uuid::Uuid::new_v4()));
+    let mut output = tokio::fs::File::create(&temporary)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        output
+            .write_all(&chunk.map_err(|error| error.to_string())?)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    output.sync_all().await.map_err(|error| error.to_string())?;
+    drop(output);
+    tokio::fs::rename(&temporary, &destination)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn load_semantic_model() -> Result<Arc<StaticModel>, String> {
+    let cache = model_cache_dir()?;
+    tokio::fs::create_dir_all(&cache)
+        .await
+        .map_err(|error| error.to_string())?;
+    for file_name in MODEL_FILES {
+        download_model_file(&cache, file_name).await?;
+    }
+    tokio::task::spawn_blocking(move || {
+        StaticModel::from_pretrained(cache.to_string_lossy().as_ref(), None, None, None)
+            .map(Arc::new)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn semantic_similarity(model: &StaticModel, trigger: &str, activity: &str) -> Option<f32> {
+    let embeddings = model.encode(&[trigger.to_string(), activity.to_string()]);
+    if embeddings.len() != 2 || embeddings[0].len() != embeddings[1].len() {
+        return None;
+    }
+    let (mut dot, mut left, mut right) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for (a, b) in embeddings[0].iter().zip(&embeddings[1]) {
+        dot += a * b;
+        left += a * a;
+        right += b * b;
+    }
+    let denominator = left.sqrt() * right.sqrt();
+    (denominator > 0.0).then(|| (dot / denominator).clamp(0.0, 1.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +453,9 @@ impl CooldownMap {
             _ => {
                 self.fired.insert(key, now);
                 // Bound the map — entries past cooldown are dead weight.
-                self.fired
-                    .retain(|_, t| now.duration_since(*t) < Duration::from_secs(FIRE_COOLDOWN_SECS));
+                self.fired.retain(|_, t| {
+                    now.duration_since(*t) < Duration::from_secs(FIRE_COOLDOWN_SECS)
+                });
                 true
             }
         }
@@ -310,7 +537,10 @@ async fn fetch_recent_activity(
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
     }
-    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!(
@@ -333,25 +563,25 @@ async fn fetch_recent_activity(
 // Context file + event emission
 // ---------------------------------------------------------------------------
 
-/// Cap on matched OCR text persisted to disk — the context file is about
-/// *why* the pipe fired, not a transcript. Screen content on disk is a
-/// liability (pipe dirs get synced/committed), so keep it minimal.
-const MAX_CONTEXT_TEXT: usize = 200;
-
-fn write_trigger_context(pipe_dir: &Path, trigger: &str, score: f32, entry: &ActivityEntry) {
+fn write_trigger_context(
+    pipe_dir: &Path,
+    trigger: &str,
+    score: f32,
+    matcher: &str,
+    entry: &ActivityEntry,
+) {
     if !pipe_dir.is_dir() {
         return;
     }
-    let text: String = entry.text.chars().take(MAX_CONTEXT_TEXT).collect();
     let ctx = serde_json::json!({
         "kind": "custom_trigger",
         "trigger": trigger,
         "score": score,
+        "matcher": matcher,
         "detected_at": chrono::Utc::now().to_rfc3339(),
         "matched_activity": {
             "app": entry.app,
             "window": entry.window,
-            "text": text,
         },
     });
     if let Ok(s) = serde_json::to_string_pretty(&ctx) {
@@ -359,11 +589,18 @@ fn write_trigger_context(pipe_dir: &Path, trigger: &str, score: f32, entry: &Act
     }
 }
 
-fn emit_custom_trigger(pipe: &str, trigger: &str, score: f32, entry: &ActivityEntry) {
+fn emit_custom_trigger(
+    pipe: &str,
+    trigger: &str,
+    score: f32,
+    matcher: &str,
+    entry: &ActivityEntry,
+) {
     let event = serde_json::json!({
         "pipe": pipe,
         "trigger": trigger,
         "score": score,
+        "matcher": matcher,
         "app": entry.app,
         "window": entry.window,
     });
@@ -391,10 +628,11 @@ pub struct MatcherState {
     last_config_hash: u64,
     /// One-time warn latch for fetch failures (e.g. local API auth).
     warned_fetch_failure: bool,
+    semantic: SemanticBackend,
 }
 
 /// Hash of the (pipe, triggers) configuration set.
-fn config_hash(pipe_triggers: &[(String, Vec<String>)]) -> u64 {
+fn config_hash(pipe_triggers: &[PipeTriggerSpec]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
@@ -411,7 +649,7 @@ pub async fn poll_once(
     api_key: Option<&str>,
     pipes_dir: &Path,
     // (pipe_name, custom triggers) for enabled pipes only
-    pipe_triggers: &[(String, Vec<String>)],
+    pipe_triggers: &[PipeTriggerSpec],
     state: &mut MatcherState,
 ) {
     if pipe_triggers.is_empty() {
@@ -443,21 +681,51 @@ pub async fn poll_once(
     }
     state.last_activity_hash = hash;
 
-    for (pipe, triggers) in pipe_triggers {
+    let needs_semantic = pipe_triggers
+        .iter()
+        .any(|spec| spec.matcher == TriggerMatcher::Hybrid);
+    let semantic_model = if needs_semantic {
+        state.semantic.prepare().await
+    } else {
+        None
+    };
+
+    for spec in pipe_triggers {
+        let pipe = &spec.pipe;
+        let triggers = &spec.triggers;
         // Score all of this pipe's triggers, keep the single best — the pipe
         // runs once per firing anyway, and the context file must describe the
         // trigger that actually caused the run, not the last one scored.
         let best = triggers
             .iter()
-            .filter_map(|t| best_match(t, &entries).map(|(score, idx)| (t, score, idx)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let Some((trigger, score, idx)) = best else {
+            .flat_map(|trigger| {
+                let semantic_model = semantic_model.clone();
+                let matcher = spec.matcher;
+                entries.iter().enumerate().map(move |(idx, entry)| {
+                    let semantic_score = semantic_model.as_ref().and_then(|model| {
+                        (matcher == TriggerMatcher::Hybrid)
+                            .then(|| semantic_similarity(model, trigger, &entry.combined()))
+                            .flatten()
+                    });
+                    (
+                        trigger,
+                        evaluate_trigger(trigger, &entry.combined(), matcher, semantic_score),
+                        idx,
+                    )
+                })
+            })
+            .max_by(|a, b| {
+                a.1.score
+                    .partial_cmp(&b.1.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        let Some((trigger, decision, idx)) = best else {
             continue;
         };
-        if score < MIN_SCORE {
+        if !decision.matched {
             debug!(
                 "custom trigger: best score {:.2} (< {:.2}) for pipe '{}' ('{}')",
-                score, MIN_SCORE, pipe, trigger
+                decision.score, decision.threshold, pipe, trigger
             );
             continue;
         }
@@ -471,10 +739,16 @@ pub async fn poll_once(
         let entry = &entries[idx];
         info!(
             "custom trigger: '{}' matched activity (app='{}', window='{}') with score {:.2} — firing pipe '{}'",
-            trigger, entry.app, entry.window, score, pipe
+            trigger, entry.app, entry.window, decision.score, pipe
         );
-        write_trigger_context(&pipes_dir.join(pipe), trigger, score, entry);
-        emit_custom_trigger(pipe, trigger, score, entry);
+        write_trigger_context(
+            &pipes_dir.join(pipe),
+            trigger,
+            decision.score,
+            decision.matcher,
+            entry,
+        );
+        emit_custom_trigger(pipe, trigger, decision.score, decision.matcher, entry);
     }
 }
 
@@ -493,11 +767,24 @@ mod tests {
     #[test]
     fn english_trigger_matches_app_activity() {
         let entries = vec![
-            entry("Slack", "#general | acme", "alice: deploy is done"),
+            entry(
+                "Slack",
+                "#general | acme",
+                "open slack to review the deploy",
+            ),
             entry("Arc", "Hacker News", "Show HN: something"),
         ];
         let (score, idx) = best_match("when I open slack", &entries).unwrap();
-        assert!(score >= MIN_SCORE, "score {score} should clear threshold");
+        assert!(
+            evaluate_trigger(
+                "when I open slack",
+                &entries[idx].combined(),
+                TriggerMatcher::Lexical,
+                None,
+            )
+            .matched,
+            "score {score} should clear threshold"
+        );
         assert_eq!(idx, 0);
     }
 
@@ -507,7 +794,16 @@ mod tests {
         let score = best_match("when I open an invoice email", &entries)
             .map(|(s, _)| s)
             .unwrap_or(0.0);
-        assert!(score < MIN_SCORE, "score {score} should stay below threshold");
+        assert!(
+            !evaluate_trigger(
+                "when I open an invoice email",
+                &entries[0].combined(),
+                TriggerMatcher::Lexical,
+                None,
+            )
+            .matched,
+            "score {score} should stay below threshold"
+        );
     }
 
     #[test]
@@ -519,7 +815,10 @@ mod tests {
             "件名: 請求書のご送付 2026年7月分 株式会社サンプル",
         )];
         let (score, _) = best_match("請求書メールを開いたら", &entries).unwrap();
-        assert!(score >= MIN_SCORE, "score {score} should clear threshold");
+        assert!(
+            score >= lexical_threshold("請求書メールを開いたら"),
+            "score {score} should clear threshold"
+        );
     }
 
     #[test]
@@ -546,14 +845,89 @@ mod tests {
         let score = best_match("請求書メールを開いたら", &entries)
             .map(|(s, _)| s)
             .unwrap_or(0.0);
-        assert!(score < MIN_SCORE, "score {score} should stay below threshold");
+        assert!(
+            score < lexical_threshold("請求書メールを開いたら"),
+            "score {score} should stay below threshold"
+        );
     }
 
     #[test]
     fn whole_phrase_substring_is_definitive() {
-        let entries = vec![entry("Notes", "memo", "reminder: file expense report today")];
+        let entries = vec![entry(
+            "Notes",
+            "memo",
+            "reminder: file expense report today",
+        )];
         let (score, _) = best_match("expense report", &entries).unwrap();
         assert_eq!(score, 1.0);
+    }
+
+    #[test]
+    fn thresholds_scale_with_information_units() {
+        assert_eq!(lexical_threshold("when I open slack"), 0.85);
+        assert_eq!(lexical_threshold("review pull request"), 0.70);
+        assert_eq!(
+            lexical_threshold("review pull request before production deploy"),
+            0.50
+        );
+        assert_eq!(semantic_threshold("when I open slack"), 0.86);
+        assert_eq!(semantic_threshold("review pull request"), 0.80);
+        assert_eq!(
+            semantic_threshold("review pull request before production deploy"),
+            0.72
+        );
+    }
+
+    #[test]
+    fn short_trigger_does_not_fire_on_partial_overlap() {
+        let decision = evaluate_trigger(
+            "open slack",
+            "Slack notifications are disabled",
+            TriggerMatcher::Lexical,
+            None,
+        );
+        assert!(decision.score < decision.threshold);
+        assert!(!decision.matched);
+    }
+
+    #[test]
+    fn hybrid_accepts_japanese_paraphrase_from_semantic_backend() {
+        let decision = evaluate_trigger(
+            "請求書メールを確認したら",
+            "Mail 受信トレイ 取引先から届いたインボイスを確認",
+            TriggerMatcher::Hybrid,
+            Some(0.91),
+        );
+        assert!(decision.matched);
+        assert_eq!(decision.matcher, "hybrid");
+        assert_eq!(decision.score, 0.91);
+    }
+
+    #[test]
+    fn hybrid_without_model_fails_open_to_lexical() {
+        let decision = evaluate_trigger(
+            "expense report",
+            "expense report is open",
+            TriggerMatcher::Hybrid,
+            None,
+        );
+        assert!(decision.matched);
+        assert_eq!(decision.matcher, "lexical");
+        assert_eq!(decision.score, 1.0);
+    }
+
+    #[test]
+    fn trigger_context_never_persists_ocr_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let activity = entry("Mail", "Inbox", "secret invoice body");
+        write_trigger_context(directory.path(), "invoice", 0.9, "hybrid", &activity);
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.path().join(TRIGGER_CONTEXT_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["matched_activity"]["app"], "Mail");
+        assert!(value["matched_activity"].get("text").is_none());
+        assert!(!value.to_string().contains("secret invoice body"));
     }
 
     #[test]
