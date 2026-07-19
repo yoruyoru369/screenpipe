@@ -55,6 +55,7 @@ screenpipe-vault = { path = "../screenpipe-vault", optional = true }
 screenpipe-sync = { path = "../screenpipe-sync", optional = true }
 
 once_cell = { workspace = true }
+model2vec-rs = { workspace = true }
 
 cron = "0.13.0"
 
