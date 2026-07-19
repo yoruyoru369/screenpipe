@@ -945,6 +945,14 @@ impl SCServer {
                     "/schedule/preview",
                     axum::routing::post(crate::pipes_api::preview_schedule),
                 )
+                .route(
+                    "/drafts/preview-from-sop",
+                    axum::routing::post(crate::pipes_api::preview_pipe_draft_from_sop),
+                )
+                .route(
+                    "/drafts/from-sop",
+                    axum::routing::post(crate::pipes_api::create_pipe_draft_from_sop),
+                )
                 .route("/:id", axum::routing::get(crate::pipes_api::get_pipe))
                 .route("/:id", axum::routing::delete(crate::pipes_api::delete_pipe))
                 .route(
