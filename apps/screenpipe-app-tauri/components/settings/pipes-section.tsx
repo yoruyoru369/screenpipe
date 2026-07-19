@@ -620,6 +620,18 @@ interface PipeMemoryState extends PipeMemoryMetadata {
   error?: string;
 }
 
+interface TeachStatus {
+  active: boolean;
+  recording: boolean;
+  session_id: string | null;
+  started_at: string | null;
+  elapsed_seconds: number;
+  event_count: number;
+  max_events: number;
+  max_seconds: number;
+  limit_reached: boolean;
+}
+
 interface PipeRunLog {
   pipe_name: string;
   started_at: string;
@@ -676,6 +688,16 @@ function formatDuration(ms: number): string {
   const mins = Math.floor(secs / 60);
   const remainSecs = secs % 60;
   return `${mins}:${String(remainSecs).padStart(2, "0")}`;
+}
+
+function formatTeachElapsed(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainder = safeSeconds % 60;
+  return [hours, minutes, remainder]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
 }
 
 /** Extract human-readable text from Pi JSON-mode stdout.
@@ -1070,6 +1092,9 @@ export function PipesSection() {
   const [stoppingPipe, setStoppingPipe] = useState<string | null>(null);
   const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
   const [pipeMemories, setPipeMemories] = useState<Record<string, PipeMemoryState>>({});
+  const [teachStatus, setTeachStatus] = useState<TeachStatus | null>(null);
+  const [teachBusy, setTeachBusy] = useState<"start" | "stop" | "cancel" | null>(null);
+  const [teachError, setTeachError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<Record<string, "saving" | "saved" | "error">>({});
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const [refreshing, setRefreshing] = useState(false);
@@ -1300,6 +1325,82 @@ export function PipesSection() {
           error: error instanceof Error ? error.message : "failed to load memory",
         },
       }));
+    }
+  };
+
+  const teachEndpoint = (suffix: string) =>
+    isRemote ? `${apiBase}/pipes/teach/${suffix}` : `/pipes/teach/${suffix}`;
+
+  const fetchTeachStatus = useCallback(async () => {
+    try {
+      const response = await localFetch(
+        isRemote ? `${apiBase}/pipes/teach/status` : "/pipes/teach/status"
+      );
+      const payload = await response.json();
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error || `teach status returned ${response.status}`);
+      }
+      setTeachStatus(payload.data);
+      setTeachError(null);
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "teach mode is unavailable");
+    }
+  }, [apiBase, isRemote]);
+
+  useEffect(() => {
+    void fetchTeachStatus();
+    const interval = window.setInterval(() => {
+      void fetchTeachStatus();
+    }, teachStatus?.active ? 1_000 : 10_000);
+    return () => window.clearInterval(interval);
+  }, [fetchTeachStatus, teachStatus?.active]);
+
+  const startTeachMode = async () => {
+    setTeachBusy("start");
+    setTeachError(null);
+    try {
+      const response = await localFetch(teachEndpoint("start"), { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || payload.error) throw new Error(payload.error || "failed to start teach mode");
+      setTeachStatus(payload.data);
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "failed to start teach mode");
+    } finally {
+      setTeachBusy(null);
+    }
+  };
+
+  const stopTeachMode = async () => {
+    setTeachBusy("stop");
+    setTeachError(null);
+    try {
+      const response = await localFetch(teachEndpoint("stop"), { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || payload.error) throw new Error(payload.error || "failed to stop teach mode");
+      setTeachStatus((previous) => previous ? { ...previous, active: false, recording: false } : null);
+      toast({
+        title: "SOPを作成しました",
+        description: `${payload.data?.title || "作業手順"}をArtifactsで確認できます。`,
+      });
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "failed to stop teach mode");
+    } finally {
+      setTeachBusy(null);
+    }
+  };
+
+  const cancelTeachMode = async () => {
+    setTeachBusy("cancel");
+    setTeachError(null);
+    try {
+      const response = await localFetch(teachEndpoint("cancel"), { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || payload.error) throw new Error(payload.error || "failed to cancel teach mode");
+      setTeachStatus((previous) => previous ? { ...previous, active: false, recording: false } : null);
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "failed to cancel teach mode");
+    } finally {
+      setTeachBusy(null);
     }
   };
 
@@ -2259,6 +2360,67 @@ export function PipesSection() {
           }}>
             {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
+          {!teachStatus?.active && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              onClick={() => void startTeachMode()}
+              disabled={teachBusy !== null}
+              data-testid="teach-mode-start"
+            >
+              {teachBusy === "start" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+              作業を教える
+            </Button>
+          )}
+        </div>
+      )}
+
+      {teachStatus?.active && (
+        <div className="flex flex-wrap items-center gap-3 border border-red-500/40 bg-red-500/5 px-3 py-2" data-testid="teach-mode-recording">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <span>{teachStatus.recording ? "記録中" : "記録上限に到達"}</span>
+              <span className="font-mono text-muted-foreground">
+                {formatTeachElapsed(teachStatus.elapsed_seconds)}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {teachStatus.event_count.toLocaleString()} / {teachStatus.max_events.toLocaleString()} events · キー入力内容、clipboard、tool引数・結果は保存しません
+            </p>
+          </div>
+          <Button
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => void stopTeachMode()}
+            disabled={teachBusy !== null}
+            data-testid="teach-mode-stop"
+          >
+            {teachBusy === "stop" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+            停止してSOPを作成
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => void cancelTeachMode()}
+            disabled={teachBusy !== null}
+            data-testid="teach-mode-cancel"
+          >
+            キャンセル
+          </Button>
+        </div>
+      )}
+
+      {teachError && (
+        <div className="flex items-start gap-2 border border-destructive/40 px-3 py-2 text-xs text-destructive" data-testid="teach-mode-error">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {teachError}
         </div>
       )}
 

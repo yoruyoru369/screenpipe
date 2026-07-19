@@ -21,6 +21,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::pipe_drafts::{
+    apply_edits_and_regate, preview_from_sop, serialize_disabled_draft, write_new_pipe_draft,
+    DraftEdits,
+};
+
 /// Shared pipe manager state.
 pub type SharedPipeManager = Arc<Mutex<PipeManager>>;
 
@@ -61,9 +66,127 @@ pub struct ListPipesQuery {
     pub execution_limit: Option<i32>,
 }
 
+#[derive(Deserialize)]
+pub struct SopDraftPreviewRequest {
+    pub sop: Value,
+    #[serde(default)]
+    pub draft: Option<DraftEdits>,
+}
+
+#[derive(Deserialize)]
+pub struct SopDraftCreateRequest {
+    pub sop: Value,
+    pub draft: DraftEdits,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// POST /pipes/drafts/preview-from-sop — derive an inert draft without writing.
+pub async fn preview_pipe_draft_from_sop(
+    State(pm): State<SharedPipeManager>,
+    Json(request): Json<SopDraftPreviewRequest>,
+) -> Response {
+    let mgr = pm.lock().await;
+    if let Err(error) = mgr.reload_pipes().await {
+        tracing::warn!("failed to reload pipes before draft preview: {error}");
+    }
+    let existing = mgr.list_pipes().await;
+    let result = match request.draft {
+        Some(draft) => apply_edits_and_regate(&request.sop, draft, &existing),
+        None => preview_from_sop(&request.sop, &existing),
+    };
+    match result {
+        Ok(draft) => (StatusCode::OK, Json(json!({"data": draft}))).into_response(),
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /pipes/drafts/from-sop — re-run the gate and create one disabled pipe.
+pub async fn create_pipe_draft_from_sop(
+    State(pm): State<SharedPipeManager>,
+    Json(request): Json<SopDraftCreateRequest>,
+) -> Response {
+    let mgr = pm.lock().await;
+    if let Err(error) = mgr.reload_pipes().await {
+        tracing::warn!("failed to reload pipes before draft creation: {error}");
+    }
+    let existing = mgr.list_pipes().await;
+    let draft = match apply_edits_and_regate(&request.sop, request.draft, &existing) {
+        Ok(draft) => draft,
+        Err(error) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    if draft.duplicate_gate.decision == "SKIP" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "duplicate gate rejected this draft",
+                "data": draft,
+            })),
+        )
+            .into_response();
+    }
+    let content = match serialize_disabled_draft(&draft, &request.sop) {
+        Ok(content) => content,
+        Err(error) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let expected_path = mgr.pipes_dir().join(&draft.slug).join("pipe.md");
+    if expected_path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "pipe path already exists"})),
+        )
+            .into_response();
+    }
+    let path = match write_new_pipe_draft(mgr.pipes_dir(), &draft.slug, &content) {
+        Ok(path) => path,
+        Err(error) => {
+            let status = if expected_path.exists() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return (status, Json(json!({"error": error.to_string()}))).into_response();
+        }
+    };
+    if let Err(error) = mgr.load_pipes().await {
+        tracing::warn!(
+            "draft '{}' was written but pipe registry refresh failed: {error}",
+            draft.slug
+        );
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "success": true,
+            "data": {
+                "draft": draft,
+                "path": path,
+                "enabled": false,
+            }
+        })),
+    )
+        .into_response()
+}
 
 /// GET /pipes — list all pipes with status.
 /// Re-scans disk so pipes installed externally (e.g. via CLI) are picked up.
