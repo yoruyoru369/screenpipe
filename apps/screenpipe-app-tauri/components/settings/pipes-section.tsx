@@ -602,6 +602,34 @@ interface PipeStatus {
   source_slug?: string;
   installed_version?: number;
   locally_modified?: boolean;
+  memory: PipeMemoryMetadata;
+}
+
+interface PipeMemoryMetadata {
+  exists: boolean;
+  size_bytes: number;
+  line_count: number;
+  updated_at: string | null;
+  over_limit: boolean;
+}
+
+interface PipeMemoryState extends PipeMemoryMetadata {
+  content: string;
+  loading: boolean;
+  loaded: boolean;
+  error?: string;
+}
+
+interface TeachStatus {
+  active: boolean;
+  recording: boolean;
+  session_id: string | null;
+  started_at: string | null;
+  elapsed_seconds: number;
+  event_count: number;
+  max_events: number;
+  max_seconds: number;
+  limit_reached: boolean;
 }
 
 interface PipeRunLog {
@@ -660,6 +688,16 @@ function formatDuration(ms: number): string {
   const mins = Math.floor(secs / 60);
   const remainSecs = secs % 60;
   return `${mins}:${String(remainSecs).padStart(2, "0")}`;
+}
+
+function formatTeachElapsed(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainder = safeSeconds % 60;
+  return [hours, minutes, remainder]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
 }
 
 /** Extract human-readable text from Pi JSON-mode stdout.
@@ -1053,6 +1091,10 @@ export function PipesSection() {
   const [runningPipe, setRunningPipe] = useState<string | null>(null);
   const [stoppingPipe, setStoppingPipe] = useState<string | null>(null);
   const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
+  const [pipeMemories, setPipeMemories] = useState<Record<string, PipeMemoryState>>({});
+  const [teachStatus, setTeachStatus] = useState<TeachStatus | null>(null);
+  const [teachBusy, setTeachBusy] = useState<"start" | "stop" | "cancel" | null>(null);
+  const [teachError, setTeachError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<Record<string, "saving" | "saved" | "error">>({});
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const [refreshing, setRefreshing] = useState(false);
@@ -1225,6 +1267,142 @@ export function PipesSection() {
 
   const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
   const isRemote = !!selectedDevice;
+
+  useEffect(() => {
+    setPipeMemories({});
+  }, [selectedDevice]);
+
+  const loadPipeMemory = async (pipeName: string) => {
+    const current = pipeMemories[pipeName];
+    if (current?.loading || current?.loaded) return;
+
+    setPipeMemories((previous) => ({
+      ...previous,
+      [pipeName]: {
+        exists: false,
+        size_bytes: 0,
+        line_count: 0,
+        updated_at: null,
+        over_limit: false,
+        content: "",
+        loaded: false,
+        loading: true,
+      },
+    }));
+
+    try {
+      const encodedName = encodeURIComponent(pipeName);
+      const endpoint = isRemote
+        ? `${apiBase}/pipes/${encodedName}/memory`
+        : `/pipes/${encodedName}/memory`;
+      const response = await localFetch(endpoint);
+      const payload = await response.json();
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error || `memory api returned ${response.status}`);
+      }
+      setPipeMemories((previous) => ({
+        ...previous,
+        [pipeName]: {
+          ...payload.data,
+          loaded: true,
+          loading: false,
+        },
+      }));
+    } catch (error) {
+      setPipeMemories((previous) => ({
+        ...previous,
+        [pipeName]: {
+          ...(previous[pipeName] ?? {
+            exists: false,
+            size_bytes: 0,
+            line_count: 0,
+            updated_at: null,
+            over_limit: false,
+            content: "",
+          }),
+          loaded: false,
+          loading: false,
+          error: error instanceof Error ? error.message : "failed to load memory",
+        },
+      }));
+    }
+  };
+
+  const teachEndpoint = (suffix: string) =>
+    isRemote ? `${apiBase}/pipes/teach/${suffix}` : `/pipes/teach/${suffix}`;
+
+  const fetchTeachStatus = useCallback(async () => {
+    try {
+      const response = await localFetch(
+        isRemote ? `${apiBase}/pipes/teach/status` : "/pipes/teach/status"
+      );
+      const payload = await response.json();
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error || `teach status returned ${response.status}`);
+      }
+      setTeachStatus(payload.data);
+      setTeachError(null);
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "teach mode is unavailable");
+    }
+  }, [apiBase, isRemote]);
+
+  useEffect(() => {
+    void fetchTeachStatus();
+    const interval = window.setInterval(() => {
+      void fetchTeachStatus();
+    }, teachStatus?.active ? 1_000 : 10_000);
+    return () => window.clearInterval(interval);
+  }, [fetchTeachStatus, teachStatus?.active]);
+
+  const startTeachMode = async () => {
+    setTeachBusy("start");
+    setTeachError(null);
+    try {
+      const response = await localFetch(teachEndpoint("start"), { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || payload.error) throw new Error(payload.error || "failed to start teach mode");
+      setTeachStatus(payload.data);
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "failed to start teach mode");
+    } finally {
+      setTeachBusy(null);
+    }
+  };
+
+  const stopTeachMode = async () => {
+    setTeachBusy("stop");
+    setTeachError(null);
+    try {
+      const response = await localFetch(teachEndpoint("stop"), { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || payload.error) throw new Error(payload.error || "failed to stop teach mode");
+      setTeachStatus((previous) => previous ? { ...previous, active: false, recording: false } : null);
+      toast({
+        title: "SOPを作成しました",
+        description: `${payload.data?.title || "作業手順"}をArtifactsで確認できます。`,
+      });
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "failed to stop teach mode");
+    } finally {
+      setTeachBusy(null);
+    }
+  };
+
+  const cancelTeachMode = async () => {
+    setTeachBusy("cancel");
+    setTeachError(null);
+    try {
+      const response = await localFetch(teachEndpoint("cancel"), { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || payload.error) throw new Error(payload.error || "failed to cancel teach mode");
+      setTeachStatus((previous) => previous ? { ...previous, active: false, recording: false } : null);
+    } catch (error) {
+      setTeachError(error instanceof Error ? error.message : "failed to cancel teach mode");
+    } finally {
+      setTeachBusy(null);
+    }
+  };
 
   const fetchPipes = useCallback(async () => {
     try {
@@ -2182,6 +2360,67 @@ export function PipesSection() {
           }}>
             {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
+          {!teachStatus?.active && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              onClick={() => void startTeachMode()}
+              disabled={teachBusy !== null}
+              data-testid="teach-mode-start"
+            >
+              {teachBusy === "start" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+              作業を教える
+            </Button>
+          )}
+        </div>
+      )}
+
+      {teachStatus?.active && (
+        <div className="flex flex-wrap items-center gap-3 border border-red-500/40 bg-red-500/5 px-3 py-2" data-testid="teach-mode-recording">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <span>{teachStatus.recording ? "記録中" : "記録上限に到達"}</span>
+              <span className="font-mono text-muted-foreground">
+                {formatTeachElapsed(teachStatus.elapsed_seconds)}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {teachStatus.event_count.toLocaleString()} / {teachStatus.max_events.toLocaleString()} events · キー入力内容、clipboard、tool引数・結果は保存しません
+            </p>
+          </div>
+          <Button
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => void stopTeachMode()}
+            disabled={teachBusy !== null}
+            data-testid="teach-mode-stop"
+          >
+            {teachBusy === "stop" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+            停止してSOPを作成
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => void cancelTeachMode()}
+            disabled={teachBusy !== null}
+            data-testid="teach-mode-cancel"
+          >
+            キャンセル
+          </Button>
+        </div>
+      )}
+
+      {teachError && (
+        <div className="flex items-start gap-2 border border-destructive/40 px-3 py-2 text-xs text-destructive" data-testid="teach-mode-error">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {teachError}
         </div>
       )}
 
@@ -3096,6 +3335,49 @@ export function PipesSection() {
 
                       {/* ═══ ADVANCED TAB ═══ */}
                       <TabsContent value="advanced" className="mt-3 space-y-3">
+                      <details
+                        className="border"
+                        onToggle={(event) => {
+                          if (event.currentTarget.open) {
+                            void loadPipeMemory(pipe.config.name);
+                          }
+                        }}
+                      >
+                        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium">
+                          <span>Memory</span>
+                          <span className="text-[11px] font-normal text-muted-foreground">
+                            {pipe.memory.exists
+                              ? `${pipe.memory.line_count} lines · ${pipe.memory.size_bytes} bytes`
+                              : "not created"}
+                          </span>
+                        </summary>
+                        <div className="space-y-2 border-t px-3 py-3">
+                          {(pipe.memory.over_limit || pipeMemories[pipe.config.name]?.over_limit) && (
+                            <div className="flex items-start gap-2 border border-amber-500/40 bg-amber-500/5 px-2 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+                              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                              memory.md exceeds 150 lines or 8 KB. Existing content was preserved; review it before adding more.
+                            </div>
+                          )}
+                          {pipeMemories[pipe.config.name]?.loading ? (
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" /> loading memory...
+                            </div>
+                          ) : pipeMemories[pipe.config.name]?.error ? (
+                            <p className="text-xs text-destructive">
+                              {pipeMemories[pipe.config.name]?.error}
+                            </p>
+                          ) : pipeMemories[pipe.config.name]?.content ? (
+                            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words border bg-muted/20 p-2 text-[11px]">
+                              {pipeMemories[pipe.config.name]?.content}
+                            </pre>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              No memory yet. Durable lessons will appear here after a pipe learns one.
+                            </p>
+                          )}
+                        </div>
+                      </details>
+
                       {/* Notification API permission */}
                       <div className="flex items-center justify-between gap-3 border px-3 py-2.5">
                         <div className="min-w-0">
