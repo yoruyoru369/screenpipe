@@ -14,6 +14,11 @@ rustflags = [
 [target.x86_64-apple-darwin]
 rustflags = "-lc++ -l framework=Accelerate"
 
+[target.'cfg(target_env = "msvc")']
+# esaxx-rs compiles its bundled C++ with /MT. Keep Rust and every cc-rs
+# dependency on the same CRT so the final app does not mix libcpmt and msvcprt.
+rustflags = ["-C", "target-feature=+crt-static"]
+
 [env]
 # Use prebuilt NASM objects on Windows (no NASM install needed in CI): https://aws.github.io/aws-lc-rs/requirements/windows.html#prebuilt-nasm-objects
 AWS_LC_SYS_PREBUILT_NASM = "1"
