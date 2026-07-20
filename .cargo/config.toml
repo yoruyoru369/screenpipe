@@ -18,6 +18,9 @@ rustflags = "-lc++ -l framework=Accelerate"
 # Use prebuilt NASM objects on Windows (no NASM install needed in CI): https://aws.github.io/aws-lc-rs/requirements/windows.html#prebuilt-nasm-objects
 AWS_LC_SYS_PREBUILT_NASM = "1"
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# model2vec-rs pulls esaxx-rs, which compiles with MSVC's static CRT (/MT).
+# Keep knf-rs-sys on the same runtime to avoid LNK2038/LNK1319 in Windows app builds.
+KNF_STATIC_CRT = { value = "1", force = true }
 
 # Cargo already uses the machine's available parallelism. A fixed value made
 # 10-core developer machines run 16 compiler processes at once, increasing
