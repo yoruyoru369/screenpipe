@@ -43,7 +43,7 @@ use screenpipe_engine::{
     start_meeting_watcher, start_power_manager, start_sleep_monitor, start_speaker_identification,
     start_ui_recording,
     vision_manager::{start_monitor_watcher, stop_monitor_watcher, VisionManager},
-    watch_pid, ResourceMonitor, SCServer,
+    watch_pid, ResourceTelemetryReporter, SCServer,
 };
 use screenpipe_screen::monitor::list_monitors;
 use serde_json::json;
@@ -904,8 +904,8 @@ async fn main() -> anyhow::Result<()> {
 
     let audio_devices_clone = audio_devices.clone();
 
-    let resource_monitor = ResourceMonitor::new(config.analytics_enabled);
-    resource_monitor.start_monitoring(Duration::from_secs(30), Some(Duration::from_secs(60)));
+    let resource_reporter = ResourceTelemetryReporter::new(config.analytics_enabled);
+    resource_reporter.start_monitoring(Duration::from_secs(30), Some(Duration::from_secs(60)));
 
     // Initialize analytics for API tracking
     analytics::init(config.analytics_enabled);
@@ -1454,12 +1454,18 @@ async fn main() -> anyhow::Result<()> {
             server.pipe_permissions.clone(),
         ),
     ));
+    let (event_runs_active, event_runs_peak) = pipe_manager.event_run_concurrency();
     pipe_manager.set_on_run_complete(std::sync::Arc::new(
-        |pipe_name, _execution_id, success, duration_secs, error_type| {
+        move |pipe_name, _execution_id, success, duration_secs, error_type| {
             let mut props = serde_json::json!({
                 "pipe": pipe_name,
                 "success": success,
                 "duration_secs": duration_secs,
+                // Concurrency of event-triggered runs: live count as this run
+                // completes plus the process-lifetime peak. This makes the
+                // EVENT_TRIGGERED_CONCURRENCY_LIMIT behavior observable.
+                "event_runs_active": event_runs_active.load(std::sync::atomic::Ordering::Relaxed),
+                "event_runs_peak": event_runs_peak.load(std::sync::atomic::Ordering::Relaxed),
             });
             if let Some(et) = error_type {
                 props["error_type"] = serde_json::Value::String(et.to_string());

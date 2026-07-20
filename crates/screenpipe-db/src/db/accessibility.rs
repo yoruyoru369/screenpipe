@@ -19,6 +19,31 @@ impl DatabaseManager {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<UiContent>, sqlx::Error> {
+        self.search_accessibility_ordered(
+            query,
+            app_name,
+            window_name,
+            start_time,
+            end_time,
+            limit,
+            offset,
+            Order::Descending,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_accessibility_ordered(
+        &self,
+        query: &str,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: u32,
+        offset: u32,
+        order: Order,
+    ) -> Result<Vec<UiContent>, sqlx::Error> {
         // Now queries frames_fts (consolidated) instead of accessibility_fts
         let mut fts_parts = Vec::new();
         if !query.is_empty() {
@@ -63,7 +88,7 @@ impl DatabaseManager {
                 AND (?2 IS NULL OR f.timestamp >= ?2)
                 AND (?3 IS NULL OR f.timestamp <= ?3)
                 AND f.accessibility_text IS NOT NULL AND f.accessibility_text != ''
-            ORDER BY f.timestamp DESC
+            ORDER BY f.timestamp {order_dir}, f.id {order_dir}
             LIMIT ?4 OFFSET ?5
             "#,
             fts_join = if has_fts {
@@ -76,9 +101,13 @@ impl DatabaseManager {
             } else {
                 ""
             },
+            order_dir = match order {
+                Order::Ascending => "ASC",
+                Order::Descending => "DESC",
+            },
         );
 
-        sqlx::query_as(&sql)
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(if has_fts {
                 combined_query
             } else {
@@ -121,6 +150,33 @@ impl DatabaseManager {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<UiContent>, sqlx::Error> {
+        self.search_accessibility_visible_ordered(
+            query,
+            on_screen,
+            app_name,
+            window_name,
+            start_time,
+            end_time,
+            limit,
+            offset,
+            Order::Descending,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_accessibility_visible_ordered(
+        &self,
+        query: &str,
+        on_screen: bool,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: u32,
+        offset: u32,
+        order: Order,
+    ) -> Result<Vec<UiContent>, sqlx::Error> {
         let has_query = !query.trim().is_empty();
         // Empty query is supported — drops the FTS join entirely so the
         // filter is purely "show me on-screen accessibility elements in
@@ -151,7 +207,7 @@ impl DatabaseManager {
               AND (?4 IS NULL OR f.app_name = ?4)
               AND (?5 IS NULL OR f.window_name LIKE '%' || ?5 || '%')
             GROUP BY f.id
-            ORDER BY f.timestamp DESC
+            ORDER BY f.timestamp {order_dir}, f.id {order_dir}
             LIMIT ?6 OFFSET ?7
             "#,
             fts_join = if has_query {
@@ -164,10 +220,14 @@ impl DatabaseManager {
             } else {
                 ""
             },
+            order_dir = match order {
+                Order::Ascending => "ASC",
+                Order::Descending => "DESC",
+            },
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
-        let mut q = sqlx::query_as(&sql)
+        let mut q = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(on_screen_int)
             .bind(start_time)
             .bind(end_time)
@@ -220,7 +280,7 @@ impl DatabaseManager {
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
-        let mut q = sqlx::query_scalar::<_, i64>(&sql)
+        let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
             .bind(on_screen_int)
             .bind(start_time)
             .bind(end_time)
@@ -246,8 +306,44 @@ impl DatabaseManager {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<UiEventRecord>, sqlx::Error> {
+        self.search_ui_events_ordered(
+            query,
+            event_type,
+            app_name,
+            window_name,
+            start_time,
+            end_time,
+            limit,
+            offset,
+            Order::Descending,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_ui_events_ordered(
+        &self,
+        query: Option<&str>,
+        event_type: Option<&str>,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: u32,
+        offset: u32,
+        order: Order,
+        context_only: bool,
+    ) -> Result<Vec<UiEventRecord>, sqlx::Error> {
         let mut conditions = vec!["1=1".to_string()];
         let mut bind_values: Vec<String> = Vec::new();
+
+        if context_only {
+            conditions.push(
+                "(COALESCE(element_name, '') != '' OR COALESCE(text_content, '') != '')"
+                    .to_string(),
+            );
+        }
 
         if let Some(q) = query {
             if !q.is_empty() {
@@ -295,13 +391,17 @@ impl DatabaseManager {
             WHERE {}
                 AND (? IS NULL OR timestamp >= ?)
                 AND (? IS NULL OR timestamp <= ?)
-            ORDER BY timestamp DESC
+            ORDER BY timestamp {order_dir}, id {order_dir}
             LIMIT ? OFFSET ?
             "#,
-            where_clause
+            where_clause,
+            order_dir = match order {
+                Order::Ascending => "ASC",
+                Order::Descending => "DESC",
+            },
         );
 
-        let mut query_builder = sqlx::query_as::<_, UiEventRow>(&sql);
+        let mut query_builder = sqlx::query_as::<_, UiEventRow>(sqlx::AssertSqlSafe(sql));
         for val in &bind_values {
             query_builder = query_builder.bind(val);
         }
@@ -560,7 +660,7 @@ impl DatabaseManager {
             where_clause
         );
 
-        let rows: Vec<UiEventRow> = sqlx::query_as(&sql)
+        let rows: Vec<UiEventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(query)
             .bind(limit)
             .fetch_all(&self.pool)

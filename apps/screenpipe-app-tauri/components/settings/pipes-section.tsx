@@ -133,7 +133,7 @@ import { useDeviceMonitor } from "@/lib/hooks/use-device-monitor";
 import { Monitor, Wifi, WifiOff, ScanSearch } from "lucide-react";
 import { requestPipeStop } from "@/lib/pipe-stop";
 
-const PIPE_EXECUTIONS_PAGE_LIMIT = 100;
+const PIPE_EXECUTIONS_PAGE_LIMIT = 10;
 
 function pipeExecutionsUrl(apiBase: string, pipeName: string, beforeId?: number) {
   const params = new URLSearchParams({
@@ -328,12 +328,11 @@ function buildOptimizeDisplayLabel(pipeName: string): string {
   return `Optimize pipe: ${pipeName.trim()}`;
 }
 
-// "remix" = make your own version of an existing pipe. We don't mutate the
+// "fork" = make your own version of an existing pipe. We don't mutate the
 // original — the agent reads it and creates a NEW customized pipe. Framing
-// authoring as "customize a working thing" is the lever that turns installers
-// into creators (see Replit remix / Notion duplicate).
-function buildRemixPrompt(pipeName: string): string {
-  return `i want to remix my existing pipe "${pipeName}" into a new one.
+// authoring as "customize a working thing" turns installers into creators.
+function buildForkPrompt(pipeName: string): string {
+  return `i want to fork my existing pipe "${pipeName}" into a new one.
 
 ## your task
 1. read the original pipe: ~/.screenpipe/pipes/${pipeName}/pipe.md
@@ -603,6 +602,7 @@ interface PipeStatus {
   installed_version?: number;
   locally_modified?: boolean;
   memory: PipeMemoryMetadata;
+  execution_count?: number;
 }
 
 interface PipeMemoryMetadata {
@@ -1108,7 +1108,7 @@ export function PipesSection() {
   const [sharingPublic, setSharingPublic] = useState<string | null>(null);
   const [publishPipeName, setPublishPipeName] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [pipeTypeFilter, setPipeTypeFilter] = useState<"automated" | "manual" | "cloud">("automated");
+  const [pipeTypeFilter, setPipeTypeFilter] = useState<"automated" | "cloud">("automated");
   // "cloud" (the org's cloud runner) is an enterprise-build-only surface
   const isEnterpriseBuild = useIsEnterpriseBuild();
   // Favorites — per-machine preference persisted via /pipes/favorites.
@@ -1138,10 +1138,9 @@ export function PipesSection() {
     !!(p.config.trigger?.sources?.length);
   const isScheduledPipe = (p: PipeStatus) =>
     pipeHasSchedule(p.config) && !isTriggeredPipe(p);
-  const isManualPipe = (p: PipeStatus) =>
-    !pipeHasSchedule(p.config) && !isTriggeredPipe(p);
-  // "Automated" groups scheduled + event/connection-triggered pipes — anything
-  // that runs on its own. Manual (run-on-demand) stands apart.
+  // The My Pipes surface is for agents that run on their own. Manual templates
+  // remain installed because product features can invoke them directly, but
+  // listing them here overwhelms fresh installs with implementation details.
   const isAutomatedPipe = (p: PipeStatus) =>
     isScheduledPipe(p) || isTriggeredPipe(p);
 
@@ -1195,8 +1194,7 @@ export function PipesSection() {
             if (!p.config.name.toLowerCase().includes(q)) return false;
           }
 
-          if (pipeTypeFilter === "automated" && !isAutomatedPipe(p)) return false;
-          if (pipeTypeFilter === "manual" && !isManualPipe(p)) return false;
+          if (!isAutomatedPipe(p)) return false;
 
           // Favorites filter — only applied when the user has toggled the star chip on.
           if (pipeFavorites.showOnly && !pipeFavorites.isFavorite(p.config.name)) return false;
@@ -1228,7 +1226,6 @@ export function PipesSection() {
   const tabCounts = React.useMemo(() => {
     return {
       automated: pipes.filter(isAutomatedPipe).length,
-      manual: pipes.filter(isManualPipe).length,
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pipes]);
@@ -1236,7 +1233,6 @@ export function PipesSection() {
   const starredEmptyTitle = React.useMemo(() => {
     if (!pipeFavorites.showOnly) return null;
 
-    if (pipeTypeFilter === "manual") return "no starred manual pipes";
     return "no starred automated pipes";
   }, [pipeFavorites.showOnly, pipeTypeFilter]);
 
@@ -1407,7 +1403,7 @@ export function PipesSection() {
   const fetchPipes = useCallback(async () => {
     try {
       setLoadError(null);
-      // Load pipes WITH recent executions inline so the list shows the real
+      // Load pipes WITH only their newest execution inline so the list shows the real
       // last-run status. Without this the "last run" column always reads
       // "never run" for pipes that have actually run (the badge is driven by
       // recent_executions). The engine batches this into one fast per-pipe
@@ -1417,8 +1413,8 @@ export function PipesSection() {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5_000);
       const pipesEndpoint = isRemote
-        ? `${apiBase}/pipes?include_executions=true`
-        : "/pipes?include_executions=true";
+        ? `${apiBase}/pipes?include_executions=true&execution_limit=1&include_execution_counts=true`
+        : "/pipes?include_executions=true&execution_limit=1&include_execution_counts=true";
       const res = await localFetch(pipesEndpoint, { signal: controller.signal }).finally(() => clearTimeout(timeout));
       if (!res.ok) {
         throw new Error(`pipes api returned ${res.status}`);
@@ -1900,7 +1896,12 @@ export function PipesSection() {
       const data = await res.json();
       const nextExecutions = data.data || [];
       setExecutions(nextExecutions);
-      setHasMoreExecutions(nextExecutions.length === PIPE_EXECUTIONS_PAGE_LIMIT);
+      const total = pipes.find((pipe) => pipe.config.name === name)?.execution_count;
+      setHasMoreExecutions(
+        total != null
+          ? nextExecutions.length < total
+          : nextExecutions.length === PIPE_EXECUTIONS_PAGE_LIMIT,
+      );
     } catch (e) {
       // Executions endpoint may not exist on older servers — fall back silently
       setExecutions([]);
@@ -1920,14 +1921,18 @@ export function PipesSection() {
       const res = await fetch(pipeExecutionsUrl(apiBase, name, oldestId));
       const data = await res.json();
       const olderExecutions: PipeExecution[] = data.data || [];
-      setExecutions((prev) => {
-        const seen = new Set(prev.map((exec) => exec.id));
-        return [
-          ...prev,
-          ...olderExecutions.filter((exec) => !seen.has(exec.id)),
-        ];
-      });
-      setHasMoreExecutions(olderExecutions.length === PIPE_EXECUTIONS_PAGE_LIMIT);
+      const total = pipes.find((pipe) => pipe.config.name === name)?.execution_count;
+      const seen = new Set(executions.map((exec) => exec.id));
+      const next = [
+        ...executions,
+        ...olderExecutions.filter((exec) => !seen.has(exec.id)),
+      ];
+      setExecutions(next);
+      setHasMoreExecutions(
+        total != null
+          ? next.length < total
+          : olderExecutions.length === PIPE_EXECUTIONS_PAGE_LIMIT,
+      );
     } catch (e) {
       console.error("failed to fetch older executions:", e);
     } finally {
@@ -2308,33 +2313,31 @@ export function PipesSection() {
               autoCorrect="off"
             />
           </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="gap-1.5 h-8 text-xs capitalize">
-                {pipeTypeFilter === "cloud" ? "cloud" : `${pipeTypeFilter} (${tabCounts[pipeTypeFilter]})`}
-                <ChevronDown className="h-3 w-3 opacity-50" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {([
-                "automated",
-                "manual",
-                ...(isEnterpriseBuild ? (["cloud"] as const) : []),
-              ] as const).map((tab) => (
-                <DropdownMenuItem
-                  key={tab}
-                  onClick={() => setPipeTypeFilter(tab)}
-                  className={cn("capitalize gap-2", pipeTypeFilter === tab && "font-medium")}
-                >
-                  <span className="flex-1">{tab}</span>
-                  {tab !== "cloud" && (
-                    <span className="text-muted-foreground text-xs">{tabCounts[tab]}</span>
-                  )}
-                  {pipeTypeFilter === tab && <Check className="h-3.5 w-3.5 ml-1" />}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {isEnterpriseBuild && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-1.5 h-8 text-xs capitalize">
+                  {pipeTypeFilter === "cloud" ? "cloud" : `${pipeTypeFilter} (${tabCounts.automated})`}
+                  <ChevronDown className="h-3 w-3 opacity-50" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {(["automated", "cloud"] as const).map((tab) => (
+                  <DropdownMenuItem
+                    key={tab}
+                    onClick={() => setPipeTypeFilter(tab)}
+                    className={cn("capitalize gap-2", pipeTypeFilter === tab && "font-medium")}
+                  >
+                    <span className="flex-1">{tab}</span>
+                    {tab === "automated" && (
+                      <span className="text-muted-foreground text-xs">{tabCounts.automated}</span>
+                    )}
+                    {pipeTypeFilter === tab && <Check className="h-3.5 w-3.5 ml-1" />}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           <Button
             variant="outline"
             size="icon"
@@ -2505,17 +2508,6 @@ export function PipesSection() {
                   </Button>
                 </div>
               </div>
-            ) : pipeTypeFilter === "manual" ? (
-              <>
-                <p>no manual pipes installed</p>
-                <p className="text-sm mt-2">
-                  manual pipes use{" "}
-                  <code className="text-xs bg-muted px-1 py-0.5 rounded">
-                    schedule: manual
-                  </code>
-                  {" "}in their frontmatter
-                </p>
-              </>
             ) : (
               <div className="space-y-4">
                 <div>
@@ -2583,7 +2575,7 @@ export function PipesSection() {
                     : "idle";
 
             return (
-            <div key={pipe.config.name} className={cn("group border border-border hover:bg-accent/40 transition-colors", !pipe.config.enabled && "opacity-60")}>
+            <div key={pipe.config.name} data-pipe-row={pipe.config.name} className={cn("group border border-border hover:bg-accent/40 transition-colors", !pipe.config.enabled && "opacity-60")}>
               {/* Card top line — the whole row is the expand affordance:
                   click anywhere (except the star / badges) to open runs,
                   config and logs. Keyboard-operable via role=button. */}
@@ -2794,6 +2786,48 @@ export function PipesSection() {
                 className="max-h-0 overflow-hidden opacity-0 pointer-events-none transition-[max-height,opacity] duration-150 group-hover:max-h-16 group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:max-h-16 group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
               >
                 <div className="flex items-center gap-1 px-3 pb-2.5 pt-0.5">
+                  {/* Run is the primary action: keep it first and visually larger
+                      than the AI editing actions that follow. */}
+                  <div className="flex items-center shrink-0">
+                    {isRunning ? (
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="h-9 w-9"
+                        onClick={() => stopPipe(pipe.config.name)}
+                        disabled={stoppingPipe === pipe.config.name}
+                        title="stop pipe"
+                        aria-label="stop pipe"
+                      >
+                        {stoppingPipe === pipe.config.name ? (
+                          <Loader2 className="h-5 w-5 animate-spin" />
+                        ) : (
+                          <Square className="h-5 w-5" />
+                        )}
+                      </Button>
+                    ) : (
+                      <Button
+                        variant={hasMissingConnections ? "outline" : "default"}
+                        size="icon"
+                        className={cn("h-9 w-9", hasMissingConnections && "text-destructive")}
+                        onClick={() => {
+                          if (hasMissingConnections) {
+                            setConnectionModal({ pipeName: pipe.config.name, connections: pipe.config.connections ?? [] });
+                          } else {
+                            runPipe(pipe.config.name);
+                          }
+                        }}
+                        disabled={runningPipe === pipe.config.name}
+                        title={hasMissingConnections ? "configure required connections first" : "run pipe"}
+                        aria-label={hasMissingConnections ? "configure required connections first" : "run pipe"}
+                      >
+                        {hasMissingConnections
+                          ? <AlertCircle className="h-5 w-5" />
+                          : <Play className="h-5 w-5 fill-current" />}
+                      </Button>
+                    )}
+                  </div>
+
                 {/* optimize with ai — opens a chat that reads the pipe's prompt
                     + recent run logs and suggests improvements in plain english */}
                 {!isReceivedTeamPipe(pipe) && (
@@ -2817,7 +2851,7 @@ export function PipesSection() {
                   </Button>
                 )}
 
-                {/* remix — create a NEW pipe based on this one and customize it */}
+                {/* fork — create a NEW pipe based on this one and customize it */}
                 {!isReceivedTeamPipe(pipe) && (
                   <Button
                     variant="ghost"
@@ -2826,59 +2860,21 @@ export function PipesSection() {
                     onClick={() => {
                       posthog.capture("pipe_remix_started", { source: "row_button" });
                       navigateHomeAndPrefill({
-                        context: "the user wants to remix their pipe into a new one",
-                        prompt: buildRemixPrompt(pipe.config.name),
-                        displayLabel: `Remix pipe: ${pipe.config.name}`,
+                        context: "the user wants to fork their pipe into a new one",
+                        prompt: buildForkPrompt(pipe.config.name),
+                        displayLabel: `Fork pipe: ${pipe.config.name}`,
                         autoSend: true,
                       });
                     }}
-                    title="remix — create a new pipe based on this one and customize it"
+                    title="fork — create a new pipe based on this one and customize it"
                   >
                     <GitFork className="h-3.5 w-3.5" />
-                    remix
+                    fork
                   </Button>
                 )}
 
-                {/* run + overflow */}
-                <div className="flex items-center gap-0.5 shrink-0">
-                  {/* Run / Stop button */}
-                  {isRunning ? (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => stopPipe(pipe.config.name)}
-                      disabled={stoppingPipe === pipe.config.name}
-                      title="stop pipe"
-                    >
-                      {stoppingPipe === pipe.config.name ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Square className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className={cn("h-7 w-7", hasMissingConnections && "text-destructive")}
-                      onClick={() => {
-                        if (hasMissingConnections) {
-                          setConnectionModal({ pipeName: pipe.config.name, connections: pipe.config.connections ?? [] });
-                        } else {
-                          runPipe(pipe.config.name);
-                        }
-                      }}
-                      disabled={runningPipe === pipe.config.name}
-                      title={hasMissingConnections ? "configure required connections first" : "run pipe"}
-                    >
-                      {hasMissingConnections
-                        ? <AlertCircle className="h-3.5 w-3.5" />
-                        : <Play className="h-3.5 w-3.5" />}
-                    </Button>
-                  )}
-
-                  {/* Overflow menu */}
+                {/* Overflow menu */}
+                <div className="flex items-center shrink-0">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
@@ -3048,7 +3044,9 @@ export function PipesSection() {
                           config
                         </TabsTrigger>
                         <TabsTrigger value="runs" className="rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:bg-transparent data-[state=active]:shadow-none text-xs uppercase tracking-wider px-3 h-8">
-                          runs{executions.length > 0 ? ` (${executions.length})` : ""}
+                          runs{(pipe.execution_count ?? executions.length) > 0
+                            ? ` (${pipe.execution_count ?? executions.length})`
+                            : ""}
                         </TabsTrigger>
                         <TabsTrigger value="advanced" className="rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:bg-transparent data-[state=active]:shadow-none text-xs uppercase tracking-wider px-3 h-8">
                           advanced

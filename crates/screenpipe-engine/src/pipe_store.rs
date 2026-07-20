@@ -5,7 +5,7 @@
 //! SQLite implementation of [`PipeStore`] for persisting pipe execution history.
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use screenpipe_core::pipes::{PipeExecution, PipeStore, SchedulerState, TriggerDetails};
 use screenpipe_db::DatabaseManager;
 use std::sync::Arc;
@@ -235,6 +235,28 @@ impl PipeStore for SqlitePipeStore {
         Ok(())
     }
 
+    async fn advance_scheduler_last_run(
+        &self,
+        pipe_name: &str,
+        last_run_at: DateTime<Utc>,
+    ) -> Result<()> {
+        use screenpipe_db::write_queue::PipeBindValue;
+        self.db
+            .pipe_execute_write_queued(
+                0,
+                r#"INSERT INTO pipe_scheduler_state (pipe_name, last_run_at, consecutive_failures)
+                   VALUES (?, ?, 0)
+                   ON CONFLICT(pipe_name) DO UPDATE SET
+                       last_run_at = excluded.last_run_at"#,
+                vec![
+                    PipeBindValue::Text(pipe_name.to_string()),
+                    PipeBindValue::Text(last_run_at.to_rfc3339()),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn cleanup_old_executions(&self, keep_per_pipe: i32) -> Result<u32> {
         self.db
             .pipe_delete_old_executions_queued(keep_per_pipe)
@@ -315,6 +337,18 @@ impl PipeStore for SqlitePipeStore {
             map.insert(name, rows.into_iter().map(Into::into).collect());
         }
         Ok(map)
+    }
+
+    async fn get_all_execution_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            r#"SELECT pipe_name, COUNT(*)
+               FROM pipe_executions
+               GROUP BY pipe_name"#,
+        )
+        .fetch_all(&self.db.pool)
+        .await?;
+
+        Ok(rows.into_iter().collect())
     }
 }
 
@@ -844,6 +878,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_advance_scheduler_last_run_preserves_run_outcome() {
+        let (store, _tmp) = setup_test_store().await;
+        store
+            .upsert_scheduler_state("my-pipe", false)
+            .await
+            .unwrap();
+        let skipped_at = Utc::now();
+
+        store
+            .advance_scheduler_last_run("my-pipe", skipped_at)
+            .await
+            .unwrap();
+
+        let state = store.get_scheduler_state("my-pipe").await.unwrap().unwrap();
+        assert_eq!(state.last_run_at, Some(skipped_at));
+        assert!(state.last_success_at.is_none());
+        assert_eq!(state.consecutive_failures, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_cleanup_old_executions() {
         let (store, _tmp) = setup_test_store().await;
 
@@ -1007,5 +1061,27 @@ mod tests {
         let (store, _tmp) = setup_test_store().await;
         let all = store.get_all_executions(5).await.unwrap();
         assert!(all.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_get_all_execution_counts_are_exact() {
+        let (store, _tmp) = setup_test_store().await;
+        for _ in 0..12 {
+            store
+                .create_execution("pipe-a", "scheduled", "m", None)
+                .await
+                .unwrap();
+        }
+        for _ in 0..3 {
+            store
+                .create_execution("pipe-b", "manual", "m", None)
+                .await
+                .unwrap();
+        }
+
+        let counts = store.get_all_execution_counts().await.unwrap();
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts["pipe-a"], 12);
+        assert_eq!(counts["pipe-b"], 3);
     }
 }
