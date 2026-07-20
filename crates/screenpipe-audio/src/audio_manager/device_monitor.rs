@@ -90,6 +90,46 @@ fn is_session_type_streaming(
 
 use super::{AudioManager, AudioManagerStatus};
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ScreenLockAudioGate {
+    suspended: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScreenLockAudioAction {
+    None,
+    Suspend,
+    EnforceSuspended,
+    Resume,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ScreenLockAudioAction {
+    fn enforces_stream_shutdown(self) -> bool {
+        matches!(self, Self::Suspend | Self::EnforceSuspended)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ScreenLockAudioGate {
+    fn update(&mut self, should_suspend: bool) -> ScreenLockAudioAction {
+        match (self.suspended, should_suspend) {
+            (false, true) => {
+                self.suspended = true;
+                ScreenLockAudioAction::Suspend
+            }
+            (true, false) => {
+                self.suspended = false;
+                ScreenLockAudioAction::Resume
+            }
+            (true, true) => ScreenLockAudioAction::EnforceSuspended,
+            (false, false) => ScreenLockAudioAction::None,
+        }
+    }
+}
+
 /// Exponential backoff for device recovery.
 ///
 /// Transient errors (e.g., ScreenCaptureKit not yet initialized) use a short
@@ -585,6 +625,15 @@ pub async fn start_device_monitor(
         // the stable path on any gap. Pure decider in `meeting_piggyback.rs`.
         let mut piggyback_state = super::meeting_piggyback::PiggybackState::default();
 
+        // macOS CoreAudio keeps a PreventUserIdleSystemSleep assertion for as
+        // long as an input/output stream remains open. Merely skipping samples
+        // while the display is locked leaves that assertion alive and prevents
+        // the machine from completing idle sleep. Track the lock edge so every
+        // stream is torn down exactly once, then enrolled for normal reconnect
+        // after unlock.
+        #[cfg(target_os = "macos")]
+        let mut screen_lock_audio_gate = ScreenLockAudioGate::default();
+
         // Initialize tracker with current defaults
         let _ = default_tracker.check_input_changed();
         let _ = default_tracker.check_output_changed().await;
@@ -605,6 +654,115 @@ pub async fn start_device_monitor(
 
         loop {
             if audio_manager.status().await == AudioManagerStatus::Running {
+                #[cfg(target_os = "macos")]
+                {
+                    let should_suspend = screenpipe_config::should_pause_audio_for_lock();
+                    let lock_action = screen_lock_audio_gate.update(should_suspend);
+                    match lock_action {
+                        ScreenLockAudioAction::Suspend => {
+                            // Piggyback may have suspended the stable mic/output
+                            // while session streams were active. Lift those
+                            // guards without restarting yet; the screen-lock
+                            // gate below keeps every start path closed.
+                            for device_name in audio_manager.suspended_devices() {
+                                audio_manager.unsuspend_device(&device_name);
+                            }
+                            piggyback_state = super::meeting_piggyback::PiggybackState::default();
+                        }
+                        ScreenLockAudioAction::EnforceSuspended => {}
+                        ScreenLockAudioAction::Resume => {
+                            let enabled_devices = audio_manager.enabled_devices().await;
+                            for device_name in enabled_devices {
+                                disconnected_devices.insert(device_name.clone());
+                                disconnected_device_backoffs.remove(&device_name);
+                            }
+                            info!("screen unlocked: scheduling audio stream recovery");
+                        }
+                        ScreenLockAudioAction::None => {}
+                    }
+
+                    if lock_action.enforces_stream_shutdown() {
+                        // Enforce the invariant on every locked tick, not only
+                        // on the edge. This closes two races: a stream whose
+                        // start was already in flight when the lock flag
+                        // changed, and a transient CoreAudio stop failure.
+                        let session_devices = audio_manager.session_devices();
+                        let mut observed_device_names = session_devices.clone();
+                        for device_name in &session_devices {
+                            match parse_audio_device(device_name) {
+                                Ok(device) => {
+                                    if let Err(e) =
+                                        audio_manager.stop_session_device(&device).await
+                                    {
+                                        warn!(
+                                            "failed to stop meeting-session audio device {} for screen lock: {}",
+                                            device, e
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    "failed to parse meeting-session audio device '{}' during screen-lock cleanup: {}",
+                                    device_name, e
+                                ),
+                            }
+                        }
+
+                        // Snapshot again after session teardown so a session
+                        // stream is not normally stopped twice. If its first
+                        // stop failed, it remains here and gets an immediate
+                        // retry through the generic path.
+                        let current_devices = audio_manager.current_devices();
+                        observed_device_names
+                            .extend(current_devices.iter().map(std::string::ToString::to_string));
+                        for device in &current_devices {
+                            if let Err(e) = audio_manager.stop_device_recording(device).await {
+                                warn!(
+                                    "failed to stop audio device {} for screen lock: {}",
+                                    device, e
+                                );
+                            }
+                        }
+
+                        let mut remaining_device_names = audio_manager.session_devices();
+                        remaining_device_names.extend(
+                            audio_manager
+                                .current_devices()
+                                .iter()
+                                .map(std::string::ToString::to_string),
+                        );
+                        let released_streams = observed_device_names
+                            .len()
+                            .saturating_sub(remaining_device_names.len());
+                        if lock_action == ScreenLockAudioAction::Suspend {
+                            if remaining_device_names.is_empty() {
+                                info!(
+                                    "screen locked: released {} audio stream(s) so macOS can idle sleep",
+                                    released_streams
+                                );
+                            } else {
+                                warn!(
+                                    "screen locked: released {} of {} audio stream(s); {} remain and will be retried",
+                                    released_streams,
+                                    observed_device_names.len(),
+                                    remaining_device_names.len()
+                                );
+                            }
+                        } else if !observed_device_names.is_empty() {
+                            debug!(
+                                "screen-lock cleanup found {} late or retrying audio stream(s); {} remain",
+                                observed_device_names.len(),
+                                remaining_device_names.len()
+                            );
+                        }
+
+                        tokio::select! {
+                            _ = sleep(Duration::from_secs(1)) => {}
+                            _ = super::piggyback_listeners::sweep_wake_notified() => {}
+                        }
+                        continue;
+                    }
+                }
+
                 // Check if sleep/wake or display reconfiguration requested
                 // audio stream invalidation. Force-cycle all running devices
                 // to recover from silent CoreAudio stream failures.
@@ -712,7 +870,16 @@ pub async fn start_device_monitor(
                                 .ok()
                                 .is_some_and(|d| is_device_actively_streaming(&device_manager, &d));
 
-                            if !has_correct_input {
+                            // The default input is a Bluetooth mic the meeting
+                            // gate withholds outside a meeting — starting it
+                            // would just silently no-op. Leave whatever input
+                            // is already running alone rather than stopping it
+                            // in favor of one that will never actually stream.
+                            let default_input_gated = audio_manager
+                                .bluetooth_input_gate_blocks(&default_input)
+                                .await;
+
+                            if !has_correct_input && !default_input_gated {
                                 info!(
                                     "[DEVICE_RECOVERY] initial sync: default input '{}' not active, switching",
                                     default_input_name
@@ -824,12 +991,37 @@ pub async fn start_device_monitor(
                     // Check if system default input changed
                     let previous_default_input = default_tracker.last_input.clone();
                     if let Some(new_default_input) = default_tracker.check_input_changed() {
+                        // The new default may be a Bluetooth mic the meeting
+                        // gate withholds outside a meeting — starting it would
+                        // just silently no-op. Computed once up front since
+                        // the check itself needs `.await`.
+                        let new_default_input_gated = match parse_audio_device(&new_default_input) {
+                            Ok(d) => audio_manager.bluetooth_input_gate_blocks(&d).await,
+                            Err(_) => false,
+                        };
                         if audio_manager
                             .user_disabled_devices()
                             .await
                             .contains(&new_default_input)
                         {
                             debug!("[DEVICE_RECOVERY] skipping default input change: {} is user-disabled", new_default_input);
+                        } else if new_default_input_gated {
+                            // Don't stop the currently-working input in favor of
+                            // one that will never actually stream — this used to
+                            // cause total input capture loss the moment a gated
+                            // Bluetooth mic became the OS default, since
+                            // `start_device` returning `Ok(())` here was wrongly
+                            // read as "the swap succeeded". Deliberately does NOT
+                            // revert `default_tracker.last_input` (unlike the
+                            // genuine-failure path below) — matching the
+                            // user-disabled branch above, so this only logs once
+                            // per actual OS default-change event instead of
+                            // retrying (and re-logging) every 2s tick for as long
+                            // as the gate stays closed.
+                            debug!(
+                                "[DEVICE_RECOVERY] skipping default input change: {} is gated by the bluetooth meeting gate",
+                                new_default_input
+                            );
                         } else {
                             info!("system default input changed to: {}", new_default_input);
 
@@ -1092,6 +1284,28 @@ pub async fn start_device_monitor(
                                             // leave backoff untouched
                                         } else if user_disabled.contains(&device_name) {
                                             input_recovery_backoff.record_failure(true);
+                                        } else if audio_manager
+                                            .bluetooth_input_gate_blocks(&default_input)
+                                            .await
+                                        {
+                                            // Same "no-op'd success" hazard as the
+                                            // suspended-device case above: the
+                                            // default input is a Bluetooth mic the
+                                            // meeting gate withholds outside a
+                                            // meeting. Starting it here would
+                                            // silently no-op, then get mis-logged
+                                            // as "restored" with a backoff reset —
+                                            // this was the actual root cause of the
+                                            // AirPods flickering between showing up
+                                            // as an input and an output: this loop
+                                            // was retrying every couple of seconds
+                                            // once backoff kept resetting on a
+                                            // "success" that never streamed a
+                                            // frame, hammering the device's
+                                            // CoreAudio object often enough to
+                                            // perturb its A2DP/SCO profile
+                                            // negotiation. Skip this tick entirely,
+                                            // no log, no reset, no retry storm.
                                         } else {
                                             warn!(
                                                 "[DEVICE_RECOVERY] no input device running (attempt {}), starting default: {}",
@@ -1720,6 +1934,13 @@ pub async fn start_device_monitor(
                     )
                     .await;
 
+                // Bluetooth mic recording gated to detected meetings by
+                // default (issue #3750 — opening a Bluetooth mic always
+                // degrades the paired device's output audio). Independent of
+                // the piggyback tap above; runs every tick regardless of
+                // `experimental_meeting_piggyback`.
+                run_bluetooth_mic_gate_sweep(&audio_manager).await;
+
                 // Capture whichever render endpoint audio actually plays
                 // through, and notify if a meeting's speaker audio isn't
                 // reaching the pipeline. Inert outside Windows — see
@@ -1981,6 +2202,81 @@ async fn run_pinned_input_fallback_sweep(
     }
 }
 
+/// Reconciles Bluetooth *input* device capture against the meeting gate
+/// (`bluetooth_mic_allowed`): starts a Bluetooth mic the instant a meeting
+/// begins (or `always_record_bluetooth_mic` is on) and stops it the instant
+/// the meeting ends, so the Bluetooth link returns to A2DP as soon as
+/// capture isn't needed. Gating `AudioManager::start_device` (used by every
+/// other start path) stops new starts already; this sweep only needs to
+/// reconcile actual running-state against the gate decision each tick — no
+/// separate suspended-devices tracking, since the gate itself prevents
+/// anything from re-starting a device this sweep just stopped.
+///
+/// A dedicated Bluetooth microphone with no output side of its own
+/// (`bluetooth_input_is_combo_headset` false) is exempt from the gate
+/// entirely — it's checked per candidate below, since a dedicated mic and a
+/// combo headset could both be enabled at once.
+///
+/// Candidates come from two sources, since either alone misses real cases:
+/// `enabled_devices()` (explicitly selected devices — but a Bluetooth device
+/// gated on its very first start never lands there, since that insert is a
+/// side effect of a successful start) and the OS default input when "Auto-
+/// select audio devices" (`use_system_default_audio`) is on (the common case
+/// where a paired headset becomes the default mic without ever being
+/// explicitly enabled).
+async fn run_bluetooth_mic_gate_sweep(audio_manager: &AudioManager) {
+    use crate::core::device::bluetooth_input_is_combo_headset;
+    use crate::core::device_detection::{bluetooth_mic_allowed, InputDeviceKind};
+
+    let always_override = audio_manager.always_record_bluetooth_mic().await;
+    let in_meeting = match audio_manager.meeting_detector().await {
+        Some(d) => d.is_in_meeting(),
+        None => false,
+    };
+
+    let mut candidates: HashSet<String> = audio_manager
+        .enabled_devices()
+        .await
+        .into_iter()
+        .filter(|name| {
+            parse_audio_device(name)
+                .map(|d| d.device_type == DeviceType::Input)
+                .unwrap_or(false)
+        })
+        .collect();
+    if audio_manager.use_system_default_audio().await {
+        if let Ok(default_input) = default_input_device() {
+            candidates.insert(default_input.to_string());
+        }
+    }
+
+    for name in candidates {
+        if InputDeviceKind::detect(&name) != InputDeviceKind::Bluetooth {
+            continue;
+        }
+        let Ok(device) = parse_audio_device(&name) else {
+            continue;
+        };
+        // Per-device: a dedicated mic-only Bluetooth device (no output side
+        // on the same hardware) is never gated, regardless of other devices.
+        let is_combo_headset = bluetooth_input_is_combo_headset(&name);
+        let allowed = bluetooth_mic_allowed(
+            &InputDeviceKind::Bluetooth,
+            is_combo_headset,
+            always_override,
+            in_meeting,
+        );
+        let running = audio_manager.is_device_actively_streaming(&device);
+        if allowed && !running {
+            if let Err(e) = audio_manager.start_device(&device).await {
+                warn!("bluetooth mic gate: failed to start {}: {:?}", device, e);
+            }
+        } else if !allowed && running {
+            let _ = audio_manager.stop_device_recording(&device).await;
+        }
+    }
+}
+
 pub async fn stop_device_monitor() -> Result<()> {
     if let Some(handle) = DEVICE_MONITOR.lock().await.take() {
         handle.abort();
@@ -2029,6 +2325,66 @@ impl RestartCooldown {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_lock_audio_gate_tears_down_and_resumes_once_per_edge() {
+        let mut gate = ScreenLockAudioGate::default();
+
+        assert_eq!(gate.update(false), ScreenLockAudioAction::None);
+        assert_eq!(gate.update(true), ScreenLockAudioAction::Suspend);
+        assert_eq!(gate.update(true), ScreenLockAudioAction::EnforceSuspended);
+        assert_eq!(gate.update(false), ScreenLockAudioAction::Resume);
+        assert_eq!(gate.update(false), ScreenLockAudioAction::None);
+    }
+
+    #[test]
+    fn screen_lock_audio_gate_enforces_shutdown_for_every_locked_tick() {
+        let mut gate = ScreenLockAudioGate::default();
+
+        for expected in [
+            ScreenLockAudioAction::Suspend,
+            ScreenLockAudioAction::EnforceSuspended,
+            ScreenLockAudioAction::EnforceSuspended,
+        ] {
+            let action = gate.update(true);
+            assert_eq!(action, expected);
+            assert!(action.enforces_stream_shutdown());
+        }
+
+        assert_eq!(gate.update(false), ScreenLockAudioAction::Resume);
+        assert!(!ScreenLockAudioAction::Resume.enforces_stream_shutdown());
+        assert!(!ScreenLockAudioAction::None.enforces_stream_shutdown());
+    }
+
+    #[test]
+    fn screen_lock_audio_gate_matches_all_short_lock_sequences() {
+        // Exhaust every lock/unlock sequence up to eight monitor ticks. This
+        // covers rapid flapping, repeated locks, and preference toggles while
+        // the display remains locked (the input is the effective pause flag).
+        for mask in 0u16..=u8::MAX as u16 {
+            let mut gate = ScreenLockAudioGate::default();
+            let mut previously_locked = false;
+
+            for tick in 0..8 {
+                let locked = mask & (1 << tick) != 0;
+                let expected = match (previously_locked, locked) {
+                    (false, false) => ScreenLockAudioAction::None,
+                    (false, true) => ScreenLockAudioAction::Suspend,
+                    (true, true) => ScreenLockAudioAction::EnforceSuspended,
+                    (true, false) => ScreenLockAudioAction::Resume,
+                };
+                let action = gate.update(locked);
+
+                assert_eq!(action, expected, "mask={mask:08b}, tick={tick}");
+                assert_eq!(
+                    action.enforces_stream_shutdown(),
+                    locked,
+                    "mask={mask:08b}, tick={tick}"
+                );
+                previously_locked = locked;
+            }
+        }
+    }
 
     lazy_static::lazy_static! {
         /// Default for builders that don't exercise the fail-over-to-any-available

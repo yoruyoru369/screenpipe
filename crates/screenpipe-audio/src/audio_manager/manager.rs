@@ -730,12 +730,15 @@ impl AudioManager {
         // Remove from disabled FIRST so start_device gate allows it
         self.user_disabled_devices.write().await.remove(device_name);
 
+        // If the audio manager was fully stopped (e.g. global capture pause),
+        // restart the pipeline so this device can actually produce data.
+        // start() is idempotent — no-op if already Running.
         if self.status().await != AudioManagerStatus::Running {
             info!(
-                "user re-enabled audio device while audio manager is stopped: {}",
+                "audio manager stopped, restarting pipeline to resume device: {}",
                 device_name
             );
-            return Ok(());
+            self.start().await?;
         }
 
         let device = match parse_audio_device(device_name) {
@@ -771,6 +774,15 @@ impl AudioManager {
         if self.options.read().await.is_disabled {
             debug!(
                 "skipping start of audio device because audio capture is disabled: {}",
+                device
+            );
+            return Ok(());
+        }
+
+        #[cfg(target_os = "macos")]
+        if screenpipe_config::should_pause_audio_for_lock() {
+            debug!(
+                "skipping start of audio device while screen is locked: {}",
                 device
             );
             return Ok(());
@@ -814,6 +826,19 @@ impl AudioManager {
             return Ok(());
         }
 
+        // Bluetooth mics always force the paired device's audio link out of
+        // A2DP into SCO, degrading the user's headphone/speaker output — a
+        // macOS/OS-level tradeoff with no external workaround (issue #3750).
+        // Gated to detected meetings by default; `always_record_bluetooth_mic`
+        // opts back into always-on capture.
+        if self.bluetooth_input_gate_blocks(device).await {
+            debug!(
+                "skipping start of bluetooth mic {}: not in a meeting (always_record_bluetooth_mic is off)",
+                device
+            );
+            return Ok(());
+        }
+
         if let Err(e) = self.device_manager.start_device(device).await {
             let err_str = e.to_string();
 
@@ -822,6 +847,19 @@ impl AudioManager {
             } else if !err_str.contains("already running") {
                 return Err(e);
             }
+        }
+
+        // The lock flag can change while CoreAudio is opening the stream. The
+        // pre-start guard above cannot close that race, and the device monitor
+        // cannot see this stream until its recording handle is registered.
+        #[cfg(target_os = "macos")]
+        if screenpipe_config::should_pause_audio_for_lock() {
+            self.stop_device_recording(device).await?;
+            debug!(
+                "stopped newly-opened audio device after screen locked during startup: {}",
+                device
+            );
+            return Ok(());
         }
 
         if !self.recording_handles.contains_key(device) {
@@ -856,6 +894,14 @@ impl AudioManager {
         if self.options.read().await.is_disabled {
             return Ok(());
         }
+        #[cfg(target_os = "macos")]
+        if screenpipe_config::should_pause_audio_for_lock() {
+            debug!(
+                "skipping start of meeting-session audio device while screen is locked: {}",
+                device
+            );
+            return Ok(());
+        }
         // Insert BEFORE starting: the audio-receiver drop-gate bypass must see
         // this device from the very first chunk. Rolled back on failure below.
         self.session_devices
@@ -880,6 +926,23 @@ impl AudioManager {
                 return Err(e);
             }
         }
+
+        // As above, close a stream that finished opening after the screen-lock
+        // gate was checked. Remove session bookkeeping before the generic stop.
+        #[cfg(target_os = "macos")]
+        if screenpipe_config::should_pause_audio_for_lock() {
+            self.session_devices
+                .write()
+                .unwrap()
+                .remove(&device.to_string());
+            self.stop_device_recording(device).await?;
+            debug!(
+                "stopped newly-opened meeting-session audio device after screen locked during startup: {}",
+                device
+            );
+            return Ok(());
+        }
+
         if !self.recording_handles.contains_key(device) {
             if let Some(is_running) = self.device_manager.is_running_mut(device) {
                 is_running.store(true, Ordering::Relaxed);
@@ -1618,6 +1681,57 @@ impl AudioManager {
     /// piggyback in continuous ("always") capture just as in meetings-only.
     pub(crate) async fn piggyback_enabled(&self) -> bool {
         self.options.read().await.experimental_meeting_piggyback
+    }
+
+    /// Whether Bluetooth mics are exempt from the meeting gate (see
+    /// `start_device`'s Bluetooth check and the device monitor's
+    /// `run_bluetooth_mic_gate_sweep`). Consumed outside this module, so
+    /// `pub(crate)` rather than private, matching `piggyback_enabled`.
+    pub(crate) async fn always_record_bluetooth_mic(&self) -> bool {
+        self.options.read().await.always_record_bluetooth_mic
+    }
+
+    /// Whether `device` is currently withheld by the Bluetooth meeting gate.
+    /// `start_device` uses this internally, but it's also `pub(crate)` for
+    /// callers in `device_monitor.rs` that swap the active input device
+    /// based on system-default changes or "no input running" recovery —
+    /// they MUST check this BEFORE stopping a working device or resetting a
+    /// retry backoff on the strength of `start_device` returning `Ok(())`.
+    /// That `Ok(())` only means "no error", not "now actually capturing" —
+    /// this gate is a deliberate, often long-lived no-op, not a failure, so
+    /// treating it as success causes real capture loss (stopping a working
+    /// mic in favor of one that silently never started) or a tight retry
+    /// loop (backoff keeps getting reset by a "success" that never streams
+    /// a single frame, hammering the Bluetooth device's CoreAudio object
+    /// every couple of seconds — this is what caused the AirPods to flicker
+    /// between showing up as an input and an output, since sitting on the
+    /// mic-open path this often perturbs the A2DP/SCO profile negotiation).
+    pub(crate) async fn bluetooth_input_gate_blocks(
+        &self,
+        device: &crate::core::device::AudioDevice,
+    ) -> bool {
+        if device.device_type != crate::core::device::DeviceType::Input {
+            return false;
+        }
+        let kind = crate::core::device_detection::InputDeviceKind::detect(&device.name);
+        if kind != crate::core::device_detection::InputDeviceKind::Bluetooth {
+            return false;
+        }
+        // Only probe hardware for confirmed-Bluetooth devices — a dedicated
+        // mic-only Bluetooth device (no output side on the same hardware)
+        // has nothing to protect, so it's exempt from the gate entirely.
+        let is_combo_headset = crate::core::device::bluetooth_input_is_combo_headset(&device.name);
+        let always_override = self.always_record_bluetooth_mic().await;
+        let in_meeting = match self.meeting_detector().await {
+            Some(d) => d.is_in_meeting(),
+            None => false,
+        };
+        !crate::core::device_detection::bluetooth_mic_allowed(
+            &kind,
+            is_combo_headset,
+            always_override,
+            in_meeting,
+        )
     }
 
     /// Returns the shared WhisperContext for backward compatibility, if loaded.

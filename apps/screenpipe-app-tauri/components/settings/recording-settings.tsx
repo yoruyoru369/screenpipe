@@ -6,11 +6,16 @@
 
 const DEFAULT_OPENAI_COMPATIBLE_ENDPOINT = "http://127.0.0.1:8080";
 
-import React, { useEffect, useState, useMemo, useCallback } from "react";
+import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useEventListener } from "@/lib/hooks/use-event-listener";
 import { useInterval } from "@/lib/hooks/use-interval";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
 import { CaptureFrequencyPreview, AudioCaptureModePreview } from "./setting-previews";
+import {
+  createSettingsWriteQueue,
+  enqueueSettingsWrite,
+  flushSettingsWrites,
+} from "./settings-write-queue";
 
 /** Settings search index for this section. Co-located with the component so adding a field here means updating one file. See `SettingsField` in `./settings-search` for the schema. */
 export const searchIndex: SettingsField[] = [
@@ -29,6 +34,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Echo cancellation mode", keywords: ["echo", "aec", "voiceprocessingio", "wasapi"], conditional: true },
   { label: "CoreAudio system audio capture", keywords: ["coreaudio", "system audio"], conditional: true },
   { label: "Smart recording", keywords: ["smart recording", "beta", "meeting", "piggyback", "per-process", "meeting audio"], conditional: true },
+  { label: "Bluetooth microphones", keywords: ["bluetooth", "airpods", "headset", "a2dp", "sco", "meeting"], conditional: true },
   { label: "Screen context capture", keywords: ["screen", "video", "accessibility"] },
   { label: "Screenshot images", keywords: ["screenshot", "pixels", "ocr", "jpeg"] },
   { label: "Use all monitors", keywords: ["monitor", "display"], conditional: true },
@@ -95,6 +101,7 @@ import {
   Play,
   Rewind,
   FastForward,
+  Bluetooth,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -1991,6 +1998,7 @@ export function RecordingSettings() {
 
   // Add new state to track if settings have changed
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const settingsWriteQueueRef = useRef(createSettingsWriteQueue());
 
   // Optimized debounced validation
   const debouncedValidateSettings = useMemo(
@@ -2040,8 +2048,11 @@ export function RecordingSettings() {
     // Validate new settings
     debouncedValidateSettings({ ...settings, ...sanitizedSettings });
     
-    // Update settings
-    updateSettings(sanitizedSettings);
+    // Persist settings in order. Apply waits for this queue before restarting
+    // capture so the engine cannot read the previous value from disk.
+    enqueueSettingsWrite(settingsWriteQueueRef.current, () =>
+      updateSettings(sanitizedSettings)
+    );
     
     if (restart) {
       setHasUnsavedChanges(true);
@@ -2289,6 +2300,8 @@ export function RecordingSettings() {
     });
 
     try {
+      await flushSettingsWrites(settingsWriteQueueRef.current);
+
       if (!settings.analyticsEnabled) {
         posthog.capture("telemetry", {
           enabled: false,
@@ -2645,6 +2658,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
       <div className="flex items-center justify-end">
           {hasUnsavedChanges && (
             <Button
+              data-testid="recording-settings-apply-restart"
               onClick={handleUpdate}
               disabled={isUpdating || Object.keys(validationErrors).length > 0}
               size="sm"
@@ -3411,6 +3425,10 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
             const displayName = getAudioDeviceDisplayName(device.name);
             // Use per-device level if available, fall back to global speechRatio
             const deviceLevel = overlayData.deviceLevels[device.name] ?? overlayData.speechRatio;
+            // Backend-computed: exactly mirrors AudioManager::start_device's
+            // real gate (Bluetooth input + combo headset), so this hint
+            // never mismatches actual recording behavior.
+            const isBluetoothMicGated = device.isComboBluetoothMic && !settings.alwaysRecordBluetoothMic;
             return (
               <div
                 key={device.name}
@@ -3428,6 +3446,15 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     <p className="text-xs font-medium truncate">{displayName}</p>
                     {device.isDefault && (
                       <Badge variant="secondary" className="text-[9px] h-3.5 px-1 shrink-0">Default</Badge>
+                    )}
+                    {isBluetoothMicGated && (
+                      <Badge
+                        variant="outline"
+                        className="text-[9px] h-3.5 px-1 shrink-0"
+                        title="only recorded during a detected meeting — turn on &quot;always record bluetooth mic&quot; to change this"
+                      >
+                        meetings only
+                      </Badge>
                     )}
                   </div>
                   {isSelected && (
@@ -3577,6 +3604,34 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 checked={Boolean(settings.experimentalMeetingPiggyback ?? false)}
                 disabled={Boolean(settings.disableMeetingDetector)}
                 onCheckedChange={(checked) => handleSettingsChange({ experimentalMeetingPiggyback: checked }, true)}
+              />
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
+        {/* Bluetooth mic recording: opening a Bluetooth mic always degrades
+            the paired device's output audio quality (A2DP -> SCO, a macOS/OS
+            limitation — issue #3750). Off by default, Bluetooth mics are only
+            recorded during a detected meeting; this override records them
+            always, like any other mic. */}
+        {!settings.disableAudio && (
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2.5">
+                <Bluetooth className="h-4 w-4 text-muted-foreground shrink-0" />
+                <div>
+                  <h3 className="text-sm font-medium text-foreground">Bluetooth microphones</h3>
+                  <p className="text-xs text-muted-foreground">
+                    connecting to a bluetooth mic degrades your headphones&apos; audio quality, an OS limitation we can&apos;t avoid. by default we only record bluetooth mics while you&apos;re in a detected meeting.
+                  </p>
+                </div>
+              </div>
+              <Switch
+                id="alwaysRecordBluetoothMic"
+                checked={Boolean(settings.alwaysRecordBluetoothMic ?? false)}
+                onCheckedChange={(checked) => handleSettingsChange({ alwaysRecordBluetoothMic: checked }, true)}
               />
             </div>
           </CardContent>
@@ -3936,6 +3991,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   </span>
                 </div>
                 <Slider
+                  data-testid="capture-frequency-slider"
                   value={[seconds]}
                   onValueChange={([value]) =>
                     handleSettingsChange(

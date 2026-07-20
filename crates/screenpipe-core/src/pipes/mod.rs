@@ -22,7 +22,7 @@ pub mod sync;
 pub(crate) mod trajectory;
 
 use crate::agents::{
-    pi::{PiExecutor, SCREENPIPE_API_URL},
+    pi::{pi_package_enabled, PiExecutor, SCREENPIPE_API_URL},
     AgentExecutor, ExecutionHandle, SharedPid, STOP_REQUESTED_PID,
 };
 use crate::pipes::connections::parse_mcp_connection_id;
@@ -46,6 +46,15 @@ const PIPE_LOG_ACTIVE_KEEP_PER_PIPE: usize = 200;
 const PIPE_LOG_ARCHIVE_AFTER_DAYS: i64 = 14;
 const PIPE_LOG_ARCHIVE_DIR: &str = "archive";
 const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
+/// Max event-triggered pipe runs allowed to execute concurrently.
+///
+/// Scheduled runs are already serialized (one at a time). Event-triggered runs
+/// bypass that queue for low latency, but without a ceiling a burst of triggers
+/// across many pipes spawns one heavy agent subprocess *each*, all at once — the
+/// RAM spike behind "many pipes → high memory". This bounds the fan-out while
+/// still allowing several to run in parallel. Tunable. Live and peak usage are
+/// reported on `pipe_scheduled_run` so the limit's behavior is observable.
+const EVENT_TRIGGERED_CONCURRENCY_LIMIT: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Config & log types
@@ -1188,6 +1197,14 @@ pub trait PipeStore: Send + Sync {
     /// Update scheduler state after a run.
     async fn upsert_scheduler_state(&self, pipe_name: &str, success: bool) -> Result<()>;
 
+    /// Advance the scheduling watermark without recording a run result.
+    /// Used when a due occurrence is intentionally consumed as a no-op.
+    async fn advance_scheduler_last_run(
+        &self,
+        pipe_name: &str,
+        last_run_at: DateTime<Utc>,
+    ) -> Result<()>;
+
     /// Delete old executions, keeping only the newest `keep_per_pipe` per pipe.
     /// Returns the number of rows deleted.
     async fn cleanup_old_executions(&self, keep_per_pipe: i32) -> Result<u32>;
@@ -1200,6 +1217,9 @@ pub trait PipeStore: Send + Sync {
         &self,
         limit_per_pipe: i32,
     ) -> Result<HashMap<String, Vec<PipeExecution>>>;
+
+    /// Get the exact persisted execution count for every pipe.
+    async fn get_all_execution_counts(&self) -> Result<HashMap<String, i64>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2021,6 +2041,9 @@ fn should_try_fallback_preset(error_type: Option<&str>) -> bool {
 /// — never contains user data.
 pub type OnPipeRunComplete = Arc<dyn Fn(&str, Option<i64>, bool, f64, Option<&str>) + Send + Sync>;
 
+/// Synchronous scheduler launch guard. Returning `Some(reason)` skips the run.
+pub type SchedulerRunGuard = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Callback fired for each stdout line from a running pipe.
 /// Args: (pipe_name, execution_id, line)
 pub type OnPipeOutputLine = Arc<dyn Fn(&str, i64, &str) + Send + Sync>;
@@ -2144,6 +2167,9 @@ pub struct PipeManager {
     shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
     /// JoinHandle for the scheduler task — allows abort + join on shutdown.
     scheduler_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Optional synchronous guard checked immediately before a scheduler run.
+    /// Returning a reason consumes the due occurrence without launching it.
+    scheduler_run_guard: Option<SchedulerRunGuard>,
     /// Generation counter — incremented on every start_scheduler, checked
     /// in the scheduler loop. If the loop's generation doesn't match, it
     /// exits immediately. Defense-in-depth against orphaned scheduler tasks.
@@ -2176,6 +2202,10 @@ pub struct PipeManager {
     local_api_key: Option<String>,
     /// Circuit breaker registry for AI preset fallback.
     fallback_registry: Arc<preset_fallback::PresetFallbackRegistry>,
+    /// Live count of concurrently-executing event-triggered runs.
+    event_runs_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// Process-lifetime peak of `event_runs_active`, reported to analytics.
+    event_runs_peak: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PipeManager {
@@ -2199,6 +2229,7 @@ impl PipeManager {
             running_execution_ids: Arc::new(Mutex::new(HashMap::new())),
             shutdown_tx: None,
             scheduler_handle: None,
+            scheduler_run_guard: None,
             scheduler_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             on_run_complete: None,
             on_output_line: None,
@@ -2216,7 +2247,20 @@ impl PipeManager {
             connections_context: None,
             local_api_key: None,
             fallback_registry: registry,
+            event_runs_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            event_runs_peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// (live, peak) counters of concurrent event-triggered runs, for
+    /// analytics. Peak is process-lifetime.
+    pub fn event_run_concurrency(
+        &self,
+    ) -> (
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        (self.event_runs_active.clone(), self.event_runs_peak.clone())
     }
 
     /// Returns the pipes directory (e.g. `~/.screenpipe/pipes/`).
@@ -2825,6 +2869,15 @@ impl PipeManager {
         }
     }
 
+    /// Get exact persisted execution counts for all pipes in one grouped query.
+    pub async fn get_all_execution_counts(&self) -> HashMap<String, i64> {
+        if let Some(ref store) = self.store {
+            store.get_all_execution_counts().await.unwrap_or_default()
+        } else {
+            HashMap::new()
+        }
+    }
+
     /// List all pipes with status and recent executions in a single call.
     /// Avoids N+1 requests by fetching executions for all pipes at once.
     pub async fn list_pipes_with_executions(
@@ -3131,6 +3184,7 @@ impl PipeManager {
             preset_prompt.as_deref(),
             self.connections_context.as_deref(),
             self.local_api_key.as_deref(),
+            config.agent == "pi" && pi_package_enabled("pi-subagents"),
         );
         let prompt = self.render_prompt(&config, &body, preset_prompt.as_deref());
         let pipe_name = name.to_string();
@@ -3444,10 +3498,7 @@ impl PipeManager {
             let name_for_cb = log.pipe_name.clone();
             let mut l = logs_ref.lock().await;
             let entry = l.entry(log.pipe_name.clone()).or_insert_with(VecDeque::new);
-            entry.push_back(log);
-            if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-                entry.pop_front();
-            }
+            push_run_log_status(entry, log);
             drop(l);
 
             if let Some(ref cb) = on_complete {
@@ -3713,6 +3764,7 @@ impl PipeManager {
                 preset_prompt.as_deref(),
                 self.connections_context.as_deref(),
                 self.local_api_key.as_deref(),
+                config.agent == "pi" && pi_package_enabled("pi-subagents"),
             );
             let prompt = self.render_prompt(&config, &body, preset_prompt.as_deref());
 
@@ -4526,6 +4578,12 @@ impl PipeManager {
         }
     }
 
+    /// Set a runtime guard for scheduler-launched runs. Manual runs are not
+    /// affected. The returned string is logged as the skip reason.
+    pub fn set_scheduler_run_guard(&mut self, guard: SchedulerRunGuard) {
+        self.scheduler_run_guard = Some(guard);
+    }
+
     /// Start the background scheduler.  Spawns a tokio task that checks
     /// pipe schedules and runs them when due.
     pub async fn start_scheduler(&mut self) -> Result<()> {
@@ -4561,6 +4619,11 @@ impl PipeManager {
         let extra_context = self.extra_context.clone();
         let connections_context = self.connections_context.clone();
         let local_api_key = self.local_api_key.clone();
+        // Live count + process-lifetime peak of concurrent event-triggered
+        // runs, surfaced to analytics via `event_run_concurrency()`.
+        let event_runs_active = self.event_runs_active.clone();
+        let event_runs_peak = self.event_runs_peak.clone();
+        let scheduler_run_guard = self.scheduler_run_guard.clone();
 
         let handle = tokio::spawn(async move {
             info!("pipe scheduler started (generation {})", generation);
@@ -4574,6 +4637,12 @@ impl PipeManager {
             // avoid rate-limit stampedes when many pipes share the same cron.
             // Event-triggered pipes bypass the queue for low-latency response.
             let execution_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            // Event-triggered runs bypass the sequential queue above, but are
+            // capped so a burst can't spawn unbounded heavy agent subprocesses
+            // at once. See EVENT_TRIGGERED_CONCURRENCY_LIMIT.
+            let event_semaphore = Arc::new(tokio::sync::Semaphore::new(
+                EVENT_TRIGGERED_CONCURRENCY_LIMIT,
+            ));
             // Track pipes that are queued (waiting for semaphore) or running,
             // so the scheduler doesn't double-queue the same pipe.
             let queued_or_running: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
@@ -4862,6 +4931,36 @@ impl PipeManager {
                         continue;
                     }
 
+                    if let Some(reason) = scheduler_run_guard.as_ref().and_then(|guard| guard()) {
+                        if due {
+                            let skipped_at = Utc::now();
+                            last_run.insert(name.clone(), skipped_at);
+                            if let Some(ref store) = store {
+                                if let Err(error) =
+                                    store.advance_scheduler_last_run(name, skipped_at).await
+                                {
+                                    warn!(
+                                        "scheduler: failed to persist skipped run for '{}': {}",
+                                        name, error
+                                    );
+                                }
+                            }
+                            if matches!(
+                                parse_schedule(&config.schedule),
+                                Some(ParsedSchedule::Once(_))
+                            ) {
+                                if let Err(error) = set_local_override(&pipes_dir, name, false) {
+                                    warn!(
+                                        "scheduler: failed to disable skipped one-off pipe '{}': {}",
+                                        name, error
+                                    );
+                                }
+                            }
+                        }
+                        info!("scheduler: skipped pipe '{}': {}", name, reason);
+                        continue;
+                    }
+
                     // Check not already queued or running
                     {
                         let qr = queued_or_running.lock().await;
@@ -5112,6 +5211,7 @@ impl PipeManager {
                         preset_prompt.as_deref(),
                         connections_context.as_deref(),
                         local_api_key.as_deref(),
+                        config.agent == "pi" && pi_package_enabled("pi-subagents"),
                     );
                     let prompt = render_prompt_with_port(
                         config,
@@ -5133,20 +5233,33 @@ impl PipeManager {
                     let mcp_session_access_ref = mcp_session_access.clone();
                     let pipe_timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
                     let semaphore = execution_semaphore.clone();
+                    let event_sem = event_semaphore.clone();
+                    let event_active = event_runs_active.clone();
+                    let event_peak = event_runs_peak.clone();
                     let pipes_dir_for_mark = pipes_dir.clone();
                     let queued_ref = queued_or_running.clone();
                     let mcp_server_allowlist = selected_mcp_server_ids(config);
 
                     tokio::spawn(async move {
-                        // Event-triggered pipes skip the queue for low-latency response.
-                        // Scheduled pipes wait for the previous one to finish.
+                        // Scheduled pipes wait for the previous one to finish
+                        // (semaphore of 1). Event-triggered pipes skip that queue
+                        // for low latency but still take a permit from a separate,
+                        // higher-capacity semaphore so a burst can't spawn
+                        // unbounded concurrent agent subprocesses.
                         let _permit = if !is_event_triggered {
-                            Some(
-                                semaphore
-                                    .acquire()
-                                    .await
-                                    .expect("execution semaphore closed"),
-                            )
+                            semaphore
+                                .acquire()
+                                .await
+                                .expect("execution semaphore closed")
+                        } else {
+                            event_sem.acquire().await.expect("event semaphore closed")
+                        };
+
+                        // Count concurrent event-triggered runs (drops on every
+                        // exit path); the peak feeds the pipe_scheduled_run
+                        // analytics event.
+                        let _concurrency_guard = if is_event_triggered {
+                            Some(EventRunGuard::enter(event_active, event_peak))
                         } else {
                             None
                         };
@@ -5523,10 +5636,7 @@ impl PipeManager {
                         let name_for_cb = log.pipe_name.clone();
                         let mut l = logs_ref.lock().await;
                         let entry = l.entry(log.pipe_name.clone()).or_insert_with(VecDeque::new);
-                        entry.push_back(log);
-                        if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-                            entry.pop_front();
-                        }
+                        push_run_log_status(entry, log);
                         drop(l);
 
                         // Emit pipe_completed event so other pipes can chain
@@ -5939,10 +6049,18 @@ impl PipeManager {
     async fn append_log(&self, name: &str, log: &PipeRunLog) {
         let mut logs = self.logs.lock().await;
         let entry = logs.entry(name.to_string()).or_insert_with(VecDeque::new);
-        entry.push_back(log.clone());
-        if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-            entry.pop_front();
-        }
+        // Store status only — the full stdout lives in the DB/disk, not RAM.
+        push_run_log_status(
+            entry,
+            PipeRunLog {
+                pipe_name: log.pipe_name.clone(),
+                started_at: log.started_at,
+                finished_at: log.finished_at,
+                success: log.success,
+                stdout: String::new(),
+                stderr: log.stderr.clone(),
+            },
+        );
     }
 
     fn write_log_to_disk(&self, name: &str, log: &PipeRunLog) -> Result<()> {
@@ -6095,6 +6213,7 @@ fn render_pipe_system_prompt(
     system_prompt: Option<&str>,
     connections_context: Option<&str>,
     local_api_key: Option<&str>,
+    subagents_available: bool,
 ) -> String {
     let os = std::env::consts::OS;
     let mut sys = String::new();
@@ -6119,6 +6238,9 @@ fn render_pipe_system_prompt(
     ));
     sys.push_str(pipe_memory::PIPE_MEMORY_SYSTEM_PROMPT);
     sys.push('\n');
+    if subagents_available {
+        sys.push_str("Subagents: the `subagent` tool is enabled. Use it when this task has at least two independent research, review, or implementation workstreams that can run in parallel, then synthesize the child results. Keep simple or sequential work in this agent. For read-only child tasks, pass `acceptance.level: \"none\"` so a successful child is not rejected for making no edits.\n\n");
+    }
     sys.push_str(body);
 
     if let Some(ctx) = connections_context {
@@ -7101,6 +7223,48 @@ fn parse_duration_str(s: &str) -> Option<std::time::Duration> {
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
+
+/// RAII counter for concurrent event-triggered runs: increments the live count
+/// and records the process-lifetime peak on enter, decrements on drop — so the
+/// count stays accurate on every exit path (success, error, timeout, stop).
+struct EventRunGuard {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl EventRunGuard {
+    fn enter(
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        Self { active }
+    }
+}
+
+impl Drop for EventRunGuard {
+    fn drop(&mut self) {
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Append a run to a pipe's in-memory ring, keeping only the fields the status
+/// APIs actually read (`stderr` for `last_error`, plus timestamps/success) and
+/// dropping the potentially MB-sized `stdout` transcript.
+///
+/// The full output is the DB's job (`finish_execution`) — and disk's for
+/// foreground runs (`write_log_to_disk`); `get_logs` reads history from the DB.
+/// Keeping the whole transcript here too, up to 200 runs per pipe for the
+/// entire process lifetime, was pure RAM overhead that never freed after a run
+/// finished. This drops it without touching the persisted copies.
+fn push_run_log_status(entry: &mut VecDeque<PipeRunLog>, mut log: PipeRunLog) {
+    log.stdout = String::new();
+    entry.push_back(log);
+    while entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
+        entry.pop_front();
+    }
+}
 
 /// Filter NDJSON stdout to remove bulky streaming events before storage.
 /// `toolcall_delta` and `thinking_delta` events are only useful for live
@@ -8791,7 +8955,7 @@ mod tests {
         assert!(prompt.contains("Time range:"));
         assert!(prompt.contains("Do the work described above now."));
         // Port / body go into system prompt, not user prompt
-        let sys = render_pipe_system_prompt("body text", 3031, None, None, None);
+        let sys = render_pipe_system_prompt("body text", 3031, None, None, None, false);
         assert!(sys.contains("http://localhost:3031"));
         assert!(!sys.contains("http://localhost:3030"));
         assert!(sys.contains("body text"));
@@ -8820,7 +8984,7 @@ mod tests {
             artifacts: vec![],
             trigger: None,
         };
-        let sys = render_pipe_system_prompt("hello", 3030, None, None, None);
+        let sys = render_pipe_system_prompt("hello", 3030, None, None, None, false);
         assert!(sys.contains("http://localhost:3030"));
     }
 
@@ -8853,6 +9017,7 @@ mod tests {
             Some("You are a helpful assistant"),
             None,
             None,
+            false,
         );
         assert!(sys.starts_with("You are a helpful assistant\n\n"));
         assert!(sys.contains("body text"));
@@ -8882,21 +9047,21 @@ mod tests {
             artifacts: vec![],
             trigger: None,
         };
-        let sys = render_pipe_system_prompt("body text", 3030, None, None, None);
+        let sys = render_pipe_system_prompt("body text", 3030, None, None, None, false);
         assert!(!sys.contains("System prompt:"));
         assert!(sys.contains("body text"));
     }
 
     #[test]
     fn test_system_prompt_contains_anti_recursion_warning() {
-        let sys = render_pipe_system_prompt("task body", 3030, None, None, None);
+        let sys = render_pipe_system_prompt("task body", 3030, None, None, None, false);
         assert!(sys.contains("NEVER run `screenpipe pipe run`"));
         assert!(sys.contains("You ARE this pipe"));
     }
 
     #[test]
     fn test_system_prompt_injects_shared_memory_policy_once() {
-        let sys = render_pipe_system_prompt("task body", 3030, None, None, None);
+        let sys = render_pipe_system_prompt("task body", 3030, None, None, None, false);
         assert_eq!(sys.matches(pipe_memory::MEMORY_PROMPT_MARKER).count(), 1);
         assert!(sys.contains("read `./memory.md`"));
         assert!(sys.contains("Append-only"));
@@ -8910,7 +9075,8 @@ mod tests {
         // Pass the key explicitly — the renderer must not depend on parent
         // process env (which is empty in tests and was the root cause of the
         // 403 reported by the security-requests-grc pipe in prod).
-        let sys = render_pipe_system_prompt("task body", 3030, None, None, Some("sp-test-key"));
+        let sys =
+            render_pipe_system_prompt("task body", 3030, None, None, Some("sp-test-key"), false);
         assert!(
             sys.contains("API Authentication: REQUIRED"),
             "auth note must be emitted when local_api_key is Some"
@@ -8920,11 +9086,21 @@ mod tests {
 
     #[test]
     fn test_system_prompt_omits_auth_note_when_no_key() {
-        let sys = render_pipe_system_prompt("task body", 3030, None, None, None);
+        let sys = render_pipe_system_prompt("task body", 3030, None, None, None, false);
         assert!(
             !sys.contains("API Authentication: REQUIRED"),
             "auth note must not be emitted when local_api_key is None"
         );
+    }
+
+    #[test]
+    fn test_system_prompt_explains_enabled_subagent_tool() {
+        let enabled = render_pipe_system_prompt("task body", 3030, None, None, None, true);
+        assert!(enabled.contains("the `subagent` tool is enabled"));
+        assert!(enabled.contains("acceptance.level: \"none\""));
+
+        let disabled = render_pipe_system_prompt("task body", 3030, None, None, None, false);
+        assert!(!disabled.contains("the `subagent` tool is enabled"));
     }
 
     // -- PipeExecution / SchedulerState serde roundtrip ----------------------
@@ -9034,6 +9210,33 @@ mod tests {
         let result = truncate_string("hello world", 5);
         assert!(result.starts_with("hello"));
         assert!(result.contains("[truncated]"));
+    }
+
+    // -- in-memory run-log ring (RAM footprint) -----------------------------
+
+    #[test]
+    fn push_run_log_status_drops_stdout_keeps_stderr_and_caps_count() {
+        let mut dq: VecDeque<PipeRunLog> = VecDeque::new();
+        let now = Utc::now();
+        for _ in 0..(PIPE_LOG_ACTIVE_KEEP_PER_PIPE + 50) {
+            push_run_log_status(
+                &mut dq,
+                PipeRunLog {
+                    pipe_name: "p".to_string(),
+                    started_at: now,
+                    finished_at: now,
+                    success: false,
+                    stdout: "x".repeat(1_000_000),
+                    stderr: "boom".to_string(),
+                },
+            );
+        }
+        // Run count is capped.
+        assert_eq!(dq.len(), PIPE_LOG_ACTIVE_KEEP_PER_PIPE);
+        // The heavy stdout transcript is not retained in memory at all…
+        assert!(dq.iter().all(|l| l.stdout.is_empty()));
+        // …but stderr (needed for `last_error`) is kept verbatim, untruncated.
+        assert!(dq.iter().all(|l| l.stderr == "boom"));
     }
 
     // -- url_to_pipe_name ---------------------------------------------------
@@ -9545,6 +9748,66 @@ mod tests {
         );
 
         scheduled.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_event_triggered_concurrency_is_capped() {
+        // Simulates a burst of event-triggered pipes all acquiring the event
+        // semaphore. No more than EVENT_TRIGGERED_CONCURRENCY_LIMIT should run
+        // at once — the guard against unbounded concurrent agent subprocesses.
+        let event_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            EVENT_TRIGGERED_CONCURRENCY_LIMIT,
+        ));
+        let active_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_concurrent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let burst = EVENT_TRIGGERED_CONCURRENCY_LIMIT * 3;
+        let mut handles = Vec::new();
+        for _ in 0..burst {
+            let sem = event_semaphore.clone();
+            let active = active_count.clone();
+            let max = max_concurrent.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let _guard = EventRunGuard::enter(active, max);
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let peak = max_concurrent.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            peak <= EVENT_TRIGGERED_CONCURRENCY_LIMIT,
+            "event-triggered concurrency ({peak}) exceeded cap ({EVENT_TRIGGERED_CONCURRENCY_LIMIT})"
+        );
+        // With a burst larger than the cap, we should actually reach the cap.
+        assert_eq!(peak, EVENT_TRIGGERED_CONCURRENCY_LIMIT);
+        assert_eq!(active_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_run_guard_tracks_live_and_peak() {
+        // The telemetry counters behind event_runs_active/event_runs_peak:
+        // guard increments the live count and records the peak on enter,
+        // decrements on drop.
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        {
+            let _g1 = EventRunGuard::enter(active.clone(), peak.clone());
+            let _g2 = EventRunGuard::enter(active.clone(), peak.clone());
+            let _g3 = EventRunGuard::enter(active.clone(), peak.clone());
+            assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 3);
+        }
+        // All guards dropped — live count returns to zero, peak sticks.
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        // Peak never decreases on later, smaller bursts.
+        let _g = EventRunGuard::enter(active.clone(), peak.clone());
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
