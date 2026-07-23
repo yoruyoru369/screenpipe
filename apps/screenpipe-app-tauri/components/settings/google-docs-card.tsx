@@ -152,14 +152,14 @@ export function GoogleDocsCard() {
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
-            <img src="/images/google-docs.svg" alt="Google Docs" className="w-10 h-10 rounded-xl" />
+            <img src="/images/google-docs.svg" alt="Google Docs" className="w-10 h-10 rounded-none" />
           </div>
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <h3 className="text-sm font-semibold text-foreground">Google Docs</h3>
               {connected && (
-                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-full">
+                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-none">
                   {accounts.length} account{accounts.length > 1 ? "s" : ""}
                 </span>
               )}
@@ -264,9 +264,9 @@ export function GoogleDocsCard() {
                 {recentDocs.map((doc) => (
                   <div
                     key={doc.id}
-                    className="flex items-center gap-2 text-xs rounded-md px-2 py-1.5 bg-muted/50"
+                    className="flex items-center gap-2 text-xs rounded-none px-2 py-1.5 bg-muted/50"
                   >
-                    <FileText className="h-3 w-3 shrink-0 text-blue-500" />
+                    <FileText className="h-3 w-3 shrink-0 text-neutral-500" />
                     <span className="flex-1 truncate text-foreground">{doc.name}</span>
                     <span className="shrink-0 text-muted-foreground">{formatRelativeTime(doc.modifiedTime)}</span>
                     <a

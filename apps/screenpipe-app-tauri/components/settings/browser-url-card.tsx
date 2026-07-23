@@ -95,7 +95,7 @@ export function BrowserUrlCard({ onStatusChange }: BrowserUrlCardProps) {
             <img
               src="/images/browser-url.svg"
               alt="Browser URL"
-              className="w-10 h-10 rounded-xl"
+              className="w-10 h-10 rounded-none"
             />
           </div>
 
@@ -104,11 +104,11 @@ export function BrowserUrlCard({ onStatusChange }: BrowserUrlCardProps) {
               <h3 className="text-sm font-semibold text-foreground">
                 Browser URL Capture
               </h3>
-              <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-full">
+              <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-none">
                 macOS
               </span>
               {allGranted && (
-                <span className="px-2 py-0.5 text-xs font-medium bg-green-500/10 text-green-600 rounded-full">
+                <span className="px-2 py-0.5 text-xs font-medium bg-neutral-500/10 text-neutral-600 rounded-none">
                   all enabled
                 </span>
               )}
@@ -156,9 +156,9 @@ export function BrowserUrlCard({ onStatusChange }: BrowserUrlCardProps) {
                     >
                       <div className="flex items-center gap-2">
                         {b.status === "granted" ? (
-                          <Check className="h-3.5 w-3.5 text-green-500" />
+                          <Check className="h-3.5 w-3.5 text-neutral-500" />
                         ) : b.status === "denied" ? (
-                          <X className="h-3.5 w-3.5 text-red-500" />
+                          <X className="h-3.5 w-3.5 text-neutral-500" />
                         ) : (
                           <Circle className="h-3.5 w-3.5 text-muted-foreground" />
                         )}
@@ -171,7 +171,7 @@ export function BrowserUrlCard({ onStatusChange }: BrowserUrlCardProps) {
                       </div>
 
                       {b.status === "granted" ? (
-                        <span className="text-[10px] text-green-600">enabled</span>
+                        <span className="text-[10px] text-neutral-600">enabled</span>
                       ) : b.status === "denied" ? (
                         <Button
                           variant="ghost"
@@ -203,7 +203,7 @@ export function BrowserUrlCard({ onStatusChange }: BrowserUrlCardProps) {
                 </div>
               </div>
             ) : (
-              <div className="space-y-2 rounded-lg border border-dashed border-border p-3">
+              <div className="space-y-2 rounded-none border border-dashed border-border p-3">
                 <p className="text-xs text-muted-foreground">
                   {loadingError
                     ? "couldn't read browser automation status. try requesting permission, then refresh."

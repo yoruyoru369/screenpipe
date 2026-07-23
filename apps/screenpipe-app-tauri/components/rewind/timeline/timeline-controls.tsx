@@ -273,7 +273,7 @@ export function TimelineControls({
 												key={device.name}
 												type="button"
 												onClick={() => onToggleDeviceMute(device.name)}
-												className={`relative flex items-center justify-center h-6 w-6 rounded-full transition-all duration-150 ${
+												className={`relative flex items-center justify-center h-6 w-6 rounded-none transition-all duration-150 ${
 													isMuted
 														? "bg-muted text-muted-foreground/40"
 														: "bg-foreground/10 text-foreground hover:bg-foreground/20"

@@ -312,7 +312,7 @@ const REDACTION_PREVIEW_PARTS: (
 function RedactionExamplePreview({ labels }: { labels: string[] }) {
   const isOn = (cat: string) => cat === "secret" || labels.includes(cat);
   return (
-    <div className="rounded-md border border-border bg-muted/40 px-2.5 py-2">
+    <div className="rounded-none border border-border bg-muted/40 px-2.5 py-2">
       <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
         Preview
       </p>
@@ -325,7 +325,7 @@ function RedactionExamplePreview({ labels }: { labels: string[] }) {
           ) : isOn(part.cat) ? (
             <span
               key={i}
-              className="rounded-[3px] bg-foreground px-1 py-0.5 font-mono text-[10px] text-background align-baseline"
+              className="rounded-none bg-foreground px-1 py-0.5 font-mono text-[10px] text-background align-baseline"
             >
               {part.ph}
             </span>
@@ -367,7 +367,7 @@ function RedactionWherePreview({
   const region = (r: string, content: React.ReactNode, mono?: boolean) => (
     <span
       className={cn(
-        "relative inline-block rounded-[3px] align-baseline",
+        "relative inline-block rounded-none align-baseline",
         hovered === r &&
           "outline outline-2 outline-foreground outline-offset-2",
       )}
@@ -376,7 +376,7 @@ function RedactionWherePreview({
         {content}
       </span>
       {on(r) && (
-        <span className="absolute inset-0 rounded-[3px] bg-foreground" />
+        <span className="absolute inset-0 rounded-none bg-foreground" />
       )}
     </span>
   );
@@ -409,15 +409,15 @@ function RedactionWherePreview({
       </div>
 
       {/* Mock app window — hover a row above to see the matching area. */}
-      <div className="mt-2.5 overflow-hidden rounded-md border border-border bg-card">
+      <div className="mt-2.5 overflow-hidden rounded-none border border-border bg-card">
         <div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
-          <span className="h-2 w-2 rounded-full bg-border" />
-          <span className="h-2 w-2 rounded-full bg-border" />
-          <span className="h-2 w-2 rounded-full bg-border" />
+          <span className="h-2 w-2 rounded-none bg-border" />
+          <span className="h-2 w-2 rounded-none bg-border" />
+          <span className="h-2 w-2 rounded-none bg-border" />
           <span className="ml-1 min-w-0 flex-1 text-[10px]">
             {region(
               "browser_url",
-              <span className="block truncate rounded-full bg-muted px-2 py-0.5 text-muted-foreground">
+              <span className="block truncate rounded-none bg-muted px-2 py-0.5 text-muted-foreground">
                 app.example.com/account
               </span>,
               true,
@@ -438,7 +438,7 @@ function RedactionWherePreview({
 
           <div>
             <div className="mb-0.5 text-[10px] text-muted-foreground">email</div>
-            <div className="rounded border border-border px-1.5 py-1">
+            <div className="rounded-none border border-border px-1.5 py-1">
               {region("element_properties", "jordan@example.com")}
             </div>
             <div className="mt-0.5 text-[10px]">
@@ -455,7 +455,7 @@ function RedactionWherePreview({
             <div className="mb-0.5 text-[10px] text-muted-foreground">
               password
             </div>
-            <div className="rounded border border-border px-1.5 py-1 font-mono">
+            <div className="rounded-none border border-border px-1.5 py-1 font-mono">
               {region("element_properties", "hunter2-s3cret", true)}
             </div>
           </div>
@@ -468,8 +468,8 @@ function RedactionWherePreview({
           </div>
 
           <div className="space-y-1 pt-0.5">
-            <div className="h-1.5 w-full rounded bg-foreground" />
-            <div className="h-1.5 w-4/5 rounded bg-foreground" />
+            <div className="h-1.5 w-full rounded-none bg-foreground" />
+            <div className="h-1.5 w-4/5 rounded-none bg-foreground" />
             <div className="text-[9px] text-muted-foreground">
               typed text, transcripts &amp; on-screen text — always hidden
             </div>
@@ -1054,7 +1054,7 @@ export function PrivacySection() {
               />
             </div>
             {hasUnsavedChanges && (
-              <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 flex items-center gap-1">
+              <p className="text-xs text-neutral-600 dark:text-neutral-400 mt-2 flex items-center gap-1">
                 <RefreshCw className="h-3 w-3 shrink-0" />
                 click &quot;Apply &amp; Restart&quot; above for auth changes to take effect; existing browser connections keep using the old key until then
               </p>
@@ -1494,7 +1494,7 @@ export function PrivacySection() {
                     />
                     <span>
                       <span className="font-medium text-foreground">Smart</span>
-                      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded ml-1">
+                      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded-none ml-1">
                         Experimental
                       </span>
                       <span className="text-muted-foreground">
@@ -1830,7 +1830,7 @@ export function PrivacySection() {
                     url.toLowerCase()
                   )
               ) && (
-                <p className="text-xs text-yellow-600 dark:text-yellow-500 flex items-center gap-1 mt-1">
+                <p className="text-xs text-neutral-600 dark:text-neutral-500 flex items-center gap-1 mt-1">
                   <AlertCircle className="h-3 w-3" />
                   Short patterns may over-match. Use specific domains.
                 </p>

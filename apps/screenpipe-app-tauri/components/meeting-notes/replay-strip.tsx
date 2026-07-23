@@ -424,7 +424,7 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
             className="absolute top-0 bottom-0 w-0.5 bg-foreground pointer-events-none"
             style={{ left: `${cursorPct}%` }}
           >
-            <div className="absolute -top-1 -left-[5px] w-3 h-3 bg-foreground rounded-full" />
+            <div className="absolute -top-1 -left-[5px] w-3 h-3 bg-foreground rounded-none" />
           </div>
 
           {/* Per-chunk tick marks (now using full transcript) */}

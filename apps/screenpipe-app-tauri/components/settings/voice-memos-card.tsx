@@ -21,7 +21,7 @@ export function VoiceMemosCard() {
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
-            <img src="/images/voice-memos.svg" alt="Voice Memos" className="w-10 h-10 rounded-xl" />
+            <img src="/images/voice-memos.svg" alt="Voice Memos" className="w-10 h-10 rounded-none" />
           </div>
 
           <div className="flex-1 min-w-0">
@@ -29,7 +29,7 @@ export function VoiceMemosCard() {
               <h3 className="text-sm font-semibold text-foreground">
                 Voice Memos
               </h3>
-              <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-full">
+              <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-none">
                 macOS
               </span>
             </div>

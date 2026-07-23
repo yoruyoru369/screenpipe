@@ -140,7 +140,7 @@ export function ComposerUtilityMenu({
             onCloseFilterMenu();
             await handleFilePicker();
           }}
-          className="w-full flex items-center gap-2 px-2 py-2 text-left text-sm rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none transition-colors"
+          className="w-full flex items-center gap-2 px-2 py-2 text-left text-sm rounded-none hover:bg-muted disabled:opacity-40 disabled:pointer-events-none transition-colors"
         >
           <Paperclip className="h-4 w-4 text-muted-foreground shrink-0" />
           <span>add photos & files</span>

@@ -354,14 +354,14 @@ const ICONS: Record<string, React.ReactNode> = {
   ),
   codex: (
     // eslint-disable-next-line @next/next/no-img-element
-    <img src="/images/codex.svg" alt="Codex" className="w-5 h-5 rounded dark:invert" />
+    <img src="/images/codex.svg" alt="Codex" className="w-5 h-5 rounded-none dark:invert" />
   ),
   obsidian: <ObsidianIcon className="w-5 h-5" />,
-  cursor: <CursorIcon className="w-5 h-5 rounded" />,
+  cursor: <CursorIcon className="w-5 h-5 rounded-none" />,
   chatgpt: <ChatGptIcon className="w-5 h-5" />,
   claude: (
     // eslint-disable-next-line @next/next/no-img-element
-    <img src="/images/claude-ai.svg" alt="Claude" className="w-5 h-5 rounded" />
+    <img src="/images/claude-ai.svg" alt="Claude" className="w-5 h-5 rounded-none" />
   ),
 };
 
@@ -427,7 +427,7 @@ function IntegrationCard({
             {integration.name}
           </span>
           {integration.isPro && !isPro && !isLocked && !isConnected && (
-            <span className="ml-auto shrink-0 font-mono text-[9px] px-1 py-0.5 border border-amber-500/40 text-amber-500/70 leading-none">
+            <span className="ml-auto shrink-0 font-mono text-[9px] px-1 py-0.5 border border-neutral-500/40 text-neutral-500/70 leading-none">
               pro
             </span>
           )}
@@ -480,7 +480,7 @@ function IntegrationCard({
                 <button
                   onClick={onConnect}
                   title={friendly}
-                  className="font-mono text-[10px] text-red-400/70 hover:text-red-400 transition-colors text-left truncate max-w-full"
+                  className="font-mono text-[10px] text-neutral-400/70 hover:text-neutral-400 transition-colors text-left truncate max-w-full"
                 >
                   {friendly} →
                 </button>

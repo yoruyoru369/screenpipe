@@ -45,7 +45,7 @@ export function TeamSection() {
       <Card>
         <CardContent className="p-8 space-y-5">
           <div className="flex items-center gap-3">
-            <div className="size-10 rounded-lg bg-primary/10 flex items-center justify-center">
+            <div className="size-10 rounded-none bg-primary/10 flex items-center justify-center">
               <Users className="size-5 text-primary" />
             </div>
             <div>

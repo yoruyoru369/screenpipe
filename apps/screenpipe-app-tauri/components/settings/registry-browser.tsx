@@ -201,7 +201,7 @@ export function RegistryBrowser({
         aria-describedby={undefined}
       >
         <DialogHeader className="flex-row items-center gap-3 space-y-0 border-b border-border p-4 pr-12 text-left">
-          <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center shrink-0">
+          <div className="w-8 h-8 rounded-none bg-muted flex items-center justify-center shrink-0">
             <Boxes className="h-4 w-4" aria-hidden />
           </div>
           <div className="min-w-0">
@@ -244,7 +244,7 @@ export function RegistryBrowser({
               searching registry…
             </div>
           ) : error ? (
-            <div className="flex items-start gap-1.5 text-xs rounded-md border border-destructive/40 bg-destructive/5 text-destructive p-3">
+            <div className="flex items-start gap-1.5 text-xs rounded-none border border-destructive/40 bg-destructive/5 text-destructive p-3">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
               <span className="break-all">{error}</span>
             </div>
@@ -259,7 +259,7 @@ export function RegistryBrowser({
               </p>
             </div>
           ) : servers.length === 0 ? (
-            <div className="text-xs text-muted-foreground bg-muted/30 rounded-md px-3 py-6 text-center">
+            <div className="text-xs text-muted-foreground bg-muted/30 rounded-none px-3 py-6 text-center">
               no servers match “{debounced}”.
             </div>
           ) : (
@@ -308,13 +308,13 @@ function RegistryRow({
   const repoUrl = server.repository?.url;
 
   return (
-    <div className="flex items-start gap-3 border border-border rounded-md p-2.5">
+    <div className="flex items-start gap-3 border border-border rounded-none p-2.5">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-semibold text-foreground">
             {displayName(server)}
           </span>
-          <span className="px-1.5 py-0.5 rounded-full text-[9px] font-medium border border-border text-muted-foreground">
+          <span className="px-1.5 py-0.5 rounded-none text-[9px] font-medium border border-border text-muted-foreground">
             {kind === "http" ? "remote" : kind === "stdio" ? "local" : "catalog"}
           </span>
         </div>

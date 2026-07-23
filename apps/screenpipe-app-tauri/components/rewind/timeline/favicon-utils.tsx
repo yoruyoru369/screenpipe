@@ -48,7 +48,7 @@ export function FaviconImg({ domain, fallbackAppName, size = 20, className }: Fa
 				src={`http://localhost:11435/app-icon?name=${encodeURIComponent(fallbackAppName)}`}
 				width={size}
 				height={size}
-				className={className ?? "rounded-sm object-contain"}
+				className={className ?? "rounded-none object-contain"}
 				alt={fallbackAppName}
 				loading="lazy"
 				decoding="async"
@@ -62,7 +62,7 @@ export function FaviconImg({ domain, fallbackAppName, size = 20, className }: Fa
 			src={getFaviconUrl(domain)}
 			width={size}
 			height={size}
-			className={className ?? "rounded-sm object-contain"}
+			className={className ?? "rounded-none object-contain"}
 			alt={domain}
 			loading="lazy"
 			decoding="async"

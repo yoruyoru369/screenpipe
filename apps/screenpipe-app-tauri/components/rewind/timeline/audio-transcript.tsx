@@ -646,7 +646,7 @@ export function AudioTranscript({
 				cursor: isDragging ? "grabbing" : "default",
 				pointerEvents: "auto",
 			}}
-			className="audio-transcript-panel bg-popover border border-border rounded-2xl shadow-2xl z-[100] overflow-hidden"
+			className="audio-transcript-panel bg-popover border border-border rounded-none shadow-2xl z-[100] overflow-hidden"
 		>
 			{/* Header */}
 			<div
@@ -693,7 +693,7 @@ export function AudioTranscript({
 						<Tooltip>
 							<TooltipTrigger asChild>
 								<Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={handleCopyTranscript}>
-									{copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+									{copied ? <Check className="h-3 w-3 text-neutral-500" /> : <Copy className="h-3 w-3" />}
 								</Button>
 							</TooltipTrigger>
 							<TooltipContent side="bottom"><p>{copied ? "copied!" : "copy"}</p></TooltipContent>

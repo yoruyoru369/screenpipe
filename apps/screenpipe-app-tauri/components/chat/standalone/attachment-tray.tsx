@@ -44,11 +44,11 @@ export function AttachmentTray({
           return (
             <div
               key={`pending-${doc.id}`}
-              className="flex items-center gap-2.5 h-16 max-w-[240px] rounded-xl border border-border/50 bg-muted/40 px-2.5 shadow-sm opacity-80"
+              className="flex items-center gap-2.5 h-16 max-w-[240px] rounded-none border border-border/50 bg-muted/40 px-2.5 shadow-sm opacity-80"
               title={`${doc.name} — extracting…`}
               aria-busy="true"
             >
-              <div className={`relative shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
+              <div className={`relative shrink-0 w-10 h-10 rounded-none flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
                 <Loader2 className="h-4 w-4 animate-spin" />
               </div>
               <div className="min-w-0 flex-1">
@@ -65,10 +65,10 @@ export function AttachmentTray({
           return (
             <div
               key={`doc-${doc.name}-${i}`}
-              className="relative group flex items-center gap-2.5 h-16 max-w-[240px] rounded-xl border border-border/50 bg-muted/40 px-2.5 shadow-sm"
+              className="relative group flex items-center gap-2.5 h-16 max-w-[240px] rounded-none border border-border/50 bg-muted/40 px-2.5 shadow-sm"
               title={`${doc.name} — ${doc.charCount.toLocaleString()} chars${doc.truncated ? " (truncated to fit)" : ""}`}
             >
-              <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
+              <div className={`shrink-0 w-10 h-10 rounded-none flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
                 {badge.label}
               </div>
               <div className="min-w-0 flex-1">
@@ -103,7 +103,7 @@ export function AttachmentTray({
               <button
                 type="button"
                 onClick={() => onRemoveDoc(i)}
-                className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-destructive/90"
+                className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-destructive text-destructive-foreground rounded-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-destructive/90"
               >
                 <X className="w-3 h-3" />
               </button>
@@ -115,7 +115,7 @@ export function AttachmentTray({
             <button
               type="button"
               onClick={() => onImageClick(pastedImages, i)}
-              className="block rounded-xl border border-border/50 shadow-sm overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="block rounded-none border border-border/50 shadow-sm overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
@@ -130,7 +130,7 @@ export function AttachmentTray({
                 e.stopPropagation();
                 onRemoveImage(i);
               }}
-              className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-destructive/90"
+              className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-destructive text-destructive-foreground rounded-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-destructive/90"
             >
               <X className="w-3 h-3" />
             </button>

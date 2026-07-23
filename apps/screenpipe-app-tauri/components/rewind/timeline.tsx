@@ -1075,7 +1075,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 				style={{ height: embedded ? "100%" : "100vh" }}
 			>
 				<div className="text-center p-8 max-w-md">
-					<div className="mx-auto mb-6 w-16 h-16 rounded-full bg-muted/50 border border-border flex items-center justify-center">
+					<div className="mx-auto mb-6 w-16 h-16 rounded-none bg-muted/50 border border-border flex items-center justify-center">
 						<MonitorOff className="w-8 h-8 text-muted-foreground" />
 					</div>
 					<h3 className="text-lg font-mono font-semibold uppercase tracking-wide mb-2">
@@ -1198,7 +1198,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 							{health?.frame_status === "disabled" ? (
 								<div className="text-center p-8 max-w-md">
 									<div className="mx-auto mb-8 w-24 h-24 flex items-center justify-center">
-										<div className="w-16 h-16 rounded-full bg-muted/50 border border-border flex items-center justify-center">
+										<div className="w-16 h-16 rounded-none bg-muted/50 border border-border flex items-center justify-center">
 											<MonitorOff className="w-8 h-8 text-muted-foreground" />
 										</div>
 									</div>
@@ -1212,7 +1212,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 
 									<button
 										onClick={() => commands.showWindow({ Home: { page: "recording" } })}
-										className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-full text-sm font-medium hover:bg-primary/90 transition-colors"
+										className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-none text-sm font-medium hover:bg-primary/90 transition-colors"
 									>
 										<Settings className="w-4 h-4" />
 										Open settings
@@ -1223,12 +1223,12 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 									{/* Animated icon */}
 									<div className="relative mx-auto mb-8 w-24 h-24">
 										{/* Pulsing rings */}
-										<div className="absolute inset-0 rounded-full border-2 border-primary/20 animate-ping" style={{ animationDuration: '3s' }} />
-										<div className="absolute inset-2 rounded-full border-2 border-primary/30 animate-ping" style={{ animationDuration: '3s', animationDelay: '0.5s' }} />
-										<div className="absolute inset-4 rounded-full border-2 border-primary/40 animate-ping" style={{ animationDuration: '3s', animationDelay: '1s' }} />
+										<div className="absolute inset-0 rounded-none border-2 border-primary/20 animate-ping" style={{ animationDuration: '3s' }} />
+										<div className="absolute inset-2 rounded-none border-2 border-primary/30 animate-ping" style={{ animationDuration: '3s', animationDelay: '0.5s' }} />
+										<div className="absolute inset-4 rounded-none border-2 border-primary/40 animate-ping" style={{ animationDuration: '3s', animationDelay: '1s' }} />
 										{/* Center icon */}
 										<div className="absolute inset-0 flex items-center justify-center">
-											<div className="w-16 h-16 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center">
+											<div className="w-16 h-16 rounded-none bg-primary/10 border border-primary/30 flex items-center justify-center">
 												<Sparkles className="w-8 h-8 text-primary animate-pulse" />
 											</div>
 										</div>
@@ -1242,10 +1242,10 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 									</p>
 
 									{/* Friendly suggestion */}
-									<div className="inline-flex items-center gap-2 px-4 py-2 bg-muted/50 rounded-full border border-border text-sm text-muted-foreground">
+									<div className="inline-flex items-center gap-2 px-4 py-2 bg-muted/50 rounded-none border border-border text-sm text-muted-foreground">
 										<span className="relative flex h-2 w-2">
-											<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-											<span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+											<span className="animate-ping absolute inline-flex h-full w-full rounded-none bg-neutral-400 opacity-75"></span>
+											<span className="relative inline-flex rounded-none h-2 w-2 bg-neutral-500"></span>
 										</span>
 										Recording in progress
 									</div>
@@ -1309,7 +1309,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 						<div className={`absolute ${embedded ? "top-[56px]" : "top-[calc(env(safe-area-inset-top)+4px)]"} left-0 right-0 z-[45] flex justify-center pointer-events-none`}>
 							<button
 								type="button"
-								className="flex items-center gap-1.5 max-w-lg min-w-0 px-3 py-1 rounded-full bg-black/70 backdrop-blur-sm border border-white/10 hover:bg-black/80 hover:border-white/20 transition-colors cursor-pointer pointer-events-auto"
+								className="flex items-center gap-1.5 max-w-lg min-w-0 px-3 py-1 rounded-none bg-black/70 backdrop-blur-sm border border-white/10 hover:bg-black/80 hover:border-white/20 transition-colors cursor-pointer pointer-events-auto"
 								title={`Open ${openableUrl}`}
 								onClick={async (e) => {
 									e.stopPropagation();
@@ -1325,7 +1325,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 								}}
 							>
 								{isHttps ? (
-									<Lock className="w-3 h-3 text-green-400/80 shrink-0" />
+									<Lock className="w-3 h-3 text-neutral-400/80 shrink-0" />
 								) : (
 									<Globe className="w-3 h-3 text-white/40 shrink-0" />
 								)}
@@ -1357,13 +1357,13 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 						{!embedded && (
 							<button
 								onClick={() => commands.closeWindow("Main")}
-								className="absolute top-4 right-4 p-2 bg-card hover:bg-muted border border-border rounded-md transition-colors z-50"
+								className="absolute top-4 right-4 p-2 bg-card hover:bg-muted border border-border rounded-none transition-colors z-50"
 								title="Close (Esc)"
 							>
 								<X className="w-4 h-4 text-muted-foreground" />
 							</button>
 						)}
-						<div className="bg-card text-foreground p-6 rounded-2xl text-center space-y-3 max-w-md mx-4">
+						<div className="bg-card text-foreground p-6 rounded-none text-center space-y-3 max-w-md mx-4">
 							<h3 className="font-medium">Loading Timeline</h3>
 							<p className="text-sm text-foreground">
 								Fetching your recorded frames...
@@ -1388,13 +1388,13 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 						{!embedded && (
 							<button
 								onClick={() => commands.closeWindow("Main")}
-								className="absolute top-4 right-4 p-2 bg-card hover:bg-muted border border-border rounded-md transition-colors z-50"
+								className="absolute top-4 right-4 p-2 bg-card hover:bg-muted border border-border rounded-none transition-colors z-50"
 								title="Close (Esc)"
 							>
 								<X className="w-4 h-4 text-muted-foreground" />
 							</button>
 						)}
-						<div className="bg-destructive/20 border border-destructive/30 text-foreground p-6 rounded-2xl text-center space-y-4 max-w-md mx-4">
+						<div className="bg-destructive/20 border border-destructive/30 text-foreground p-6 rounded-none text-center space-y-4 max-w-md mx-4">
 							<div className="flex flex-col items-center gap-2">
 								<AlertCircle className="h-6 w-6 text-destructive" />
 								<h3 className="font-medium text-destructive">Connection Error</h3>
@@ -1405,7 +1405,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 							</p>
 							<button
 								onClick={handleRefresh}
-								className="flex items-center gap-2 px-4 py-2 bg-card rounded-lg border border-border mx-auto bg-muted"
+								className="flex items-center gap-2 px-4 py-2 bg-card rounded-none border border-border mx-auto bg-muted"
 							>
 								<RotateCcw className="h-4 w-4" />
 								<span>Reload Timeline</span>
@@ -1453,7 +1453,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 				    so it sits above the z-40 timeline slider and receives clicks */}
 				{inSearchReviewMode && (
 					<div
-						className="absolute bottom-24 left-1/2 -translate-x-1/2 z-[45] flex items-center gap-3 px-4 py-2 rounded-full bg-black/70 backdrop-blur-sm border border-white/10 text-white text-sm shadow-lg"
+						className="absolute bottom-24 left-1/2 -translate-x-1/2 z-[45] flex items-center gap-3 px-4 py-2 rounded-none bg-black/70 backdrop-blur-sm border border-white/10 text-white text-sm shadow-lg"
 						onWheel={(e) => {
 							e.preventDefault();
 							e.stopPropagation();
@@ -1558,7 +1558,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 											<Loader2 className="w-4 h-4 animate-spin" />
 											<span>Loading timeline...</span>
 										</div>
-										<div className="h-16 bg-muted/50 rounded-lg animate-pulse flex items-end gap-0.5 px-2 pb-2">
+										<div className="h-16 bg-muted/50 rounded-none animate-pulse flex items-end gap-0.5 px-2 pb-2">
 											{/* Skeleton bars */}
 											{Array.from({ length: 60 }).map((_, i) => (
 												<div
@@ -1578,8 +1578,8 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 								) : (
 									<div className="text-center text-muted-foreground flex items-center justify-center gap-2">
 										<span className="relative flex h-2 w-2">
-											<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-											<span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+											<span className="animate-ping absolute inline-flex h-full w-full rounded-none bg-neutral-400 opacity-75"></span>
+											<span className="relative inline-flex rounded-none h-2 w-2 bg-neutral-500"></span>
 										</span>
 										Recording... timeline will appear soon
 									</div>
@@ -1599,7 +1599,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 							onClick={() => setShowSearchModal(false)}
 						/>
 						{/* Panel — drops down from top */}
-						<div className="relative z-10 m-3 mt-14 flex flex-col max-h-[calc(100%-7rem)] rounded-lg border border-border shadow-2xl overflow-hidden">
+						<div className="relative z-10 m-3 mt-14 flex flex-col max-h-[calc(100%-7rem)] rounded-none border border-border shadow-2xl overflow-hidden">
 							<SearchModal
 								isOpen={true}
 								embedded

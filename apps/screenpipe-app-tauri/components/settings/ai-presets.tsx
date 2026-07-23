@@ -223,7 +223,7 @@ export const AIProviderCard = ({
     <Card
       onClick={onClick}
       className={cn(
-        "flex py-3 px-4 rounded-lg hover:bg-accent transition-colors h-[110px] w-full cursor-pointer",
+        "flex py-3 px-4 rounded-none hover:bg-accent transition-colors h-[110px] w-full cursor-pointer",
         selected ? "border-black/60 border-[1.5px]" : "",
         disabled && "opacity-50 cursor-not-allowed",
       )}
@@ -235,7 +235,7 @@ export const AIProviderCard = ({
             src={imageSrc}
             alt={title}
             className={cn(
-              "rounded-lg shrink-0 size-8",
+              "rounded-none shrink-0 size-8",
               type === "native-ollama" &&
                 "outline outline-gray-300 outline-1 outline-offset-2",
               imageClassName,
@@ -1509,7 +1509,7 @@ const AISection = ({
                               <div className="flex flex-col gap-0.5 w-full">
                                 <div className="flex items-center justify-between">
                                   <span className="font-medium">{model.name}</span>
-                                  <Badge variant="outline" className="ml-2 text-[10px] bg-green-500/10 text-green-600 border-green-500/30">free</Badge>
+                                  <Badge variant="outline" className="ml-2 text-[10px] bg-neutral-500/10 text-neutral-600 border-neutral-500/30">free</Badge>
                                 </div>
                                 {model.description && (
                                   <span className="text-xs text-muted-foreground">{model.description}{model.context_window ? ` · ${Math.round(model.context_window / 1000)}K ctx` : ""}</span>
@@ -1574,7 +1574,7 @@ const AISection = ({
                                   {!locked && shouldWarnLowQuota(usage, model.query_weight) && (
                                     <Badge
                                       variant="outline"
-                                      className="text-[10px] bg-yellow-500/10 text-yellow-700 border-yellow-500/40 dark:text-yellow-400"
+                                      className="text-[10px] bg-neutral-500/10 text-neutral-700 border-neutral-500/40 dark:text-neutral-400"
                                       title={`approaching daily limit${usage?.resets_at ? ` — resets ${formatResetTime(usage.resets_at)}` : ""}`}
                                     >
                                       ≈ {messagesLeftForModel(usage, model.query_weight)} left
@@ -1588,7 +1588,7 @@ const AISection = ({
                               {model.recommended_for && model.recommended_for.length > 0 && (
                                 <div className="flex items-center gap-1 mt-0.5">
                                   {model.recommended_for.map((use) => (
-                                    <span key={use} className="text-[9px] rounded bg-muted px-1 py-0.5 text-muted-foreground">{use}</span>
+                                    <span key={use} className="text-[9px] rounded-none bg-muted px-1 py-0.5 text-muted-foreground">{use}</span>
                                   ))}
                                 </div>
                               )}
@@ -1607,7 +1607,7 @@ const AISection = ({
             const selectedModel = models?.find((m) => m.id === settingsPreset?.model);
             if (selectedModel?.warning) {
               return (
-                <div className="flex items-start gap-2 rounded-md border p-3 text-xs text-muted-foreground">
+                <div className="flex items-start gap-2 rounded-none border p-3 text-xs text-muted-foreground">
                   <span className="shrink-0 text-sm">!</span>
                   <div className="space-y-1">
                     <p>{selectedModel.warning}</p>
@@ -1618,7 +1618,7 @@ const AISection = ({
                           <button
                             key={m.id}
                             type="button"
-                            className="inline-flex items-center rounded bg-muted px-1.5 py-0.5 mr-1 font-medium hover:bg-accent cursor-pointer"
+                            className="inline-flex items-center rounded-none bg-muted px-1.5 py-0.5 mr-1 font-medium hover:bg-accent cursor-pointer"
                             onClick={() => updateSettingsPreset({ model: m.id })}
                           >
                             {m.name} {m.free ? "(free)" : ""}
@@ -1636,9 +1636,9 @@ const AISection = ({
             <div className="text-xs text-muted-foreground space-y-1">
               <p>
                 <span className="font-medium">recommended:</span>{" "}
-                <code className="bg-secondary/50 px-1 rounded">qwen3.5:9b</code>{" "}
-                <code className="bg-secondary/50 px-1 rounded">glm-4.7:9b</code>{" "}
-                <code className="bg-secondary/50 px-1 rounded">qwen3.5:4b</code>{" "}
+                <code className="bg-secondary/50 px-1 rounded-none">qwen3.5:9b</code>{" "}
+                <code className="bg-secondary/50 px-1 rounded-none">glm-4.7:9b</code>{" "}
+                <code className="bg-secondary/50 px-1 rounded-none">qwen3.5:4b</code>{" "}
                 (all support tool calling)
               </p>
               <p>
@@ -1699,7 +1699,7 @@ const AISection = ({
               <button
                 key={preset.value}
                 type="button"
-                className={`px-2 py-1 text-xs rounded-md border transition-colors ${
+                className={`px-2 py-1 text-xs rounded-none border transition-colors ${
                   (settingsPreset as any)?.maxTokens === preset.value
                     ? "bg-primary text-primary-foreground border-primary"
                     : "bg-muted/50 hover:bg-muted border-border"
@@ -1715,10 +1715,10 @@ const AISection = ({
       )}
 
       {settingsPreset?.provider !== "screenpipe-cloud" && (
-        <div className="w-full border rounded-lg">
+        <div className="w-full border rounded-none">
           <button
             type="button"
-            className="flex items-center justify-between w-full px-4 py-3 text-sm font-medium text-left hover:bg-accent/50 transition-colors rounded-lg"
+            className="flex items-center justify-between w-full px-4 py-3 text-sm font-medium text-left hover:bg-accent/50 transition-colors rounded-none"
             onClick={() => setDiagnosticsOpen(!diagnosticsOpen)}
           >
             <div className="flex items-center gap-2">
@@ -1952,7 +1952,7 @@ function SortablePresetCard({
             <img
               src={providerImageSrc[preset.provider]}
               alt={`${preset.provider} logo`}
-              className="w-6 h-6 opacity-80 rounded shrink-0"
+              className="w-6 h-6 opacity-80 rounded-none shrink-0"
             />
             <h3 className="text-sm font-semibold text-foreground truncate" title={preset.id}>
               {formatPresetName(preset.id)}
@@ -1977,7 +1977,7 @@ function SortablePresetCard({
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <AlertCircle className="h-3.5 w-3.5 text-yellow-500 shrink-0 cursor-help" />
+                    <AlertCircle className="h-3.5 w-3.5 text-neutral-500 shrink-0 cursor-help" />
                   </TooltipTrigger>
                   <TooltipContent>
                     ChatGPT session expired — open Connections to reconnect
@@ -1993,7 +1993,7 @@ function SortablePresetCard({
           )}
         </div>
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <span className="font-mono bg-muted px-1.5 py-0.5 rounded truncate max-w-[180px]" title={preset.model || 'Not set'}>
+          <span className="font-mono bg-muted px-1.5 py-0.5 rounded-none truncate max-w-[180px]" title={preset.model || 'Not set'}>
             {preset.model || 'Not set'}
           </span>
         </div>

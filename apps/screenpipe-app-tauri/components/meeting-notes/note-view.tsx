@@ -1161,7 +1161,7 @@ export function NoteView({
               <span className="text-foreground/80">{meetingStartClock}</span>
               {isLive || !meetingEndClock ? (
                 <span className="inline-flex items-center gap-1 border border-foreground/15 bg-foreground/[0.03] px-1.5 py-0.5 text-[10px] font-medium leading-none text-foreground">
-                  <span className="h-1.5 w-1.5 rounded-full bg-foreground animate-pulse" />
+                  <span className="h-1.5 w-1.5 rounded-none bg-foreground animate-pulse" />
                   ongoing
                 </span>
               ) : (
@@ -1253,7 +1253,7 @@ export function NoteView({
                 className={cn(
                   "flex h-8 w-8 shrink-0 items-center justify-center border border-border",
                   isLive && captureState?.severity === "warning"
-                    ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                    ? "bg-muted text-foreground"
                     : isLive
                     ? "bg-foreground text-background"
                     : "bg-muted text-muted-foreground",
@@ -1457,7 +1457,7 @@ function AudioHealthButton({
         >
           <AudioLines className="h-3.5 w-3.5" />
           {anyAudioActive && (
-            <span className="absolute bottom-1 right-1 h-1.5 w-1.5 rounded-full bg-foreground" />
+            <span className="absolute bottom-1 right-1 h-1.5 w-1.5 rounded-none bg-foreground" />
           )}
         </Button>
       </PopoverTrigger>
@@ -1474,7 +1474,7 @@ function AudioHealthButton({
             <span className="relative flex h-7 w-7 items-center justify-center border border-border bg-background">
               <AudioLines className="h-3.5 w-3.5" />
               {anyAudioActive && (
-                <span className="absolute bottom-1 right-1 h-1.5 w-1.5 rounded-full bg-foreground" />
+                <span className="absolute bottom-1 right-1 h-1.5 w-1.5 rounded-none bg-foreground" />
               )}
             </span>
             audio settings
@@ -1587,11 +1587,11 @@ function JoinMeetingSuggestion({
   const label = mapped ? link.label : "nearby calendar event — join the call?";
   return (
     <div className="mb-3 flex justify-center">
-      <div className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-muted px-1 py-1 shadow-sm">
+      <div className="inline-flex max-w-full items-center gap-1 rounded-none border border-border bg-muted px-1 py-1 shadow-sm">
         <button
           type="button"
           onClick={onJoin}
-          className="inline-flex min-w-0 items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-background"
+          className="inline-flex min-w-0 items-center gap-2 rounded-none px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-background"
           title={link.url}
         >
           <Video className="h-4 w-4 shrink-0" />
@@ -1600,7 +1600,7 @@ function JoinMeetingSuggestion({
         <button
           type="button"
           onClick={onDismiss}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-none text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
           aria-label="dismiss join suggestion"
           title="dismiss"
         >
@@ -1675,9 +1675,9 @@ function LiveCaptureIssueBanner({
   onResumeInput: () => void;
 }) {
   return (
-    <div className="mb-3 flex items-center justify-between gap-3 border border-amber-500/30 bg-amber-500/10 px-3 py-2 shadow-sm">
+    <div className="mb-3 flex items-center justify-between gap-3 border border-neutral-500/30 bg-neutral-500/10 px-3 py-2 shadow-sm">
       <div className="flex min-w-0 items-start gap-3">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-neutral-600 dark:text-neutral-300" />
         <div className="min-w-0">
           <div className="text-sm font-medium leading-snug text-foreground">
             {state.label}
@@ -1760,7 +1760,7 @@ function AudioLevelBars({
             key={index}
             data-active={active ? "true" : "false"}
             className={cn(
-              "meeting-audio-level-bar h-full w-0.5 rounded-full bg-current transition-all duration-150 ease-out",
+              "meeting-audio-level-bar h-full w-0.5 rounded-none bg-current transition-all duration-150 ease-out",
             )}
             style={
               {

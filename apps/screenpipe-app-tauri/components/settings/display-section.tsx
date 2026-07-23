@@ -84,14 +84,14 @@ export function DisplaySection() {
                         className="sr-only"
                       />
                       <div className={`
-                        flex items-center justify-center w-3.5 h-3.5 rounded-full border-2 transition-colors
+                        flex items-center justify-center w-3.5 h-3.5 rounded-none border transition-colors
                         ${theme === option.value
                           ? 'border-primary bg-primary'
                           : 'border-muted-foreground group-hover:border-primary'
                         }
                       `}>
                         {theme === option.value && (
-                          <div className="w-1.5 h-1.5 rounded-full bg-primary-foreground" />
+                          <div className="w-1.5 h-1.5 rounded-none bg-primary-foreground" />
                         )}
                       </div>
                       <div className="flex items-center space-x-1.5">
@@ -239,7 +239,7 @@ export function DisplaySection() {
                         });
                       }}
                       type="button"
-                      className={`flex-1 px-2.5 py-1.5 rounded-md border-2 transition-all text-left cursor-pointer ${
+                      className={`flex-1 px-2.5 py-1.5 rounded-none border-2 transition-all text-left cursor-pointer ${
                         isActive
                           ? "border-primary bg-primary/5"
                           : "border-border hover:border-muted-foreground/30"
@@ -514,7 +514,7 @@ export function DisplaySection() {
                           } catch {}
                         }}
                         type="button"
-                        className={`flex-1 px-2.5 py-1.5 rounded-md border-2 transition-all text-center cursor-pointer ${
+                        className={`flex-1 px-2.5 py-1.5 rounded-none border-2 transition-all text-center cursor-pointer ${
                           isActive
                             ? "border-primary bg-primary/5"
                             : "border-border hover:border-muted-foreground/30"

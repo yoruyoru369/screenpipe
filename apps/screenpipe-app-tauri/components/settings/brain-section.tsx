@@ -245,27 +245,27 @@ function BrainSkeleton() {
       {Array.from({ length: 6 }).map((_, index) => (
         <div
           key={index}
-          className="flex items-start gap-2 rounded-md border border-border p-2.5"
+          className="flex items-start gap-2 rounded-none border border-border p-2.5"
         >
           <div className="flex-1 min-w-0 space-y-2">
             <div className="space-y-1.5">
-              <Skeleton className="h-4 w-[78%] rounded-sm" />
-              <Skeleton className="h-4 w-[62%] rounded-sm" />
+              <Skeleton className="h-4 w-[78%] rounded-none" />
+              <Skeleton className="h-4 w-[62%] rounded-none" />
               {index % 2 === 0 && (
-                <Skeleton className="h-4 w-[48%] rounded-sm" />
+                <Skeleton className="h-4 w-[48%] rounded-none" />
               )}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <Skeleton className="h-3 w-12 rounded-sm" />
-              <Skeleton className="h-5 w-16 rounded-full" />
-              <Skeleton className="h-5 w-20 rounded-full" />
-              {index % 3 === 0 && <Skeleton className="h-3 w-14 rounded-sm" />}
+              <Skeleton className="h-3 w-12 rounded-none" />
+              <Skeleton className="h-5 w-16 rounded-none" />
+              <Skeleton className="h-5 w-20 rounded-none" />
+              {index % 3 === 0 && <Skeleton className="h-3 w-14 rounded-none" />}
             </div>
           </div>
 
           <div className="flex items-center gap-0.5 shrink-0 pt-0.5">
-            <Skeleton className="h-7 w-7 rounded-md" />
-            <Skeleton className="h-7 w-7 rounded-md" />
+            <Skeleton className="h-7 w-7 rounded-none" />
+            <Skeleton className="h-7 w-7 rounded-none" />
           </div>
         </div>
       ))}
@@ -867,7 +867,7 @@ export function BrainSection() {
       key={tag}
       type="button"
       onClick={() => toggleActiveTag(tag)}
-      className={`inline-flex h-6 max-w-[150px] items-center gap-1 rounded-full border px-2 text-[10px] transition-colors ${
+      className={`inline-flex h-6 max-w-[150px] items-center gap-1 rounded-none border px-2 text-[10px] transition-colors ${
         activeTags.includes(tag)
           ? "bg-foreground text-background border-foreground"
           : "border-border text-muted-foreground hover:bg-muted"
@@ -886,7 +886,7 @@ export function BrainSection() {
         key={tag}
         type="button"
         onClick={() => toggleActiveTag(tag)}
-        className={`flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-xs transition-colors hover:bg-muted/80 hover:text-foreground ${
+        className={`flex h-8 w-full items-center gap-2 rounded-none px-2 text-left text-xs transition-colors hover:bg-muted/80 hover:text-foreground ${
           selected ? "text-foreground" : "text-muted-foreground"
         }`}
         title={tag.length > 32 ? tag : undefined}
@@ -1074,7 +1074,7 @@ export function BrainSection() {
 
       {/* stale memories warning */}
       {isStale && (
-        <div className="flex items-start gap-2 rounded-md border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs text-yellow-600 dark:text-yellow-400">
+        <div className="flex items-start gap-2 rounded-none border border-neutral-500/30 bg-neutral-500/5 px-3 py-2 text-xs text-neutral-600 dark:text-neutral-400">
           <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
           <span>
             hasn&apos;t updated in {staleDays} day{staleDays !== 1 ? "s" : ""}.
@@ -1127,7 +1127,7 @@ export function BrainSection() {
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className={`inline-flex h-8 shrink-0 items-center gap-2 rounded-md border px-3 text-xs transition-colors hover:bg-muted ${
+                className={`inline-flex h-8 shrink-0 items-center gap-2 rounded-none border px-3 text-xs transition-colors hover:bg-muted ${
                   activeTags.length > 0
                     ? "border-foreground/40 bg-muted text-foreground"
                     : "border-border bg-transparent text-muted-foreground"
@@ -1282,7 +1282,7 @@ export function BrainSection() {
               {newTags.map((tag) => (
                 <span
                   key={tag}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full border border-border bg-muted"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-none border border-border bg-muted"
                 >
                   <Tag className="h-2.5 w-2.5" />
                   {tag}
@@ -1377,7 +1377,7 @@ export function BrainSection() {
                 .map((tag) => (
                   <span
                     key={tag}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full border border-border bg-muted"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-none border border-border bg-muted"
                   >
                     <Tag className="h-2.5 w-2.5" />
                     {tag}
@@ -1439,7 +1439,7 @@ export function BrainSection() {
       {/* filters row */}
       <div className="flex items-center gap-2">
         {(typeFilter === "memories" ? loading : artifactsLoading) ? (
-          <Skeleton className="h-6 w-16 rounded-full" />
+          <Skeleton className="h-6 w-16 rounded-none" />
         ) : (
           <Badge variant="secondary" className="text-xs shrink-0">
             {totalCount.toLocaleString()} {totalCount === 1 ? "item" : "items"}
@@ -1451,7 +1451,7 @@ export function BrainSection() {
           <button
             type="button"
             onClick={() => setActiveTags([])}
-            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-border px-2 text-[10px] text-muted-foreground transition-colors hover:bg-muted"
+            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-none border border-border px-2 text-[10px] text-muted-foreground transition-colors hover:bg-muted"
           >
             clear
             <X className="h-2.5 w-2.5" />
@@ -1473,7 +1473,7 @@ export function BrainSection() {
                 if (sortField === field) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
                 else { setSortField(field); setSortDir("desc"); }
               }}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded border transition-colors ${
+              className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-none border transition-colors ${
                 sortField === field
                   ? "bg-foreground/10 border-foreground/20 text-foreground"
                   : "border-border text-muted-foreground hover:bg-muted"
@@ -1489,7 +1489,7 @@ export function BrainSection() {
       </div>
 
       {selectionMode && (
-        <div className="flex h-8 items-center justify-between rounded-md border border-border bg-muted/30 px-2 text-xs">
+        <div className="flex h-8 items-center justify-between rounded-none border border-border bg-muted/30 px-2 text-xs">
           <div className="flex items-center gap-2">
             <Checkbox
               data-testid="brain-select-all"
@@ -1788,7 +1788,7 @@ export function BrainSection() {
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span
                             data-testid={`brain-artifact-saf-kind-${artTestId}`}
-                            className="inline-flex items-center px-1.5 py-0 text-[10px] rounded-full border border-border font-mono text-foreground/80"
+                            className="inline-flex items-center px-1.5 py-0 text-[10px] rounded-none border border-border font-mono text-foreground/80"
                           >
                             {artItem.saf_kind}
                             {artItem.saf_version != null && (

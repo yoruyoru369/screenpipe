@@ -179,12 +179,12 @@ export function AppleCalendarCard({
             {available ? (
               <div className="space-y-3">
                 <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5">
+                  <span className="inline-flex items-center gap-1 rounded-none border border-border px-2 py-0.5">
                     {authorized && <Check className="h-3 w-3" />}
                     Permission · {authorizationStatus}
                   </span>
                   {authorized && (
-                    <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5">
+                    <span className="inline-flex items-center gap-1 rounded-none border border-border px-2 py-0.5">
                       Calendars · {calendarCount}
                     </span>
                   )}
@@ -254,7 +254,7 @@ export function AppleCalendarCard({
                         {upcomingEvents.map((event) => (
                           <div
                             key={event.id}
-                            className="flex items-start gap-2 text-xs bg-muted/50 rounded-md px-2 py-1.5"
+                            className="flex items-start gap-2 text-xs bg-muted/50 rounded-none px-2 py-1.5"
                           >
                             <CalendarDays className="h-3.5 w-3.5 mt-0.5 text-muted-foreground shrink-0" />
                             <div className="min-w-0 flex-1">
@@ -263,7 +263,7 @@ export function AppleCalendarCard({
                                   {event.title || "untitled event"}
                                 </span>
                                 {isHappeningNow(event.start, event.end) && (
-                                  <span className="text-[10px] bg-foreground text-background px-1 rounded">
+                                  <span className="text-[10px] bg-foreground text-background px-1 rounded-none">
                                     now
                                   </span>
                                 )}

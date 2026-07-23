@@ -145,7 +145,7 @@ export function IcsCalendarCard() {
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
-            <CalendarDays className="w-10 h-10 text-muted-foreground p-2 bg-muted rounded-xl" />
+            <CalendarDays className="w-10 h-10 text-muted-foreground p-2 bg-muted rounded-none" />
           </div>
 
           <div className="flex-1 min-w-0">
@@ -153,12 +153,12 @@ export function IcsCalendarCard() {
               <h3 className="text-sm font-semibold text-foreground">
                 ICS Calendars
               </h3>
-              <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-full inline-flex items-center gap-1">
+              <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-none inline-flex items-center gap-1">
                 <Link2 className="h-2.5 w-2.5" />
                 subscription
               </span>
               {entries.length > 0 && (
-                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-full">
+                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-none">
                   connected
                 </span>
               )}
@@ -175,7 +175,7 @@ export function IcsCalendarCard() {
                 {entries.map((entry, i) => (
                   <div
                     key={i}
-                    className="flex items-center gap-2 text-xs bg-muted/50 rounded-md px-2 py-1.5"
+                    className="flex items-center gap-2 text-xs bg-muted/50 rounded-none px-2 py-1.5"
                   >
                     <Switch
                       checked={entry.enabled}
@@ -277,7 +277,7 @@ export function IcsCalendarCard() {
                   return (
                     <div
                       key={event.id}
-                      className={`flex items-start gap-2 text-xs rounded-md px-2 py-1.5 ${
+                      className={`flex items-start gap-2 text-xs rounded-none px-2 py-1.5 ${
                         now
                           ? "bg-foreground/5 border border-foreground/10"
                           : "bg-muted/50"

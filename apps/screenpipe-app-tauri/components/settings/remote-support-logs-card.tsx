@@ -31,23 +31,23 @@ function describeConsumerStatus(status: RemoteSupportStatus): StatusMessage {
     case "ready":
       return {
         text: "Consent synced. Support can request one upload while this device is online.",
-        className: "text-emerald-700",
+        className: "text-neutral-700",
       };
     case "uploading":
       return {
         text: "Uploading the requested filtered diagnostics...",
-        className: "text-blue-700",
+        className: "text-neutral-700",
       };
     case "sync_error":
     case "request_error":
       return {
         text: "Could not reach support. No request will run until the connection recovers; retrying automatically.",
-        className: "text-red-700",
+        className: "text-neutral-700",
       };
     case "signed_out":
       return {
         text: "The signed-in session is not ready, so no remote request can run.",
-        className: "text-red-700",
+        className: "text-neutral-700",
       };
     case "checking":
       return {

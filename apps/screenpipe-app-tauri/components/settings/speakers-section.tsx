@@ -255,9 +255,9 @@ function AudioClip({
         )}
       </Button>
       {playing && (
-        <div className="w-12 h-1 bg-muted rounded-full overflow-hidden">
+        <div className="w-12 h-1 bg-muted rounded-none overflow-hidden">
           <div
-            className="h-full bg-primary rounded-full transition-all duration-100"
+            className="h-full bg-primary rounded-none transition-all duration-100"
             style={{ width: `${progress}%` }}
           />
         </div>
@@ -354,7 +354,7 @@ function ClusterCard({
   const latestTime = Math.max(...members.map(getLatestSampleTime));
 
   return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900/50 dark:bg-amber-950/20 overflow-hidden">
+    <div className="rounded-none border border-neutral-200 bg-neutral-50/50 dark:border-neutral-900/50 dark:bg-neutral-950/20 overflow-hidden">
       <div className="px-3 py-2.5 space-y-2.5">
         {/* Cluster header */}
         <div className="flex items-center justify-between">
@@ -364,19 +364,19 @@ function ClusterCard({
                 {members.slice(0, 3).map((_, i) => (
                   <div
                     key={i}
-                    className="h-6 w-6 rounded-full bg-amber-200 dark:bg-amber-900 border-2 border-amber-50 dark:border-amber-950 flex items-center justify-center text-[9px] font-mono text-amber-700 dark:text-amber-300"
+                    className="h-6 w-6 rounded-none bg-neutral-200 dark:bg-neutral-900 border-2 border-neutral-50 dark:border-neutral-950 flex items-center justify-center text-[9px] font-mono text-neutral-700 dark:text-neutral-300"
                   >
                     ?
                   </div>
                 ))}
                 {members.length > 3 && (
-                  <div className="h-6 w-6 rounded-full bg-amber-100 dark:bg-amber-900/50 border-2 border-amber-50 dark:border-amber-950 flex items-center justify-center text-[9px] font-mono text-amber-600">
+                  <div className="h-6 w-6 rounded-none bg-neutral-100 dark:bg-neutral-900/50 border-2 border-neutral-50 dark:border-neutral-950 flex items-center justify-center text-[9px] font-mono text-neutral-600">
                     +{members.length - 3}
                   </div>
                 )}
               </div>
             ) : (
-              <div className="h-7 w-7 rounded-full bg-amber-200 dark:bg-amber-900 flex items-center justify-center text-xs font-mono text-amber-700 dark:text-amber-300">
+              <div className="h-7 w-7 rounded-none bg-neutral-200 dark:bg-neutral-900 flex items-center justify-center text-xs font-mono text-neutral-700 dark:text-neutral-300">
                 ?
               </div>
             )}
@@ -395,7 +395,7 @@ function ClusterCard({
             </div>
           </div>
           {isMulti && (
-            <span className="text-[10px] font-medium uppercase tracking-wider text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/50 px-1.5 py-0.5 rounded">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-600 dark:text-neutral-400 bg-neutral-100 dark:bg-neutral-900/50 px-1.5 py-0.5 rounded-none">
               cluster
             </span>
           )}
@@ -410,7 +410,7 @@ function ClusterCard({
             return (
               <div
                 key={member.id}
-                className="flex items-center gap-2 text-xs bg-background rounded px-2 py-1.5 border border-border/30 cursor-pointer hover:bg-muted/30"
+                className="flex items-center gap-2 text-xs bg-background rounded-none px-2 py-1.5 border border-border/30 cursor-pointer hover:bg-muted/30"
                 onClick={() =>
                   setExpandedId(expandedId === member.id ? null : member.id)
                 }
@@ -478,7 +478,7 @@ function IdentifiedSpeakerCard({
   };
 
   return (
-    <div className="border border-border rounded-md overflow-hidden">
+    <div className="border border-border rounded-none overflow-hidden">
       <div
         className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-muted/30 transition-colors group"
         onClick={() => !editing && onToggle()}
@@ -497,7 +497,7 @@ function IdentifiedSpeakerCard({
           )}
         </button>
 
-        <div className="h-8 w-8 rounded-full bg-primary/10 text-primary flex items-center justify-center text-xs font-medium shrink-0">
+        <div className="h-8 w-8 rounded-none bg-primary/10 text-primary flex items-center justify-center text-xs font-medium shrink-0">
           {speaker.name.slice(0, 2).toUpperCase()}
         </div>
 
@@ -674,7 +674,7 @@ function SpeakerDetail({
         {samples.map((s, i) => (
           <div
             key={i}
-            className="flex items-center gap-2 text-xs bg-background rounded px-2 py-1.5 border border-border/30"
+            className="flex items-center gap-2 text-xs bg-background rounded-none px-2 py-1.5 border border-border/30"
           >
             <AudioClip
               audioChunkId={s.audio_chunk_id}
@@ -711,9 +711,9 @@ function SpeakerDetail({
           return (
             <div
               key={s.id}
-              className="flex items-center gap-2 text-xs bg-background rounded px-2 py-1.5 border border-border/30"
+              className="flex items-center gap-2 text-xs bg-background rounded-none px-2 py-1.5 border border-border/30"
             >
-              <div className="h-6 w-6 rounded-full bg-muted flex items-center justify-center text-[10px] shrink-0">
+              <div className="h-6 w-6 rounded-none bg-muted flex items-center justify-center text-[10px] shrink-0">
                 {s.name ? s.name.slice(0, 2).toUpperCase() : "?"}
               </div>
               {simSamples[0] && (
@@ -731,7 +731,7 @@ function SpeakerDetail({
               <Button
                 variant="outline"
                 size="icon"
-                className="h-6 w-6 border-green-300 text-green-600 hover:bg-green-100 hover:text-green-700"
+                className="h-6 w-6 border-neutral-300 text-neutral-600 hover:bg-neutral-100 hover:text-neutral-700"
                 title={`yes, merge into ${speaker.name || "this speaker"}`}
                 onClick={() => onMerge(speaker.id, s.id)}
               >
@@ -740,7 +740,7 @@ function SpeakerDetail({
               <Button
                 variant="outline"
                 size="icon"
-                className="h-6 w-6 border-red-300 text-red-500 hover:bg-red-100 hover:text-red-600"
+                className="h-6 w-6 border-neutral-300 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-600"
                 title="no, different person"
               >
                 <ThumbsDown className="h-3 w-3" />
@@ -792,7 +792,7 @@ function MergeBanner({
   };
 
   return (
-    <div className="rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-4 space-y-3">
+    <div className="rounded-none border-2 border-dashed border-primary/30 bg-primary/5 p-4 space-y-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-medium">
           <GitMerge className="h-4 w-4 text-primary" />
@@ -822,9 +822,9 @@ function MergeBanner({
 
       <div className="grid grid-cols-2 gap-3">
         {/* Left speaker */}
-        <div className="rounded-md border border-border bg-background p-3 space-y-2">
+        <div className="rounded-none border border-border bg-background p-3 space-y-2">
           <div className="flex items-center gap-2">
-            <div className="h-7 w-7 rounded-full bg-primary/10 flex items-center justify-center text-xs font-mono shrink-0">
+            <div className="h-7 w-7 rounded-none bg-primary/10 flex items-center justify-center text-xs font-mono shrink-0">
               {suggestion.speaker.isNamed
                 ? suggestion.speaker.name.slice(0, 2).toUpperCase()
                 : "?"}
@@ -852,9 +852,9 @@ function MergeBanner({
         </div>
 
         {/* Right speaker */}
-        <div className="rounded-md border border-border bg-background p-3 space-y-2">
+        <div className="rounded-none border border-border bg-background p-3 space-y-2">
           <div className="flex items-center gap-2">
-            <div className="h-7 w-7 rounded-full bg-muted flex items-center justify-center text-xs font-mono shrink-0">
+            <div className="h-7 w-7 rounded-none bg-muted flex items-center justify-center text-xs font-mono shrink-0">
               {suggestion.similar.name
                 ? suggestion.similar.name.slice(0, 2).toUpperCase()
                 : "?"}
@@ -884,7 +884,7 @@ function MergeBanner({
         <Button
           variant="outline"
           size="sm"
-          className="gap-1.5 border-green-300 text-green-600 hover:bg-green-100 hover:text-green-700"
+          className="gap-1.5 border-neutral-300 text-neutral-600 hover:bg-neutral-100 hover:text-neutral-700"
           disabled={merging}
           onClick={handleMerge}
         >
@@ -1199,21 +1199,21 @@ export function SpeakersSection() {
 
       {/* Attention needed banner */}
       {unnamed.length > 0 && (
-        <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 p-3">
+        <div className="rounded-none bg-neutral-50 dark:bg-neutral-950/30 border border-neutral-200 dark:border-neutral-900/50 p-3">
           <div className="flex items-center gap-2 text-sm">
-            <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
-            <span className="font-medium text-amber-700 dark:text-amber-400">
+            <AlertCircle className="h-4 w-4 text-neutral-500 shrink-0" />
+            <span className="font-medium text-neutral-700 dark:text-neutral-400">
               {unnamed.length} unidentified speaker
               {unnamed.length !== 1 ? "s" : ""}
             </span>
             {multiClusters.length > 0 && (
-              <span className="text-xs text-amber-600 dark:text-amber-500">
+              <span className="text-xs text-neutral-600 dark:text-neutral-500">
                 ({multiClusters.length} cluster
                 {multiClusters.length !== 1 ? "s" : ""} of similar voices)
               </span>
             )}
           </div>
-          <p className="text-xs text-amber-600/80 dark:text-amber-500/80 mt-1 ml-6">
+          <p className="text-xs text-neutral-600/80 dark:text-neutral-500/80 mt-1 ml-6">
             unidentified speakers show as &ldquo;Speaker #N&rdquo; in meeting
             notes and pipes. name them below to fix downstream output.
           </p>

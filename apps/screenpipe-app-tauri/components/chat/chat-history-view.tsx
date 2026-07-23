@@ -847,7 +847,7 @@ export function ChatHistoryView({
                     <button
                       type="button"
                       className={cn(
-                        "absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 transition-colors",
+                        "absolute right-1.5 top-1/2 -translate-y-1/2 rounded-none p-1 transition-colors",
                         "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                       )}
                       aria-label="Clear search"
@@ -1009,7 +1009,7 @@ export function ChatHistoryView({
               }}
               autoFocus
               className={cn(
-                "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none",
+                "w-full rounded-none border bg-background px-3 py-2 text-sm outline-none",
                 "focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background"
               )}
               placeholder="Group name"

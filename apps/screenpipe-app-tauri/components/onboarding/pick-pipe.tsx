@@ -367,7 +367,7 @@ export default function PickPipe() {
         <AnimatePresence>
           {error && (
             <motion.p
-              className="font-mono text-[10px] text-red-500"
+              className="font-mono text-[10px] text-neutral-500"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}

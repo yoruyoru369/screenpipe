@@ -61,7 +61,7 @@ export function ComposerControlsRow({
           >
             <Plus className="h-4 w-4" />
             {filters.activeFilterCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-1 rounded-full bg-foreground text-background text-[9px] font-mono font-semibold flex items-center justify-center">
+              <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-1 rounded-none bg-foreground text-background text-[9px] font-mono font-semibold flex items-center justify-center">
                 {filters.activeFilterCount}
               </span>
             )}
@@ -181,14 +181,14 @@ function ActiveFilterLabels({ filters }: { filters: ComposerFiltersProps }) {
           {filters.activeFilterLabels.slice(0, 2).map((label, index) => (
             <span
               key={`${label}-${index}`}
-              className="inline-flex h-6 max-w-[140px] items-center rounded-md border border-border/50 px-2 text-[10px] font-medium text-muted-foreground truncate"
+              className="inline-flex h-6 max-w-[140px] items-center rounded-none border border-border/50 px-2 text-[10px] font-medium text-muted-foreground truncate"
               title={label}
             >
               {label}
             </span>
           ))}
           {filters.activeFilterLabels.length > 2 && (
-            <span className="inline-flex h-6 items-center rounded-md border border-border/50 px-2 text-[10px] font-medium text-muted-foreground shrink-0">
+            <span className="inline-flex h-6 items-center rounded-none border border-border/50 px-2 text-[10px] font-medium text-muted-foreground shrink-0">
               +{filters.activeFilterLabels.length - 2}
             </span>
           )}

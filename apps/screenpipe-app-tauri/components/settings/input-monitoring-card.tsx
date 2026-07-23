@@ -151,8 +151,8 @@ export function InputMonitoringPanel({
       </p>
 
       {suspectedGhost && !granted ? (
-        <div className="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2">
-          <p className="text-xs text-red-700 dark:text-red-400">
+        <div className="rounded-none border border-neutral-500/30 bg-neutral-500/5 px-3 py-2">
+          <p className="text-xs text-neutral-700 dark:text-neutral-400">
             Permission could not be activated after requesting it. Toggle
             <strong> screenpipe </strong> on in System Settings → Privacy &amp;
             Security → Input Monitoring. If the toggle is already on but
@@ -163,8 +163,8 @@ export function InputMonitoringPanel({
       ) : null}
 
       {grantedThisSession ? (
-        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
-          <p className="text-xs text-amber-700 dark:text-amber-400">
+        <div className="rounded-none border border-neutral-500/30 bg-neutral-500/5 px-3 py-2">
+          <p className="text-xs text-neutral-700 dark:text-neutral-400">
             <strong>Restart screenpipe</strong> to start capturing keystrokes
             and clicks. The running recorder was started without Input
             Monitoring and won&apos;t pick up the change until next launch.

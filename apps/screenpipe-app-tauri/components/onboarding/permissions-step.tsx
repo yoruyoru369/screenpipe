@@ -47,7 +47,7 @@ function PermissionRow({
       className="w-full flex items-center gap-3 px-4 py-3 border border-border/50 transition-all group disabled:cursor-default hover:enabled:bg-foreground hover:enabled:text-background"
     >
       <div
-        className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 transition-colors ${
+        className={`w-7 h-7 rounded-none flex items-center justify-center shrink-0 transition-colors ${
           granted
             ? "bg-foreground/10"
             : "bg-muted group-hover:bg-background/10"

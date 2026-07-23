@@ -361,7 +361,7 @@ export function RetentionSettings({
     <>
       <div className="space-y-4 pt-4 border-t border-border">
         {/* Card 1 — one-time manual purge of just-captured activity */}
-        <div className="space-y-2 rounded border border-border p-3">
+        <div className="space-y-2 rounded-none border border-border p-3">
           <div className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-muted-foreground" />
             <div>
@@ -389,7 +389,7 @@ export function RetentionSettings({
         </div>
 
         {/* Card 2 — ongoing retention policy (distinct from the manual purge above) */}
-        <div className="space-y-3 rounded border border-border p-3">
+        <div className="space-y-3 rounded-none border border-border p-3">
           <div className="flex items-center gap-2">
             <Trash2 className="h-4 w-4 text-muted-foreground" />
             <div>
@@ -752,14 +752,14 @@ function ModeRow({
       type="button"
       data-testid={testId}
       onClick={onClick}
-      className={`w-full text-left flex gap-3 rounded border p-2.5 transition-colors ${
+      className={`w-full text-left flex gap-3 rounded-none border p-2.5 transition-colors ${
         checked
           ? "border-foreground/40 bg-muted/40"
           : "border-border hover:border-foreground/20 hover:bg-muted/20"
       }`}
     >
       <span
-        className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded-full border ${
+        className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded-none border ${
           checked
             ? "border-foreground bg-foreground"
             : "border-muted-foreground"
@@ -770,7 +770,7 @@ function ModeRow({
           {icon}
           <span>{title}</span>
           {recommended && (
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground border border-border rounded px-1 py-px ml-1">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground border border-border rounded-none px-1 py-px ml-1">
               recommended
             </span>
           )}

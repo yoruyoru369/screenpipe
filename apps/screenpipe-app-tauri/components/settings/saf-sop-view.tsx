@@ -52,7 +52,7 @@ function FrameImage({ frameId }: { frameId: number }) {
   if (!url) {
     return (
       <div
-        className="h-20 w-32 rounded border border-border bg-muted/30 animate-pulse"
+        className="h-20 w-32 rounded-none border border-border bg-muted/30 animate-pulse"
         data-testid={`saf-frame-loading-${frameId}`}
       />
     );
@@ -62,7 +62,7 @@ function FrameImage({ frameId }: { frameId: number }) {
     <img
       src={url}
       alt={`frame ${frameId}`}
-      className="h-20 w-auto max-w-full rounded border border-border object-cover"
+      className="h-20 w-auto max-w-full rounded-none border border-border object-cover"
       data-testid={`saf-frame-${frameId}`}
       onError={() => setFailed(true)}
     />
@@ -73,7 +73,7 @@ function ConfidenceBadge({ confidence }: { confidence: string }) {
   const observed = confidence === "observed";
   return (
     <span
-      className={`inline-flex items-center px-1.5 py-0 text-[10px] rounded-full font-mono ${
+      className={`inline-flex items-center px-1.5 py-0 text-[10px] rounded-none font-mono ${
         observed
           ? "bg-muted text-foreground/80"
           : "border border-dashed border-border text-muted-foreground"
@@ -86,7 +86,7 @@ function ConfidenceBadge({ confidence }: { confidence: string }) {
 
 function PrettyJson({ value }: { value: unknown }) {
   return (
-    <pre className="text-xs bg-muted/30 rounded p-2 whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto">
+    <pre className="text-xs bg-muted/30 rounded-none p-2 whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto">
       {JSON.stringify(value, null, 2)}
     </pre>
   );
@@ -119,7 +119,7 @@ export function SafSopView({ artifact }: { artifact: SafArtifact }) {
         <ol className="space-y-2.5" data-testid="saf-sop-steps">
           {steps.map((s, i) => (
             <li key={`${s.n}-${i}`} className="flex items-start gap-2">
-              <span className="shrink-0 w-5 h-5 rounded-full bg-muted text-[10px] font-mono flex items-center justify-center mt-0.5">
+              <span className="shrink-0 w-5 h-5 rounded-none bg-muted text-[10px] font-mono flex items-center justify-center mt-0.5">
                 {s.n}
               </span>
               <div className="flex-1 min-w-0 space-y-1">
@@ -200,7 +200,7 @@ export function SafArtifactBody({
     }
     if (!parsedOk) {
       body = (
-        <pre className="text-xs bg-muted/30 rounded p-2 whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto">
+        <pre className="text-xs bg-muted/30 rounded-none p-2 whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto">
           {content}
         </pre>
       );

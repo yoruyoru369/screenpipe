@@ -31,7 +31,7 @@ export function ImageViewerDialog({ imageViewer, onChange }: ImageViewerDialogPr
               <button
                 type="button"
                 onClick={() => onChange(null)}
-                className="p-2 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                className="p-2 rounded-none hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
                 aria-label="Close"
               >
                 <X className="h-5 w-5" />
@@ -42,7 +42,7 @@ export function ImageViewerDialog({ imageViewer, onChange }: ImageViewerDialogPr
               <img
                 src={imageViewer.images[imageViewer.index]}
                 alt={`Attached image ${imageViewer.index + 1}`}
-                className="max-w-full max-h-full object-contain rounded-lg"
+                className="max-w-full max-h-full object-contain rounded-none"
               />
             </div>
             <div className="flex items-center justify-center gap-4 py-3 border-t border-border/50 shrink-0">
@@ -50,7 +50,7 @@ export function ImageViewerDialog({ imageViewer, onChange }: ImageViewerDialogPr
                 type="button"
                 onClick={() => onChange((v) => v && v.index > 0 ? { ...v, index: v.index - 1 } : v)}
                 disabled={imageViewer.index === 0}
-                className="p-2 rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
+                className="p-2 rounded-none hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
                 aria-label="Previous image"
               >
                 <ChevronLeft className="h-5 w-5" />
@@ -59,7 +59,7 @@ export function ImageViewerDialog({ imageViewer, onChange }: ImageViewerDialogPr
                 type="button"
                 onClick={() => onChange((v) => v && v.index < v.images.length - 1 ? { ...v, index: v.index + 1 } : v)}
                 disabled={imageViewer.index === imageViewer.images.length - 1}
-                className="p-2 rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
+                className="p-2 rounded-none hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
                 aria-label="Next image"
               >
                 <ChevronRight className="h-5 w-5" />
@@ -70,7 +70,7 @@ export function ImageViewerDialog({ imageViewer, onChange }: ImageViewerDialogPr
                 <div
                   key={i}
                   className={cn(
-                    "w-2 h-2 rounded-full transition-colors",
+                    "w-2 h-2 rounded-none transition-colors",
                     i === imageViewer.index ? "bg-foreground" : "bg-muted-foreground/40"
                   )}
                   aria-hidden

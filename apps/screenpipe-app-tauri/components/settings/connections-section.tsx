@@ -592,12 +592,12 @@ function GrokLogo({ className }: { className?: string }) {
 // Source of truth for integration glyphs; INTEGRATION_ICON_KEYS derives from it.
 const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
     claude: <ClaudeLogo />,
-    cursor: <CursorLogo className="w-5 h-5 rounded" />,
-    codex: <img src="/images/codex.svg" alt="Codex" className="w-5 h-5 rounded" />,
-    grok: <GrokLogo className="w-5 h-5 rounded" />,
+    cursor: <CursorLogo className="w-5 h-5 rounded-none" />,
+    codex: <img src="/images/codex.svg" alt="Codex" className="w-5 h-5 rounded-none" />,
+    grok: <GrokLogo className="w-5 h-5 rounded-none" />,
     "claude-code": <Terminal className="h-5 w-5" />,
-    warp: <img src="/images/warp.png" alt="Warp" className="w-5 h-5 rounded" />,
-    chatgpt: <img src="/images/openai.png" alt="ChatGPT" className="w-5 h-5 rounded" />,
+    warp: <img src="/images/warp.png" alt="Warp" className="w-5 h-5 rounded-none" />,
+    chatgpt: <img src="/images/openai.png" alt="ChatGPT" className="w-5 h-5 rounded-none" />,
     telegram: (
       <svg viewBox="0 0 24 24" className="w-5 h-5" fill="#2AABEE">
         <path d="M12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm5.53 8.16l-1.81 8.53c-.13.6-.5.75-.99.47l-2.75-2.03-1.33 1.28c-.15.15-.27.27-.55.27l.2-2.8 5.1-4.6c.22-.2-.05-.31-.34-.12l-6.31 3.97-2.72-.85c-.59-.18-.6-.59.13-.88l10.62-4.1c.49-.18.92.12.75.86z"/>
@@ -634,7 +634,7 @@ const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
     "google-docs": <img src="/images/google-docs.svg" alt="Google Docs" className="w-5 h-5" />,
     "ics-calendar": <CalendarIcon className="h-5 w-5 text-muted-foreground" />,
     "remote-agent": <img src="/openclaw-icon.svg" alt="Remote agent" className="w-5 h-5" />,
-    bee: <img src="/images/bee.png" alt="Bee" className="w-5 h-5 rounded" />,
+    bee: <img src="/images/bee.png" alt="Bee" className="w-5 h-5 rounded-none" />,
     email: <Send className="h-5 w-5 text-muted-foreground" />,
     todoist: (
       <svg viewBox="0 0 24 24" className="w-5 h-5" fill="#E44332">
@@ -649,10 +649,10 @@ const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
         <path fill="#7B83EB" d="M15 12v5a4 4 0 01-4 4H7a4 4 0 01-4-4v-5a1 1 0 011-1h10a1 1 0 011 1z"/>
       </svg>
     ),
-    anythingllm: <img src="/images/anythingllm.png" alt="AnythingLLM" className="w-5 h-5 rounded" />,
-    msty: <img src="/images/msty.webp" alt="Msty" className="w-5 h-5 rounded" />,
-    ollama: <img src="/images/ollama.png" alt="Ollama" className="w-5 h-5 rounded" />,
-    lmstudio: <img src="/images/lmstudio.png" alt="LM Studio" className="w-5 h-5 rounded" />,
+    anythingllm: <img src="/images/anythingllm.png" alt="AnythingLLM" className="w-5 h-5 rounded-none" />,
+    msty: <img src="/images/msty.webp" alt="Msty" className="w-5 h-5 rounded-none" />,
+    ollama: <img src="/images/ollama.png" alt="Ollama" className="w-5 h-5 rounded-none" />,
+    lmstudio: <img src="/images/lmstudio.png" alt="LM Studio" className="w-5 h-5 rounded-none" />,
     whatsapp: <img src="/images/whatsapp.svg" alt="WhatsApp" className="w-5 h-5" />,
     obsidian: (
       <svg viewBox="0 0 24 24" className="w-5 h-5" fill="#7C3AED">
@@ -668,25 +668,25 @@ const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
     odoo: <img src="/images/odoo.svg" alt="Odoo" className="w-5 h-5" />,
     perplexity: <img src="/images/perplexity.svg" alt="Perplexity" className="w-5 h-5" />,
     posthog: <img src="/images/posthog.svg" alt="PostHog" className="w-5 h-5" />,
-    n8n: <img src="/images/n8n.png" alt="n8n" className="w-5 h-5 rounded" />,
-    make: <img src="/images/make.png" alt="Make" className="w-5 h-5 rounded" />,
-    glean: <img src="/images/glean.svg" alt="Glean" className="w-5 h-5 rounded" />,
-    zapier: <img src="/images/zapier.png" alt="Zapier" className="w-5 h-5 rounded" />,
-    github: <img src="/images/github.png" alt="GitHub" className="w-5 h-5 rounded" />,
-    jira: <img src="/images/jira.png" alt="Jira" className="w-5 h-5 rounded" />,
-    granola: <img src="/images/granola.png" alt="Granola" className="w-5 h-5 rounded" />,
-    mochi: <img src="/images/mochi.png" alt="Mochi" className="w-5 h-5 rounded" />,
-    hubspot: <img src="/images/hubspot.png" alt="HubSpot" className="w-5 h-5 rounded" />,
-    bitrix24: <img src="/images/bitrix24.png" alt="Bitrix24" className="w-5 h-5 rounded" />,
-    airtable: <img src="/images/airtable.png" alt="Airtable" className="w-5 h-5 rounded" />,
+    n8n: <img src="/images/n8n.png" alt="n8n" className="w-5 h-5 rounded-none" />,
+    make: <img src="/images/make.png" alt="Make" className="w-5 h-5 rounded-none" />,
+    glean: <img src="/images/glean.svg" alt="Glean" className="w-5 h-5 rounded-none" />,
+    zapier: <img src="/images/zapier.png" alt="Zapier" className="w-5 h-5 rounded-none" />,
+    github: <img src="/images/github.png" alt="GitHub" className="w-5 h-5 rounded-none" />,
+    jira: <img src="/images/jira.png" alt="Jira" className="w-5 h-5 rounded-none" />,
+    granola: <img src="/images/granola.png" alt="Granola" className="w-5 h-5 rounded-none" />,
+    mochi: <img src="/images/mochi.png" alt="Mochi" className="w-5 h-5 rounded-none" />,
+    hubspot: <img src="/images/hubspot.png" alt="HubSpot" className="w-5 h-5 rounded-none" />,
+    bitrix24: <img src="/images/bitrix24.png" alt="Bitrix24" className="w-5 h-5 rounded-none" />,
+    airtable: <img src="/images/airtable.png" alt="Airtable" className="w-5 h-5 rounded-none" />,
     limitless: <img src="/images/limitless.svg" alt="Limitless" className="w-5 h-5" />,
-    logseq: <img src="/images/logseq.png" alt="Logseq" className="w-5 h-5 rounded" />,
-    pushover: <img src="/images/pushover.png" alt="Pushover" className="w-5 h-5 rounded" />,
-    ntfy: <img src="/images/ntfy.png" alt="ntfy" className="w-5 h-5 rounded" />,
-    toggl: <img src="/images/toggl.png" alt="Toggl" className="w-5 h-5 rounded" />,
-    monday: <img src="/images/monday.png" alt="Monday.com" className="w-5 h-5 rounded" />,
+    logseq: <img src="/images/logseq.png" alt="Logseq" className="w-5 h-5 rounded-none" />,
+    pushover: <img src="/images/pushover.png" alt="Pushover" className="w-5 h-5 rounded-none" />,
+    ntfy: <img src="/images/ntfy.png" alt="ntfy" className="w-5 h-5 rounded-none" />,
+    toggl: <img src="/images/toggl.png" alt="Toggl" className="w-5 h-5 rounded-none" />,
+    monday: <img src="/images/monday.png" alt="Monday.com" className="w-5 h-5 rounded-none" />,
     asana: <img src="/images/asana.svg" alt="Asana" className="w-5 h-5" />,
-    "browser-url": <img src="/images/browser-url.svg" alt="Browser URL" className="w-5 h-5 rounded" />,
+    "browser-url": <img src="/images/browser-url.svg" alt="Browser URL" className="w-5 h-5 rounded-none" />,
     // user-browser: your real Chrome/Arc/Edge via the screenpipe extension.
     // The arrow-out-of-square hints at "drives an external browser".
     "user-browser": (
@@ -696,7 +696,7 @@ const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
         <path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z" />
       </svg>
     ),
-    "voice-memos": <img src="/images/voice-memos.svg" alt="Voice Memos" className="w-5 h-5 rounded" />,
+    "voice-memos": <img src="/images/voice-memos.svg" alt="Voice Memos" className="w-5 h-5 rounded-none" />,
     "custom-mcp": (
       <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <path d="M9 2v6" />
@@ -801,10 +801,10 @@ const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
         <text x="12" y="17" textAnchor="middle" fill="#fff" fontSize="16" fontWeight="bold" fontFamily="sans-serif">P</text>
       </svg>
     ),
-    fireflies: <img src="/images/fireflies.png" alt="Fireflies.ai" className="w-5 h-5 rounded" />,
-    otter: <img src="/images/otter.png" alt="Otter.ai" className="w-5 h-5 rounded" />,
-    lexi: <img src="/images/lexi.png" alt="Leexi" className="w-5 h-5 rounded" />,
-    financialsense: <img src="/images/financialsense.png" alt="Financial Sense" className="w-5 h-5 rounded" />,
+    fireflies: <img src="/images/fireflies.png" alt="Fireflies.ai" className="w-5 h-5 rounded-none" />,
+    otter: <img src="/images/otter.png" alt="Otter.ai" className="w-5 h-5 rounded-none" />,
+    lexi: <img src="/images/lexi.png" alt="Leexi" className="w-5 h-5 rounded-none" />,
+    financialsense: <img src="/images/financialsense.png" alt="Financial Sense" className="w-5 h-5 rounded-none" />,
     loops: <img src="/images/loops.svg" alt="Loops" className="w-5 h-5" />,
     resend: <img src="/images/resend.svg" alt="Resend" className="w-5 h-5 dark:invert" />,
     readwise: <img src="/images/readwise.svg" alt="Readwise" className="w-5 h-5 dark:invert" />,
@@ -825,7 +825,7 @@ export const INTEGRATION_ICON_KEYS = new Set<string>(Object.keys(INTEGRATION_ICO
 
 export function IntegrationIcon({
   icon,
-  className = "w-10 h-10 bg-muted rounded-xl flex items-center justify-center",
+  className = "w-10 h-10 bg-muted rounded-none flex items-center justify-center",
   fallbackClassName = "h-5 w-5 text-muted-foreground",
 }: {
   icon: string;
@@ -907,7 +907,7 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
       }}
       className={`
-        group/row flex w-full items-center gap-3 px-3 py-3 rounded-xl border transition-all text-left cursor-pointer select-none
+        group/row flex w-full items-center gap-3 px-3 py-3 rounded-none border transition-all text-left cursor-pointer select-none
         ${selected
           ? "border-foreground bg-accent"
           : "border-transparent hover:bg-accent/50 hover:border-border"
@@ -939,7 +939,7 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
                       e.stopPropagation();
                       onTryInChat?.();
                     }}
-                    className="absolute inset-0 rounded-lg flex items-center justify-center opacity-0 group-hover/row:opacity-100 group-hover/row:bg-muted transition-all"
+                    className="absolute inset-0 rounded-none flex items-center justify-center opacity-0 group-hover/row:opacity-100 group-hover/row:bg-muted transition-all"
                   >
                     <MessageSquare className="h-4 w-4 text-foreground" />
                   </button>
@@ -949,7 +949,7 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
             </TooltipProvider>
           </>
         ) : (
-          <div className="absolute inset-0 rounded-xl bg-muted flex items-center justify-center">
+          <div className="absolute inset-0 rounded-none bg-muted flex items-center justify-center">
             <Plus className="h-4 w-4 text-foreground" />
           </div>
         )}
@@ -976,7 +976,7 @@ function McpSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-none border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -988,13 +988,13 @@ function McpSpotlight({
         >
           <IntegrationIcon
             icon="custom-mcp"
-            className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted"
+            className="flex h-10 w-10 items-center justify-center rounded-none bg-muted"
           />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-medium text-foreground">MCP servers</h3>
               {enabledCount > 0 && (
-                <span className="h-2 w-2 rounded-full bg-foreground" />
+                <span className="h-2 w-2 rounded-none bg-foreground" />
               )}
             </div>
             <p className="text-xs text-muted-foreground">{summary}</p>
@@ -1031,7 +1031,7 @@ function SkillsSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-none border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -1043,12 +1043,12 @@ function SkillsSpotlight({
         >
           <IntegrationIcon
             icon="skills"
-            className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted"
+            className="flex h-10 w-10 items-center justify-center rounded-none bg-muted"
           />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-medium text-foreground">Skills</h3>
-              {count > 0 && <span className="h-2 w-2 rounded-full bg-foreground" />}
+              {count > 0 && <span className="h-2 w-2 rounded-none bg-foreground" />}
             </div>
             <p className="text-xs text-muted-foreground">{summary}</p>
           </div>
@@ -1083,7 +1083,7 @@ function PiExtensionsSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-none border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -1095,12 +1095,12 @@ function PiExtensionsSpotlight({
         >
           <IntegrationIcon
             icon="pi-extensions"
-            className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted"
+            className="flex h-10 w-10 items-center justify-center rounded-none bg-muted"
           />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-medium text-foreground">Pi extensions</h3>
-              {count > 0 && <span className="h-2 w-2 rounded-full bg-foreground" />}
+              {count > 0 && <span className="h-2 w-2 rounded-none bg-foreground" />}
             </div>
             <p className="text-xs text-muted-foreground">{summary}</p>
           </div>
@@ -1395,7 +1395,7 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
       )}
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">manual config</summary>
-        <pre className="mt-2 bg-muted border border-border rounded-lg p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{manualConfig}</pre>
+        <pre className="mt-2 bg-muted border border-border rounded-none p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{manualConfig}</pre>
       </details>
       <MemorySyncSubsection
         integrationId="codex"
@@ -1461,7 +1461,7 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
       )}
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">manual config</summary>
-        <pre className="mt-2 bg-muted border border-border rounded-lg p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{manualConfig}</pre>
+        <pre className="mt-2 bg-muted border border-border rounded-none p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{manualConfig}</pre>
       </details>
     </div>
   );
@@ -1482,7 +1482,7 @@ function ClaudeCodePanel() {
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">Give Claude Code access to your screen &amp; audio history. Run in your terminal:</p>
       <div className="relative group">
-        <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto">{cmd}</pre>
+        <pre className="bg-muted border border-border rounded-none p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto">{cmd}</pre>
         <Button variant="ghost" size="sm" onClick={handleCopy} className="absolute top-2 right-2 h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
           {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
         </Button>
@@ -1670,7 +1670,7 @@ function MemorySyncSubsection({
 
       {connected ? (
         <>
-          <div className="p-2 bg-muted border border-border rounded-lg space-y-1">
+          <div className="p-2 bg-muted border border-border rounded-none space-y-1">
             <div className="space-y-0.5">
               <p className="text-xs text-muted-foreground">file</p>
               <p className="text-xs text-foreground font-mono break-all">{persistedPath}/{targetFilename}</p>
@@ -1806,7 +1806,7 @@ function ObsidianMemorySyncSubsection() {
 
       {connected ? (
         <>
-          <div className="p-2 bg-muted border border-border rounded-lg space-y-1">
+          <div className="p-2 bg-muted border border-border rounded-none space-y-1">
             <div className="space-y-0.5">
               <p className="text-xs text-muted-foreground">note</p>
               <p className="text-xs text-foreground font-mono break-all">{notePath}</p>
@@ -1900,10 +1900,10 @@ function AnythingLLMPanel() {
         1. In AnythingLLM, go to <strong>Agent Skills</strong> &gt; <strong>MCP Servers</strong>
       </p>
       <p className="text-xs text-muted-foreground">
-        2. Add this config to your <code className="bg-muted px-1 rounded">anythingllm_mcp_servers.json</code>:
+        2. Add this config to your <code className="bg-muted px-1 rounded-none">anythingllm_mcp_servers.json</code>:
       </p>
       <div className="relative group">
-        <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{config}</pre>
+        <pre className="bg-muted border border-border rounded-none p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{config}</pre>
         <Button variant="ghost" size="sm" onClick={handleCopy} className="absolute top-2 right-2 h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
           {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
         </Button>
@@ -1941,7 +1941,7 @@ function MstyPanel() {
         2. Click <strong>Add New Tool</strong>, select <strong>STDIO / JSON</strong>, and paste this config:
       </p>
       <div className="relative group">
-        <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{config}</pre>
+        <pre className="bg-muted border border-border rounded-none p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{config}</pre>
         <Button variant="ghost" size="sm" onClick={handleCopy} className="absolute top-2 right-2 h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
           {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
         </Button>
@@ -1981,13 +1981,13 @@ function WarpPanel() {
         Give Warp&apos;s Agent Mode access to your screen &amp; audio history via MCP.
       </p>
       <p className="text-xs text-muted-foreground">
-        1. In Warp, open <strong>Settings</strong> &gt; <strong>AI</strong> &gt; <strong>Manage MCP servers</strong> &gt; <strong>+ Add</strong> (or run <code className="bg-muted px-1 rounded">Open MCP Servers</code> from the Command Palette)
+        1. In Warp, open <strong>Settings</strong> &gt; <strong>AI</strong> &gt; <strong>Manage MCP servers</strong> &gt; <strong>+ Add</strong> (or run <code className="bg-muted px-1 rounded-none">Open MCP Servers</code> from the Command Palette)
       </p>
       <p className="text-xs text-muted-foreground">
         2. Choose <strong>CLI Server (Command)</strong> and paste this config:
       </p>
       <div className="relative group">
-        <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{config}</pre>
+        <pre className="bg-muted border border-border rounded-none p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{config}</pre>
         <Button variant="ghost" size="sm" onClick={handleCopy} className="absolute top-2 right-2 h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
           {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
         </Button>
@@ -2030,7 +2030,7 @@ function OllamaPanel() {
         {status === "checking" ? (<><Loader2 className="h-3 w-3 animate-spin" />checking...</>) : "check connection"}
       </Button>
       {status === "connected" && (
-        <div className="p-3 bg-muted border border-border rounded-lg space-y-1">
+        <div className="p-3 bg-muted border border-border rounded-none space-y-1">
           <p className="text-xs font-medium text-foreground">ollama detected</p>
           {models.length > 0 ? (
             <ul className="text-xs text-muted-foreground list-disc list-inside">
@@ -2082,7 +2082,7 @@ function LMStudioPanel() {
         </Button>
       </div>
       {status === "connected" && (
-        <div className="p-3 bg-muted border border-border rounded-lg space-y-1">
+        <div className="p-3 bg-muted border border-border rounded-none space-y-1">
           <p className="text-xs font-medium text-foreground">lm studio detected</p>
           {models.length > 0 ? (
             <ul className="text-xs text-muted-foreground list-disc list-inside">
@@ -2212,7 +2212,7 @@ function WhatsAppPanel() {
       {status === "pairing" && qr && (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">scan this QR code with your WhatsApp app:</p>
-          <div className="bg-white p-3 rounded-lg inline-block border dark:border-border">
+          <div className="bg-white p-3 rounded-none inline-block border dark:border-border">
             <img
               src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qr)}`}
               alt="WhatsApp QR Code"
@@ -2224,7 +2224,7 @@ function WhatsAppPanel() {
       )}
       {status === "connected" && info && (
         <div className="space-y-2">
-          <div className="p-3 bg-muted border border-border rounded-lg">
+          <div className="p-3 bg-muted border border-border rounded-none">
             <p className="text-xs font-medium text-foreground">connected</p>
             <p className="text-xs text-muted-foreground">{info.name} ({info.phone})</p>
           </div>
@@ -2332,7 +2332,7 @@ function ChatGptPanel() {
       </p>
 
       {status === "expired" && (
-        <div className="flex items-start gap-2 rounded-md border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-400">
+        <div className="flex items-start gap-2 rounded-none border border-neutral-500/40 bg-neutral-500/10 px-3 py-2 text-xs text-neutral-700 dark:text-neutral-400">
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
             Your ChatGPT session has expired. Click{" "}
@@ -2592,7 +2592,7 @@ function OAuthPanel({
             const key = account.instance ?? "__default__";
             const isDisconnecting = disconnecting === key;
             return (
-              <div key={key} className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-2 text-xs">
+              <div key={key} className="flex items-center justify-between gap-2 rounded-none border border-border bg-muted/40 px-2.5 py-2 text-xs">
                 <span className="text-muted-foreground truncate">
                   {account.displayName || account.instance || "default account"}
                 </span>
@@ -2678,8 +2678,8 @@ function OAuthPanel({
         )}
       </div>
       {oauthMessage && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-muted-foreground">
-          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+        <div className="flex items-start gap-2 rounded-none border border-neutral-500/30 bg-neutral-500/10 px-2.5 py-2 text-[11px] text-muted-foreground">
+          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-neutral-600" />
           <span>{oauthMessage}</span>
         </div>
       )}
@@ -3046,7 +3046,7 @@ function ObsidianPanel({ onConnected, onDisconnected }: { onConnected?: () => vo
             {connected.map(v => (
               <div
                 key={v.instance ?? "__default__"}
-                className="p-2.5 rounded-lg border border-border bg-muted flex items-center gap-2.5"
+                className="p-2.5 rounded-none border border-border bg-muted flex items-center gap-2.5"
               >
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium truncate">{vaultFolderName(v.path)}</p>
@@ -3075,7 +3075,7 @@ function ObsidianPanel({ onConnected, onDisconnected }: { onConnected?: () => vo
                 key={v.id}
                 onClick={() => handleConnect(v.path)}
                 disabled={!!busyPath}
-                className="w-full text-left p-2.5 rounded-lg border border-border bg-card hover:bg-muted transition-colors flex items-center gap-2.5 disabled:opacity-50"
+                className="w-full text-left p-2.5 rounded-none border border-border bg-card hover:bg-muted transition-colors flex items-center gap-2.5 disabled:opacity-50"
               >
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium truncate">{v.name}</p>
@@ -4504,14 +4504,14 @@ export function ConnectionsSection({
         <div className="space-y-6">
           {Array.from({ length: 3 }).map((_, gi) => (
             <div key={gi} className="space-y-2">
-              <div className="h-4 bg-muted rounded w-24 animate-pulse" />
+              <div className="h-4 bg-muted rounded-none w-24 animate-pulse" />
               <div className="grid grid-cols-2 gap-2">
                 {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-border bg-card animate-pulse">
-                    <div className="w-10 h-10 rounded-xl bg-muted shrink-0" />
+                  <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-none border border-border bg-card animate-pulse">
+                    <div className="w-10 h-10 rounded-none bg-muted shrink-0" />
                     <div className="flex-1 space-y-1.5">
-                      <div className="h-3 bg-muted rounded w-20" />
-                      <div className="h-2.5 bg-muted rounded w-32" />
+                      <div className="h-3 bg-muted rounded-none w-20" />
+                      <div className="h-2.5 bg-muted rounded-none w-32" />
                     </div>
                   </div>
                 ))}
@@ -4579,7 +4579,7 @@ export function ConnectionsSection({
                       {selectedTile.name}
                     </DialogTitle>
                     {selectedTile.id === "apple-calendar" && (
-                      <span className="px-2 py-0.5 text-xs font-medium border border-border text-muted-foreground rounded-full inline-flex items-center gap-1">
+                      <span className="px-2 py-0.5 text-xs font-medium border border-border text-muted-foreground rounded-none inline-flex items-center gap-1">
                         <CalendarIcon className="h-2.5 w-2.5" />
                         macOS
                       </span>

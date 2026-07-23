@@ -103,7 +103,7 @@ function SuggestionButton({
       <button
         type="button"
         onClick={() => onSendSuggestion(suggestion.text)}
-        className="text-left px-2 py-1.5 text-[11px] font-mono rounded-sm hover:bg-muted text-muted-foreground hover:text-foreground transition-colors flex items-start gap-1.5"
+        className="text-left px-2 py-1.5 text-[11px] font-mono rounded-none hover:bg-muted text-muted-foreground hover:text-foreground transition-colors flex items-start gap-1.5"
         title={title}
       >
         {suggestion.connectionIcon ? (

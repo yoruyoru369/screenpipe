@@ -217,7 +217,7 @@ that installs the screenpipe MCP server${hasSkills ? " + skill" : ""} so ${name}
             setTargetId(e.target.value as TargetId);
             setCopied("");
           }}
-          className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+          className="h-8 rounded-none border border-border bg-background px-2 text-xs text-foreground"
         >
           {TARGETS.map((t) => (
             <option key={t.id} value={t.id}>
@@ -227,7 +227,7 @@ that installs the screenpipe MCP server${hasSkills ? " + skill" : ""} so ${name}
         </select>
       </div>
 
-      <div className="rounded-md border border-border bg-muted/40 p-3 space-y-3">
+      <div className="rounded-none border border-border bg-muted/40 p-3 space-y-3">
         <p className="text-xs text-muted-foreground leading-relaxed">
           <span className="text-foreground font-medium">Set screenpipe up where {name} runs</span>{" "}
           — your VPS, a cloud box, or a Mac mini. Two easy ways:
@@ -238,7 +238,7 @@ that installs the screenpipe MCP server${hasSkills ? " + skill" : ""} so ${name}
             1. Run this on the box (SSH in, paste):
           </p>
           <div className="flex items-center gap-2">
-            <code className="flex-1 text-xs font-mono bg-background border border-border rounded px-2 py-1.5 overflow-x-auto whitespace-nowrap">
+            <code className="flex-1 text-xs font-mono bg-background border border-border rounded-none px-2 py-1.5 overflow-x-auto whitespace-nowrap">
               {setupCmd}
             </code>
             <Button
@@ -257,7 +257,7 @@ that installs the screenpipe MCP server${hasSkills ? " + skill" : ""} so ${name}
             2. Or paste this into your AI (Claude, Cursor, Codex…) and let it set up your server:
           </p>
           <div className="flex items-start gap-2">
-            <pre className="flex-1 text-[11px] font-mono bg-background border border-border rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap max-h-28">
+            <pre className="flex-1 text-[11px] font-mono bg-background border border-border rounded-none px-2 py-1.5 overflow-x-auto whitespace-pre-wrap max-h-28">
               {aiPrompt}
             </pre>
             <Button

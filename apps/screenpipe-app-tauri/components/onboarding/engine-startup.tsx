@@ -930,7 +930,7 @@ if the input is sparse, just describe what little you have warmly. don't apologi
           transition={{ delay: 0.1 }}
         >
           <motion.div
-            className="w-1.5 h-1.5 rounded-full bg-foreground"
+            className="w-1.5 h-1.5 rounded-none bg-foreground"
             animate={{ opacity: [1, 0.3, 1] }}
             transition={{ duration: 1.5, repeat: Infinity }}
           />

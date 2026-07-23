@@ -68,7 +68,7 @@ const CachedAppIcon = React.memo(function CachedAppIcon({ appName, className }: 
 		// eslint-disable-next-line @next/next/no-img-element
 		<img
 			src={`http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`}
-			className={className ?? "w-full h-full rounded-sm object-contain scale-110"}
+			className={className ?? "w-full h-full rounded-none object-contain scale-110"}
 			alt={appName}
 			decoding="async"
 			style={{ display: status === "loaded" ? undefined : "none" }}
@@ -355,12 +355,12 @@ const PlayheadTimeChip = React.memo(function PlayheadTimeChip({
 					transform: "translate(-50%, -100%) translateY(-6px)",
 				}}
 			>
-				<div className="flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[11px] font-mono font-semibold tabular-nums leading-none text-neutral-900 shadow-lg ring-1 ring-black/10 whitespace-nowrap">
+				<div className="flex items-center gap-1.5 rounded-none bg-white px-2.5 py-1 text-[11px] font-mono font-semibold tabular-nums leading-none text-neutral-900 shadow-lg ring-1 ring-black/10 whitespace-nowrap">
 					<Clock className="w-3 h-3 opacity-80" />
 					<span>{format(new Date(timestamp), "h:mm:ss a")}</span>
 				</div>
 				{/* small cap connecting the chip down to the playhead line */}
-				<div className="-mt-[3px] h-2 w-2 rotate-45 rounded-[1px] bg-white ring-1 ring-black/10" />
+				<div className="-mt-[3px] h-2 w-2 rotate-45 rounded-none bg-white ring-1 ring-black/10" />
 			</div>
 		</>,
 		document.body,
@@ -1191,7 +1191,7 @@ export const TimelineSlider = ({
 				{onRefresh && (
 					<button
 						className={cn(
-							"p-1.5 rounded-md transition-colors shrink-0",
+							"p-1.5 rounded-none transition-colors shrink-0",
 							"bg-background/80 backdrop-blur-sm border border-border",
 						)}
 						onClick={onRefresh}
@@ -1208,7 +1208,7 @@ export const TimelineSlider = ({
 					>
 						<button
 							className={cn(
-								"p-1.5 rounded-l-md transition-colors shrink-0",
+								"p-1.5 rounded-none transition-colors shrink-0",
 								"bg-background/80 backdrop-blur-sm border border-border border-r-0",
 								expandedFilterSection === "monitor" && "bg-foreground/10",
 								selectedDeviceId !== "all" && "ring-1 ring-primary/50",
@@ -1220,7 +1220,7 @@ export const TimelineSlider = ({
 						<div
 							className={cn(
 								"flex items-center gap-1.5 overflow-hidden transition-all duration-200 ease-out",
-								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-r-md",
+								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-none",
 								expandedFilterSection === "monitor" ? "max-w-[300px] px-2 py-1.5 opacity-100" : "max-w-0 px-0 py-1.5 opacity-0 border-transparent",
 							)}
 						>
@@ -1228,7 +1228,7 @@ export const TimelineSlider = ({
 								<button
 									key={id}
 									onClick={() => onDeviceChange(selectedDeviceId === id ? "all" : id)}
-									className="rounded-full transition-all duration-200 hover:scale-125 shrink-0"
+									className="rounded-none transition-all duration-200 hover:scale-125 shrink-0"
 									style={{
 										width: selectedDeviceId === id ? 8 : 6,
 										height: selectedDeviceId === id ? 8 : 6,
@@ -1256,7 +1256,7 @@ export const TimelineSlider = ({
 					>
 						<button
 							className={cn(
-								"p-1.5 rounded-l-md transition-colors shrink-0",
+								"p-1.5 rounded-none transition-colors shrink-0",
 								"bg-background/80 backdrop-blur-sm border border-border border-r-0",
 								expandedFilterSection === "app" && "bg-foreground/10",
 								selectedAppName !== "all" && "ring-1 ring-primary/50",
@@ -1268,7 +1268,7 @@ export const TimelineSlider = ({
 						<div
 							className={cn(
 								"flex items-center gap-1.5 overflow-hidden transition-all duration-200 ease-out",
-								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-r-md",
+								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-none",
 								expandedFilterSection === "app" ? "max-w-[300px] px-2 py-1.5 opacity-100" : "max-w-0 px-0 py-1.5 opacity-0 border-transparent",
 							)}
 						>
@@ -1276,7 +1276,7 @@ export const TimelineSlider = ({
 								<button
 									key={name}
 									onClick={() => onAppChange(selectedAppName === name ? "all" : name)}
-									className="rounded-full transition-all duration-200 hover:scale-125 shrink-0"
+									className="rounded-none transition-all duration-200 hover:scale-125 shrink-0"
 									style={{
 										width: selectedAppName === name ? 8 : 6,
 										height: selectedAppName === name ? 8 : 6,
@@ -1304,7 +1304,7 @@ export const TimelineSlider = ({
 					>
 						<button
 							className={cn(
-								"p-1.5 rounded-l-md transition-colors shrink-0",
+								"p-1.5 rounded-none transition-colors shrink-0",
 								"bg-background/80 backdrop-blur-sm border border-border border-r-0",
 								expandedFilterSection === "domain" && "bg-foreground/10",
 								selectedDomain !== "all" && "ring-1 ring-primary/50",
@@ -1316,7 +1316,7 @@ export const TimelineSlider = ({
 						<div
 							className={cn(
 								"flex items-center gap-1.5 overflow-hidden transition-all duration-200 ease-out",
-								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-r-md",
+								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-none",
 								expandedFilterSection === "domain" ? "max-w-[300px] px-2 py-1.5 opacity-100" : "max-w-0 px-0 py-1.5 opacity-0 border-transparent",
 							)}
 						>
@@ -1324,7 +1324,7 @@ export const TimelineSlider = ({
 								<button
 									key={domain}
 									onClick={() => onDomainChange(selectedDomain === domain ? "all" : domain)}
-									className="rounded-full transition-all duration-200 hover:scale-125 shrink-0"
+									className="rounded-none transition-all duration-200 hover:scale-125 shrink-0"
 									style={{
 										width: selectedDomain === domain ? 8 : 6,
 										height: selectedDomain === domain ? 8 : 6,
@@ -1352,7 +1352,7 @@ export const TimelineSlider = ({
 					>
 						<button
 							className={cn(
-								"p-1.5 rounded-l-md transition-colors shrink-0",
+								"p-1.5 rounded-none transition-colors shrink-0",
 								"bg-background/80 backdrop-blur-sm border border-border border-r-0",
 								expandedFilterSection === "speaker" && "bg-foreground/10",
 								selectedSpeaker !== "all" && "ring-1 ring-primary/50",
@@ -1364,7 +1364,7 @@ export const TimelineSlider = ({
 						<div
 							className={cn(
 								"flex items-center gap-1.5 overflow-hidden transition-all duration-200 ease-out",
-								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-r-md",
+								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-none",
 								expandedFilterSection === "speaker" ? "max-w-[300px] px-2 py-1.5 opacity-100" : "max-w-0 px-0 py-1.5 opacity-0 border-transparent",
 							)}
 						>
@@ -1372,7 +1372,7 @@ export const TimelineSlider = ({
 								<button
 									key={speaker}
 									onClick={() => onSpeakerChange(selectedSpeaker === speaker ? "all" : speaker)}
-									className="rounded-full transition-all duration-200 hover:scale-125 shrink-0"
+									className="rounded-none transition-all duration-200 hover:scale-125 shrink-0"
 									style={{
 										width: selectedSpeaker === speaker ? 8 : 6,
 										height: selectedSpeaker === speaker ? 8 : 6,
@@ -1400,7 +1400,7 @@ export const TimelineSlider = ({
 					>
 						<button
 							className={cn(
-								"p-1.5 rounded-l-md transition-colors shrink-0",
+								"p-1.5 rounded-none transition-colors shrink-0",
 								"bg-background/80 backdrop-blur-sm border border-border border-r-0",
 								expandedFilterSection === "calls" && "bg-foreground/10",
 								selectedMeeting !== "all" && "ring-1 ring-primary/50",
@@ -1412,7 +1412,7 @@ export const TimelineSlider = ({
 						<div
 							className={cn(
 								"flex items-center gap-1.5 overflow-hidden transition-all duration-200 ease-out",
-								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-r-md",
+								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-none",
 								expandedFilterSection === "calls" ? "max-w-[300px] px-2 py-1.5 opacity-100" : "max-w-0 px-0 py-1.5 opacity-0 border-transparent",
 							)}
 						>
@@ -1426,7 +1426,7 @@ export const TimelineSlider = ({
 									<button
 										key={meeting.id}
 										onClick={() => onMeetingChange(selectedMeeting === meeting.id ? "all" : meeting.id)}
-										className="rounded-full transition-all duration-200 hover:scale-125 shrink-0"
+										className="rounded-none transition-all duration-200 hover:scale-125 shrink-0"
 										style={{
 											width: selectedMeeting === meeting.id ? 8 : 6,
 											height: selectedMeeting === meeting.id ? 8 : 6,
@@ -1455,7 +1455,7 @@ export const TimelineSlider = ({
 					>
 						<button
 							className={cn(
-								"p-1.5 rounded-l-md transition-colors shrink-0",
+								"p-1.5 rounded-none transition-colors shrink-0",
 								"bg-background/80 backdrop-blur-sm border border-border border-r-0",
 								expandedFilterSection === "tag" && "bg-foreground/10",
 								selectedTag !== "all" && "ring-1 ring-primary/50",
@@ -1467,7 +1467,7 @@ export const TimelineSlider = ({
 						<div
 							className={cn(
 								"flex items-center gap-1.5 overflow-hidden transition-all duration-200 ease-out",
-								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-r-md",
+								"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-none",
 								expandedFilterSection === "tag" ? "max-w-[300px] px-2 py-1.5 opacity-100" : "max-w-0 px-0 py-1.5 opacity-0 border-transparent",
 							)}
 						>
@@ -1475,7 +1475,7 @@ export const TimelineSlider = ({
 								<button
 									key={tag}
 									onClick={() => onTagChange(selectedTag === tag ? "all" : tag)}
-									className="rounded-full transition-all duration-200 hover:scale-125 shrink-0"
+									className="rounded-none transition-all duration-200 hover:scale-125 shrink-0"
 									style={{
 										width: selectedTag === tag ? 8 : 6,
 										height: selectedTag === tag ? 8 : 6,
@@ -1502,7 +1502,7 @@ export const TimelineSlider = ({
 				>
 					<button
 						className={cn(
-							"p-1.5 rounded-l-md transition-colors shrink-0",
+							"p-1.5 rounded-none transition-colors shrink-0",
 							"bg-background/80 backdrop-blur-sm border border-border border-r-0",
 							expandedFilterSection === "zoom" && "bg-foreground/10",
 						)}
@@ -1514,13 +1514,13 @@ export const TimelineSlider = ({
 					<div
 						className={cn(
 							"flex items-center gap-1 overflow-hidden transition-all duration-200 ease-out",
-							"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-r-md",
+							"bg-background/80 backdrop-blur-sm border border-border border-l-0 rounded-none",
 							expandedFilterSection === "zoom" ? "max-w-[120px] px-2 py-1.5 opacity-100" : "max-w-0 px-0 py-1.5 opacity-0 border-transparent",
 						)}
 					>
 						<button
 							onClick={() => setTargetZoom((prev) => Math.max(MIN_ZOOM, prev / 1.5))}
-							className="p-0.5 hover:bg-foreground/10 rounded transition-colors shrink-0"
+							className="p-0.5 hover:bg-foreground/10 rounded-none transition-colors shrink-0"
 							title="Zoom out"
 						>
 							<ZoomOut className="w-3.5 h-3.5 text-foreground" />
@@ -1533,7 +1533,7 @@ export const TimelineSlider = ({
 				{/* Collapse/expand filters toggle */}
 				<button
 					className={cn(
-						"p-1.5 rounded-md transition-colors shrink-0 cursor-pointer",
+						"p-1.5 rounded-none transition-colors shrink-0 cursor-pointer",
 						"bg-background/80 backdrop-blur-sm border border-border hover:bg-accent",
 					)}
 					onClick={() => setFiltersCollapsed((prev) => !prev)}
@@ -1603,7 +1603,7 @@ export const TimelineSlider = ({
 					{/* Memory tooltip portal */}
 					{hoveredMemoryId !== null && hoveredMemoryRect && createPortal(
 						<div
-							className="fixed z-[9999] max-w-[240px] bg-popover border border-border rounded-lg px-3 py-2 text-xs shadow-2xl pointer-events-none"
+							className="fixed z-[9999] max-w-[240px] bg-popover border border-border rounded-none px-3 py-2 text-xs shadow-2xl pointer-events-none"
 							style={{
 								left: `${hoveredMemoryRect.x}px`,
 								top: `${hoveredMemoryRect.y}px`,
@@ -1621,7 +1621,7 @@ export const TimelineSlider = ({
 										<div className="flex items-center gap-1.5 text-muted-foreground flex-wrap">
 											<span>{formatDistanceToNow(new Date(mem.created_at), { addSuffix: true })}</span>
 											{usefulTags.slice(0, 3).map((t) => (
-												<span key={t} className="px-1 py-0.5 bg-foreground/10 rounded text-[9px]">{t}</span>
+												<span key={t} className="px-1 py-0.5 bg-foreground/10 rounded-none text-[9px]">{t}</span>
 											))}
 										</div>
 									</>
@@ -1656,7 +1656,7 @@ export const TimelineSlider = ({
 											className="absolute top-full mt-1.5 left-1/2 -translate-x-1/2 whitespace-nowrap z-10"
 											style={{ direction: 'ltr' }}
 										>
-											<span className="text-[9px] font-medium text-primary bg-primary/15 border border-primary/25 rounded-full px-2 py-0.5">
+											<span className="text-[9px] font-medium text-primary bg-primary/15 border border-primary/25 rounded-none px-2 py-0.5">
 												{group.dayBoundaryDate}
 											</span>
 										</div>
@@ -1700,7 +1700,7 @@ export const TimelineSlider = ({
 											group.topDomains.slice(0, groupWidth > 60 ? 2 : 1).map((domain, idx) => (
 												<motion.div
 													key={`fav-${domain}-${idx}`}
-													className="w-5 h-5 rounded-md flex-shrink-0 overflow-hidden flex items-center justify-center"
+													className="w-5 h-5 rounded-none flex-shrink-0 overflow-hidden flex items-center justify-center"
 													style={{
 														zIndex: 10 - idx,
 														position: 'relative',
@@ -1722,7 +1722,7 @@ export const TimelineSlider = ({
 														domain={domain}
 														fallbackAppName={group.appName}
 														size={20}
-														className="w-full h-full rounded-sm object-cover"
+														className="w-full h-full rounded-none object-cover"
 													/>
 												</motion.div>
 											))
@@ -1731,7 +1731,7 @@ export const TimelineSlider = ({
 											group.appNames.slice(0, 2).map((appName, idx) => (
 												<motion.div
 													key={`${appName}-${idx}`}
-													className="w-5 h-5 rounded-md flex-shrink-0 overflow-hidden flex items-center justify-center"
+													className="w-5 h-5 rounded-none flex-shrink-0 overflow-hidden flex items-center justify-center"
 													style={{
 														zIndex: 10 - idx,
 														position: 'relative',
@@ -1777,7 +1777,7 @@ export const TimelineSlider = ({
 										}}
 										onMouseLeave={() => setHoveredChatConv(null)}
 									>
-										<div className="w-4 h-4 rounded-full bg-background/80 border border-border/50 flex items-center justify-center backdrop-blur-sm shadow-sm hover:scale-125 transition-transform">
+										<div className="w-4 h-4 rounded-none bg-background/80 border border-border/50 flex items-center justify-center backdrop-blur-sm shadow-sm hover:scale-125 transition-transform">
 											<PipeAIIcon size={10} animated={false} />
 										</div>
 									</div>
@@ -1839,7 +1839,7 @@ export const TimelineSlider = ({
 									const hasTags = frameTags.length > 0;
 
 										// Rewind-style segments: round + inset the two end frames of each
-										// app run so segments read as separate rounded pills with a small
+										// app run so segments read as separate sharp-cornered pills with a small
 										// gap at every transition. We shrink the end frames (rather than
 										// add margin to the group) so frame slots — and the time axis —
 										// stay aligned. Group is dir=rtl → frameIdx 0 is the segment's
@@ -1953,7 +1953,7 @@ export const TimelineSlider = ({
 											{/* Tooltip on hover — rendered via portal to escape overflow clipping */}
 											{shouldShowTooltip && hoveredRect && createPortal(
 												<div
-													className="fixed z-[9999] w-max max-w-[280px] bg-popover border border-border rounded-lg px-3 py-2 text-xs shadow-2xl pointer-events-none"
+													className="fixed z-[9999] w-max max-w-[280px] bg-popover border border-border rounded-none px-3 py-2 text-xs shadow-2xl pointer-events-none"
 													style={{
 														left: `clamp(80px, ${hoveredRect.x}px, calc(100vw - 80px))`,
 														top: `${hoveredRect.y}px`,
@@ -1962,7 +1962,7 @@ export const TimelineSlider = ({
 												>
 													{/* Frame thumbnail preview — fetched lazily from the local API on hover */}
 													{frameId && (
-														<div className="mb-2 w-64 aspect-video rounded-md overflow-hidden bg-muted border border-border/40">
+														<div className="mb-2 w-64 aspect-video rounded-none overflow-hidden bg-muted border border-border/40">
 															{/* eslint-disable-next-line @next/next/no-img-element */}
 															<img
 																src={appendAuthToken(`${getApiBaseUrl()}/frames/${frameId}`)}
@@ -1981,9 +1981,9 @@ export const TimelineSlider = ({
 															const browserUrl = frame.devices?.find(d => d.metadata?.browser_url)?.metadata?.browser_url;
 															const domain = browserUrl ? extractDomain(browserUrl) : group.topDomains?.[0] ?? null;
 															if (domain) {
-																return <FaviconImg domain={domain} fallbackAppName={group.appName} size={16} className="w-4 h-4 rounded" />;
+																return <FaviconImg domain={domain} fallbackAppName={group.appName} size={16} className="w-4 h-4 rounded-none" />;
 															}
-															return <CachedAppIcon appName={group.appName} className="w-4 h-4 rounded object-contain" />;
+															return <CachedAppIcon appName={group.appName} className="w-4 h-4 rounded-none object-contain" />;
 														})()}
 														<p className="font-medium text-popover-foreground">
 															{(() => {
@@ -2005,7 +2005,7 @@ export const TimelineSlider = ({
 													{hasTags && (
 														<div className="flex flex-wrap gap-1 mt-1.5 max-w-full">
 															{frameTags.map((t) => (
-																<span key={t} className="text-[10px] leading-none text-primary bg-primary/15 rounded px-1.5 py-0.5 break-all">{t}</span>
+																<span key={t} className="text-[10px] leading-none text-primary bg-primary/15 rounded-none px-1.5 py-0.5 break-all">{t}</span>
 															))}
 														</div>
 													)}
@@ -2067,7 +2067,7 @@ export const TimelineSlider = ({
 			{/* App filter dot tooltip */}
 			{hoveredFilterDot && createPortal(
 				<div
-					className="fixed z-[9999] bg-popover border border-border rounded px-1.5 py-0.5 text-[10px] text-popover-foreground whitespace-nowrap shadow-lg pointer-events-none"
+					className="fixed z-[9999] bg-popover border border-border rounded-none px-1.5 py-0.5 text-[10px] text-popover-foreground whitespace-nowrap shadow-lg pointer-events-none"
 					style={{
 						left: `${hoveredFilterDot.x}px`,
 						top: `${hoveredFilterDot.y}px`,
@@ -2082,7 +2082,7 @@ export const TimelineSlider = ({
 			{/* Chat conversation tooltip */}
 			{hoveredChatConv && createPortal(
 				<div
-					className="fixed z-[9999] w-max max-w-[200px] bg-popover border border-border rounded-lg px-2.5 py-1.5 text-xs shadow-2xl pointer-events-none"
+					className="fixed z-[9999] w-max max-w-[200px] bg-popover border border-border rounded-none px-2.5 py-1.5 text-xs shadow-2xl pointer-events-none"
 					style={{
 						left: `clamp(80px, ${hoveredChatConv.x}px, calc(100vw - 120px))`,
 						top: `${hoveredChatConv.y}px`,

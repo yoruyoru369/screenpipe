@@ -23,7 +23,7 @@ export function MentionDropdown({
         animate={{ opacity: 1, y: 0 }}
         exit={{ opacity: 0, y: 4 }}
         transition={{ duration: 0.1 }}
-        className="absolute bottom-full left-0 right-0 mb-1 bg-background border border-border rounded-lg shadow-lg overflow-hidden z-50 max-h-[240px] overflow-y-auto"
+        className="absolute bottom-full left-0 right-0 mb-1 bg-background border border-border rounded-none shadow-lg overflow-hidden z-50 max-h-[240px] overflow-y-auto"
       >
         {["time", "content", "app", "tag", "speaker"].map((category) => {
           const items = mentions.suggestions.filter(

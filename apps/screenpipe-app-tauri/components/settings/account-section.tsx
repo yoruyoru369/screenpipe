@@ -335,7 +335,7 @@ export function AccountSection() {
             <div className="flex items-center gap-2">
               <Sparkles className="h-5 w-5 text-primary" />
               <h3 className="text-lg font-semibold">Screenpipe {hasNamedPlan ? planDisplayName(subscriptionPlan, isEnterpriseBuild) : "Business"}</h3>
-              <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">active</span>
+              <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-none font-medium">active</span>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2 text-sm text-muted-foreground">
@@ -648,7 +648,7 @@ export function AccountSection() {
                 <Switch disabled checked={false} />
                 <button
                   onClick={() => commands.openLoginWindow(null)}
-                  className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium flex items-center gap-1 hover:bg-primary/20 transition-colors cursor-pointer"
+                  className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-none font-medium flex items-center gap-1 hover:bg-primary/20 transition-colors cursor-pointer"
                 >
                   <Lock className="h-3 w-3" />
                   Business
@@ -668,7 +668,7 @@ export function AccountSection() {
                 <h3 className="text-lg font-semibold">
                   Screenpipe {planDisplayName(subscriptionPlan, isEnterpriseBuild)}
                 </h3>
-                <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">
+                <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-none font-medium">
                   active
                 </span>
               </div>
@@ -680,7 +680,7 @@ export function AccountSection() {
           )}
 
           {/* Business plan card with animated border */}
-          <div className="group relative rounded-lg p-[1px] overflow-hidden">
+          <div className="group relative rounded-none p-[1px] overflow-hidden">
             {/* Animated spinning border — oversized rotated square with conic gradient */}
             <div
               className="absolute inset-[-100%] animate-[spin-border_4s_linear_infinite]"
@@ -759,7 +759,7 @@ export function AccountSection() {
                 <Switch disabled checked={false} />
                 <button
                   onClick={handleCheckout}
-                  className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium flex items-center gap-1 hover:bg-primary/20 transition-colors cursor-pointer"
+                  className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-none font-medium flex items-center gap-1 hover:bg-primary/20 transition-colors cursor-pointer"
                 >
                   <Lock className="h-3 w-3" />
                   Business
@@ -770,7 +770,7 @@ export function AccountSection() {
 
           {/* Free-tier note — only for true free (no plan); named plans show the active card above */}
           {!hasNamedPlan && (
-            <div className="px-3 py-2 rounded-lg border border-border/50">
+            <div className="px-3 py-2 rounded-none border border-border/50">
               <p className="text-xs text-muted-foreground">
                 <span className="font-medium text-foreground">free tier:</span>{" "}
                 local whisper transcription (uses ~2GB RAM)

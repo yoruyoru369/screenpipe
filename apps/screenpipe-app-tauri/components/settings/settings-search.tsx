@@ -299,7 +299,7 @@ export function scrollToSettingsField(label: string, root: ParentNode = document
 
     // Scroll the nearest card/row wrapper into view, centered, so the field
     // isn't jammed against the top edge. Screenpipe Cards render with a `border`
-    // + `bg-card` (sharp corners, no rounded class), so we climb to the nearest
+    // + `bg-card` (sharp corners, no border-radius), so we climb to the nearest
     // bordered card if present, else use the heading itself.
     const scrollTarget =
       target.closest<HTMLElement>(".bg-card") ??
@@ -427,7 +427,7 @@ export const SettingsSearchInput = forwardRef<HTMLInputElement, InputProps>(
           aria-label="Search settings"
           data-testid="settings-search-input"
           className={cn(
-            "w-full pl-8 pr-7 py-1.5 text-xs rounded-md border bg-transparent outline-none transition-colors",
+            "w-full pl-8 pr-7 py-1.5 text-xs rounded-none border bg-transparent outline-none transition-colors",
             translucent
               ? "vibrant-sidebar-border vibrant-sidebar-fg placeholder:vibrant-sidebar-fg-muted focus:vibrant-nav-active"
               : "border-border text-foreground placeholder:text-muted-foreground/60 focus:border-foreground/30",
@@ -439,7 +439,7 @@ export const SettingsSearchInput = forwardRef<HTMLInputElement, InputProps>(
             onClick={() => onChange("")}
             aria-label="Clear search"
             className={cn(
-              "absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded transition-colors",
+              "absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded-none transition-colors",
               translucent ? "vibrant-sidebar-fg-muted hover:vibrant-sidebar-fg" : "text-muted-foreground/60 hover:text-foreground",
             )}
           >
@@ -448,7 +448,7 @@ export const SettingsSearchInput = forwardRef<HTMLInputElement, InputProps>(
         ) : (
           <kbd
             className={cn(
-              "absolute right-1.5 top-1/2 -translate-y-1/2 px-1 py-0.5 text-[9px] font-mono rounded border pointer-events-none",
+              "absolute right-1.5 top-1/2 -translate-y-1/2 px-1 py-0.5 text-[9px] font-mono rounded-none border pointer-events-none",
               translucent
                 ? "vibrant-sidebar-border vibrant-sidebar-fg-muted"
                 : "border-border/60 text-muted-foreground/60 bg-card",
@@ -486,7 +486,7 @@ export function SettingsSearchPopover<T extends SearchableNavItem>({
         // Positioning + width are owned by the Radix Popover Content wrapper in
         // the caller (Portal to <body>, so no sidebar overflow clipping). This
         // element just fills that box and styles the surface.
-        "w-full rounded-md border shadow-lg overflow-hidden",
+        "w-full rounded-none border shadow-lg overflow-hidden",
         translucent
           ? "vibrant-sidebar-border bg-background/95 backdrop-blur-md"
           : "border-border bg-popover",

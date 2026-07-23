@@ -95,7 +95,7 @@ export function InlineChatHistory({
                       <div
                         key={conv.id}
                         className={[
-                          "group flex items-center gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors",
+                          "group flex items-center gap-2 px-2 py-2 rounded-none cursor-pointer transition-colors",
                           conv.id === conversationId ? "bg-foreground/10" : "hover:bg-foreground/5",
                         ].join(" ")}
                         onClick={() => loadConversation(conv)}
@@ -124,7 +124,7 @@ export function InlineChatHistory({
                           </PopoverTrigger>
                           <PopoverContent className="w-40 p-1" align="end" side="right">
                             <button
-                              className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
+                              className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-none hover:bg-muted text-left"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setOpenConvMenuId(null);
@@ -137,7 +137,7 @@ export function InlineChatHistory({
                             </button>
                             <div className="my-1 border-t border-border" />
                             <button
-                              className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-destructive text-left"
+                              className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-none hover:bg-muted text-destructive text-left"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setOpenConvMenuId(null);
@@ -189,7 +189,7 @@ export function InlineChatHistory({
           </DialogHeader>
           <input
             autoFocus
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
+            className="w-full rounded-none border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
             onKeyDown={(e) => {

@@ -212,7 +212,7 @@ export function AppContextPopover({
 
 	const popover = (
 		<div
-			className="fixed z-[9999] w-72 bg-popover border border-border rounded-lg shadow-2xl text-xs"
+			className="fixed z-[9999] w-72 bg-popover border border-border rounded-none shadow-2xl text-xs"
 			style={{
 				direction: "ltr",
 				left: `clamp(144px, ${anchor.x}px, calc(100vw - 144px))`,
@@ -230,7 +230,7 @@ export function AppContextPopover({
 					{allApps.map((name, i) => (
 						<span
 							key={i}
-							className="relative w-5 h-5 rounded flex-shrink-0 overflow-hidden inline-flex items-center justify-center"
+							className="relative w-5 h-5 rounded-none flex-shrink-0 overflow-hidden inline-flex items-center justify-center"
 							style={{
 								marginLeft: i > 0 ? -6 : undefined,
 								backgroundColor: `hsla(${[...name].reduce((h, c) => c.charCodeAt(0) + ((h << 5) - h), 0) % 360}, 40%, 55%, 0.3)`,
@@ -239,7 +239,7 @@ export function AppContextPopover({
 							{/* eslint-disable-next-line @next/next/no-img-element */}
 							<img
 								src={`http://localhost:11435/app-icon?name=${encodeURIComponent(name)}`}
-								className="w-full h-full rounded object-contain"
+								className="w-full h-full rounded-none object-contain"
 								alt={name}
 								onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
 							/>
@@ -310,7 +310,7 @@ export function AppContextPopover({
 								return (
 									<button
 										key={i}
-										className="flex items-center gap-1 text-blue-400 hover:text-blue-300 truncate w-full text-left transition-colors cursor-pointer"
+										className="flex items-center gap-1 text-neutral-400 hover:text-neutral-300 truncate w-full text-left transition-colors cursor-pointer"
 										title={openableUrl}
 										onClick={(e) => {
 											e.stopPropagation();
@@ -320,7 +320,7 @@ export function AppContextPopover({
 										}}
 									>
 										{domain ? (
-											<FaviconImg domain={domain} size={12} className="w-3 h-3 rounded-sm flex-shrink-0" />
+											<FaviconImg domain={domain} size={12} className="w-3 h-3 rounded-none flex-shrink-0" />
 										) : (
 											<Globe className="w-2.5 h-2.5 flex-shrink-0" />
 										)}
@@ -385,7 +385,7 @@ export function AppContextPopover({
 			<div className="flex items-center gap-1 px-3 py-2 border-t border-border">
 				<button
 					onClick={handleCopy}
-					className="flex items-center gap-1 px-2 py-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+					className="flex items-center gap-1 px-2 py-1 rounded-none hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
 				>
 					<Copy className="w-3 h-3" />
 					<span>{copied ? "copied" : "copy"}</span>
@@ -393,7 +393,7 @@ export function AppContextPopover({
 				{onSearch && (
 					<button
 						onClick={onSearch}
-						className="flex items-center gap-1 px-2 py-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+						className="flex items-center gap-1 px-2 py-1 rounded-none hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
 					>
 						<Search className="w-3 h-3" />
 						<span>search</span>

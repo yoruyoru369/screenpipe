@@ -162,7 +162,7 @@ export function SchedulePromptDialog({
 
         <div className="space-y-4 mt-2">
           {/* Preview */}
-          <div className="p-2.5 rounded-lg bg-muted/30 border border-border/30">
+          <div className="p-2.5 rounded-none bg-muted/30 border border-border/30">
             <div className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-medium mb-1">
               prompt preview
             </div>
@@ -198,7 +198,7 @@ export function SchedulePromptDialog({
                     setSelectedSchedule(opt.value);
                     setShowCustom(false);
                   }}
-                  className={`w-full text-left px-3 py-1.5 text-[12px] rounded-lg transition-colors ${
+                  className={`w-full text-left px-3 py-1.5 text-[12px] rounded-none transition-colors ${
                     !showCustom && selectedSchedule === opt.value
                       ? "bg-primary/15 text-primary border border-primary/30 font-medium"
                       : "hover:bg-muted/50 text-muted-foreground border border-transparent"
@@ -209,7 +209,7 @@ export function SchedulePromptDialog({
               ))}
               <button
                 onClick={() => setShowCustom(true)}
-                className={`w-full text-left px-3 py-1.5 text-[12px] rounded-lg transition-colors ${
+                className={`w-full text-left px-3 py-1.5 text-[12px] rounded-none transition-colors ${
                   showCustom
                     ? "bg-primary/15 text-primary border border-primary/30 font-medium"
                     : "hover:bg-muted/50 text-muted-foreground border border-transparent"

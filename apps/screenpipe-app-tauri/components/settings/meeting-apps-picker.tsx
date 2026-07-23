@@ -59,7 +59,7 @@ function AppIcon({ app }: { app: string }) {
     <img
       src={APP_ICON_URL(app)}
       alt=""
-      className="h-4 w-4 rounded-sm object-contain shrink-0"
+      className="h-4 w-4 rounded-none object-contain shrink-0"
       onError={(e) => {
         (e.target as HTMLImageElement).style.visibility = "hidden";
       }}
@@ -237,7 +237,7 @@ export function MeetingAppsPicker({
                 <button
                   type="button"
                   aria-label={`stop ignoring ${s}`}
-                  className="inline-flex rounded-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  className="inline-flex rounded-none focus:outline-none focus:ring-1 focus:ring-ring"
                   onClick={() => onToggle(s)}
                 >
                   <X className="h-3 w-3" />
@@ -258,7 +258,7 @@ export function MeetingAppsPicker({
           />
         </div>
 
-        <div className="flex-1 overflow-y-auto border border-border rounded-md">
+        <div className="flex-1 overflow-y-auto border border-border rounded-none">
           {canAddCustom && (
             <button
               type="button"

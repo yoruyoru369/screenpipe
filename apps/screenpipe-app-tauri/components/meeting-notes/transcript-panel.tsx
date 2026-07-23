@@ -825,7 +825,7 @@ export function TranscriptPanel({
             onKeyDown={handleResizeKeyDown}
             className="group flex h-2.5 shrink-0 cursor-ns-resize touch-none items-center justify-center bg-background hover:bg-muted/60 focus:outline-none focus-visible:bg-muted/60"
           >
-            <span className="h-0.5 w-8 rounded-full bg-border transition-colors group-hover:bg-muted-foreground/40" />
+            <span className="h-0.5 w-8 rounded-none bg-border transition-colors group-hover:bg-muted-foreground/40" />
           </div>
         )}
         <header className="flex items-center gap-2 px-4 py-1.5 border-b border-border shrink-0">
@@ -906,7 +906,7 @@ export function TranscriptPanel({
         </header>
 
         {showRecoveryBanner && (
-          <div className="flex items-start gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-xs text-amber-900 dark:text-amber-200">
+          <div className="flex items-start gap-2 border-b border-neutral-500/20 bg-neutral-500/10 px-4 py-2 text-xs text-neutral-900 dark:text-neutral-200">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span className="leading-5">{recoveryMessage}</span>
           </div>
@@ -966,13 +966,13 @@ export function TranscriptPanel({
               variant="secondary"
               size="sm"
               onClick={() => scrollToLatest()}
-              className="absolute bottom-3 right-3 h-8 w-8 rounded-full border border-border bg-background/95 p-0 shadow-lg backdrop-blur hover:bg-accent"
+              className="absolute bottom-3 right-3 h-8 w-8 rounded-none border border-border bg-background/95 p-0 shadow-lg backdrop-blur hover:bg-accent"
               title="follow live transcript"
               aria-label="follow live transcript"
             >
               <ArrowDown className="h-3.5 w-3.5" />
               {hasUnseenLive && (
-                <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-foreground" />
+                <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-none bg-foreground" />
               )}
             </Button>
           )}

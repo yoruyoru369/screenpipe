@@ -74,7 +74,7 @@ export function UpgradeQuotaBanner() {
   };
 
   return (
-    <div className="flex items-center gap-3 mt-2 rounded-lg border border-border bg-muted/30 px-3 py-2">
+    <div className="flex items-center gap-3 mt-2 rounded-none border border-border bg-muted/30 px-3 py-2">
       <Zap className="h-4 w-4 shrink-0 text-foreground/70" />
       <div className="flex-1 text-[12px] leading-snug">
         <span className="font-medium">You're out of premium AI for today.</span>{" "}

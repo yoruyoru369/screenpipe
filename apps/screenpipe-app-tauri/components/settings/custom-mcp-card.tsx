@@ -165,7 +165,7 @@ export function CustomMcpCard() {
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
-            <div className="w-10 h-10 rounded-xl bg-muted flex items-center justify-center">
+            <div className="w-10 h-10 rounded-none bg-muted flex items-center justify-center">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 width="20"
@@ -192,7 +192,7 @@ export function CustomMcpCard() {
                 Custom MCP Server
               </h3>
               {servers.length > 0 && (
-                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-full">
+                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-none">
                   {servers.length} server{servers.length === 1 ? "" : "s"}
                 </span>
               )}
@@ -202,9 +202,9 @@ export function CustomMcpCard() {
               Register MCP (Model Context Protocol) servers — browse the
               official registry, or add an HTTP endpoint like Brave Search,
               Linear, Notion, or a local stdio process like{" "}
-              <code className="text-xs bg-muted px-1 rounded">uvx mcp-server-brave</code>
+              <code className="text-xs bg-muted px-1 rounded-none">uvx mcp-server-brave</code>
               {" "}— so pipes and chat can call their tools via{" "}
-              <code className="text-xs bg-muted px-1 rounded">sp_mcp_call</code>
+              <code className="text-xs bg-muted px-1 rounded-none">sp_mcp_call</code>
               .
             </p>
 
@@ -220,10 +220,10 @@ export function CustomMcpCard() {
                 ))}
               </div>
             ) : loaded ? (
-              <div className="text-[11px] text-muted-foreground bg-muted/30 rounded-md px-2.5 py-2 mb-3 leading-relaxed">
+              <div className="text-[11px] text-muted-foreground bg-muted/30 rounded-none px-2.5 py-2 mb-3 leading-relaxed">
                 No servers yet. Browse the registry to discover servers, or add
                 one by URL like{" "}
-                <code className="text-[10px] bg-muted px-1 rounded">
+                <code className="text-[10px] bg-muted px-1 rounded-none">
                   https://mcp.brave.com/v1
                 </code>
                 .
@@ -397,7 +397,7 @@ function ServerRow({
   }, [server.id, server.name, onChanged]);
 
   return (
-    <div className="flex items-center justify-between gap-2 text-xs border border-border rounded-md px-2 py-1.5">
+    <div className="flex items-center justify-between gap-2 text-xs border border-border rounded-none px-2 py-1.5">
       <button
         type="button"
         onClick={onEdit}
@@ -405,7 +405,7 @@ function ServerRow({
         title={server.url}
       >
         <span
-          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+          className={`w-1.5 h-1.5 rounded-none shrink-0 ${
             server.enabled ? "bg-foreground" : "bg-muted-foreground/40"
           }`}
         />
@@ -810,7 +810,7 @@ function ServerEditor({
   return (
     <div className="p-4 space-y-4 text-sm">
       {notice && (
-        <div className="flex items-start gap-1.5 text-[11px] rounded-md border border-border bg-muted/40 text-muted-foreground p-2.5 leading-snug">
+        <div className="flex items-start gap-1.5 text-[11px] rounded-none border border-border bg-muted/40 text-muted-foreground p-2.5 leading-snug">
           <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
           <span>{notice}</span>
         </div>
@@ -865,7 +865,7 @@ function ServerEditor({
       {transport === "http" ? (
         <>
           <div className="space-y-1.5">
-            <div className="flex items-center gap-2 rounded-md border border-border p-2">
+            <div className="flex items-center gap-2 rounded-none border border-border p-2">
               {oauthWaiting ? (
                 <>
                   <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -886,7 +886,7 @@ function ServerEditor({
               ) : oauthStatus?.connected ? (
                 <>
                   <span className="flex items-center gap-1.5 text-xs font-medium">
-                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+                    <span className="w-1.5 h-1.5 rounded-none bg-neutral-500 shrink-0" />
                     Connected
                   </span>
                   <Button
@@ -1057,7 +1057,7 @@ function ServerEditor({
 
       {testResult && (
         <div
-          className={`text-xs rounded-md border p-3 space-y-1 ${
+          className={`text-xs rounded-none border p-3 space-y-1 ${
             testResult.kind === "ok"
               ? "border-foreground/40 bg-accent"
               : "border-destructive/40 bg-destructive/5 text-destructive"

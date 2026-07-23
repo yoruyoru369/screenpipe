@@ -126,7 +126,7 @@ export function ChatMainPane({
             disabledReason &&
             (!hasPresets || !hasValidModel || needsLogin) && (
               <div className="relative flex flex-col items-center justify-center py-12 space-y-4">
-                <div className="relative p-6 rounded-2xl border bg-muted/50 border-border/50">
+                <div className="relative p-6 rounded-none border bg-muted/50 border-border/50">
                   {needsLogin ? (
                     <PipeAIIconLarge size={48} thinking={false} className="text-muted-foreground" />
                   ) : (
@@ -180,7 +180,7 @@ export function ChatMainPane({
         {isUserScrolledUp && messages.length > 0 && (
           <button
             onClick={scrollToBottom}
-            className="sticky bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary text-primary-foreground shadow-lg text-xs font-medium hover:bg-primary/90 transition-opacity animate-in fade-in slide-in-from-bottom-2 duration-200"
+            className="sticky bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-none bg-primary text-primary-foreground shadow-lg text-xs font-medium hover:bg-primary/90 transition-opacity animate-in fade-in slide-in-from-bottom-2 duration-200"
           >
             <ChevronDown className="h-3.5 w-3.5" />
             new content

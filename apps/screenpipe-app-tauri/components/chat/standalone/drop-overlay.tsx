@@ -23,7 +23,7 @@ export function DropOverlay({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15 }}
-          className="absolute inset-0 z-50 flex items-center justify-center bg-background/95 backdrop-blur-sm rounded-lg border-2 border-dashed border-primary m-1"
+          className="absolute inset-0 z-50 flex items-center justify-center bg-background/95 backdrop-blur-sm rounded-none border-2 border-dashed border-primary m-1"
         >
           <div className="flex flex-col items-center gap-2">
             <ImageIcon className="w-6 h-6 text-primary" />

@@ -310,12 +310,12 @@ function RecordingStrip({
     <div
       className={cn(
         "border bg-muted/20 px-4 py-3 flex items-center gap-3",
-        degraded ? "border-amber-500/40" : "border-foreground/30",
+        degraded ? "border-foreground/60" : "border-foreground/30",
       )}
     >
       {degraded ? (
         <span
-          className="h-2 w-2 rounded-full shrink-0 bg-amber-500"
+          className="h-2 w-2 rounded-none shrink-0 bg-neutral-500"
           aria-label={statusLabel}
         />
       ) : (

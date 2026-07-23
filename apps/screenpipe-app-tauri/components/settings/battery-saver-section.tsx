@@ -206,14 +206,14 @@ export function BatterySaverSection() {
 
       {/* Active profile indicator — only when engine is reachable */}
       {profileInfo && ProfileIcon && (
-        <div className="flex items-center gap-2 px-3 py-2 border border-border bg-card rounded text-xs">
+        <div className="flex items-center gap-2 px-3 py-2 border border-border bg-card rounded-none text-xs">
           <ProfileIcon className="h-3.5 w-3.5" />
           <span className="font-medium text-foreground">{profileInfo.label}</span>
           <span className="text-muted-foreground">— {profileInfo.description}</span>
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-3 px-3 py-2.5 border border-border bg-card rounded">
+      <div className="flex items-center justify-between gap-3 px-3 py-2.5 border border-border bg-card rounded-none">
         <div className="flex items-center gap-2.5">
           <Zap className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
           <div>
@@ -242,7 +242,7 @@ export function BatterySaverSection() {
             onClick={() => setMode(mode.value)}
             disabled={updating}
             className={cn(
-              "flex flex-col items-start p-3 border rounded text-left transition-all duration-150",
+              "flex flex-col items-start p-3 border rounded-none text-left transition-all duration-150",
               user_pref === mode.value
                 ? "border-foreground bg-card"
                 : "border-border hover:border-foreground/30 hover:bg-card/50",
@@ -263,7 +263,7 @@ export function BatterySaverSection() {
 
       {/* Thermal warning */}
       {state && (state.thermal_state === "serious" || state.thermal_state === "critical") && (
-        <div className="flex items-center gap-2 px-3 py-2 border border-border bg-card rounded text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 px-3 py-2 border border-border bg-card rounded-none text-xs text-muted-foreground">
           <span>
             System is thermally throttled — battery saver active regardless of preference
           </span>

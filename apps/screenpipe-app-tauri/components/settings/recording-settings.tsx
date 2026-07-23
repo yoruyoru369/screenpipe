@@ -756,7 +756,7 @@ function BackgroundTranscriptionDialog({
       >
         <ListTodo className="h-3.5 w-3.5" />
         {visiblePending > 0 && (
-          <span className="absolute -right-1.5 -top-1.5 min-w-[1rem] rounded-full border border-background bg-foreground px-1 text-[9px] leading-4 text-background">
+          <span className="absolute -right-1.5 -top-1.5 min-w-[1rem] rounded-none border border-background bg-foreground px-1 text-[9px] leading-4 text-background">
             {visiblePending > 99 ? "99+" : visiblePending}
           </span>
         )}
@@ -1684,7 +1684,7 @@ function HighFpsCard({
         </div>
 
         {lastError && (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+          <div className="rounded-none border border-neutral-500/40 bg-neutral-500/10 px-2.5 py-1.5 text-[11px] text-neutral-700 dark:text-neutral-300">
             {lastError}
           </div>
         )}
@@ -2770,7 +2770,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
             {audioEngineResolution.fallbackReason && (
               <Alert
                 data-testid="audio-engine-fallback-alert"
-                className="mt-2 ml-[26px] border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
+                className="mt-2 ml-[26px] border-neutral-300 bg-neutral-50 text-neutral-950 dark:border-neutral-800 dark:bg-neutral-950/30 dark:text-neutral-100"
               >
                 <AlertCircle className="h-4 w-4" />
                 <AlertTitle className="text-xs font-semibold">
@@ -2923,7 +2923,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                             key={model}
                             type="button"
                             className={cn(
-                              "px-2 py-0.5 rounded text-xs border transition-colors",
+                              "px-2 py-0.5 rounded-none text-xs border transition-colors",
                               settings.openaiCompatibleModel === model
                                 ? "bg-foreground text-background border-foreground"
                                 : "hover:bg-accent border-border"
@@ -2950,7 +2950,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     type="checkbox"
                     checked={settings.openaiCompatibleRawAudio || false}
                     onChange={(e) => handleSettingsChange({ openaiCompatibleRawAudio: e.target.checked }, true)}
-                    className="rounded border-border"
+                    className="rounded-none border-border"
                   />
                   <span>send raw WAV audio (instead of MP3)</span>
                 </label>
@@ -2981,10 +2981,10 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 </div>
 
                 {/* Connection Test Panel */}
-                <div className="border rounded-lg">
+                <div className="border rounded-none">
                   <button
                     type="button"
-                    className="flex items-center justify-between w-full px-3 py-2 text-xs font-medium text-left hover:bg-accent/50 transition-colors rounded-lg"
+                    className="flex items-center justify-between w-full px-3 py-2 text-xs font-medium text-left hover:bg-accent/50 transition-colors rounded-none"
                     onClick={() => setTxDiagnosticsOpen(!txDiagnosticsOpen)}
                   >
                     <div className="flex items-center gap-2">
@@ -3344,7 +3344,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     ignore apps
                     {(settings.ignoredMeetingApps?.length ?? 0) > 0 && (
                       <span
-                        className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums"
+                        className="rounded-none bg-muted px-1.5 py-0.5 text-[10px] tabular-nums"
                         data-testid="settings-ignore-meeting-apps-count"
                       >
                         {settings.ignoredMeetingApps!.length}
@@ -3415,7 +3415,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
               <div
                 key={device.name}
                 className={cn(
-                  "relative rounded-lg border cursor-pointer transition-all overflow-hidden",
+                  "relative rounded-none border cursor-pointer transition-all overflow-hidden",
                   isSelected
                     ? "border-foreground bg-foreground/5"
                     : "border-border opacity-70 hover:opacity-100 hover:bg-accent/50"
@@ -3437,9 +3437,9 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
 
                 {/* Audio level meter — always rendered for consistent height, invisible when not selected */}
                 <div className={cn("px-2.5 pb-2", !isSelected && "invisible")}>
-                  <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                  <div className="h-1.5 w-full rounded-none bg-muted overflow-hidden">
                     <div
-                      className="h-full rounded-full bg-foreground/60 transition-all duration-75"
+                      className="h-full rounded-none bg-foreground/60 transition-all duration-75"
                       style={{ width: `${Math.min(100, Math.pow(deviceLevel, 3) * 100)}%` }}
                     />
                   </div>
@@ -3566,7 +3566,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     during meetings, records your meeting&apos;s audio and whichever microphone you pick in the meeting app — taking precedence over your other audio settings. falls back to your configured capture automatically if unavailable.
                   </p>
                   {settings.disableMeetingDetector && (
-                    <p className="text-xs text-amber-600 dark:text-amber-500">
+                    <p className="text-xs text-neutral-600 dark:text-neutral-500">
                       requires automatic meeting detection — turn it back on above to use this.
                     </p>
                   )}
@@ -3628,12 +3628,12 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   }}
                 >
                   {app.icon && (
-                    <img src={app.icon} alt="" className="h-4 w-4 rounded-sm" />
+                    <img src={app.icon} alt="" className="h-4 w-4 rounded-none" />
                   )}
                   <span className="text-xs">{app.name ?? app.bundleId}</span>
                   <button
                     type="button"
-                    className="inline-flex rounded-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                    className="inline-flex rounded-none focus:outline-none focus:ring-1 focus:ring-ring"
                     aria-label={`Remove ${app.name ?? app.bundleId} from audio exclusions`}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -4000,7 +4000,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
       {/* Power and battery are important but infrequent decisions. Keep them
           in Recording for discoverability/search, but defer the full control
           surface until the user explicitly opens it. */}
-      <details className="border border-border bg-card rounded">
+      <details className="border border-border bg-card rounded-none">
         <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 [&::-webkit-details-marker]:hidden">
           <Zap className="h-4 w-4 shrink-0 text-muted-foreground" />
           <div>
@@ -4027,7 +4027,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
           </DialogDescription>
           <div className="space-y-4">
 
-            <div className="bg-muted/50 border border-border p-4 rounded-sm max-h-[300px] overflow-y-auto">
+            <div className="bg-muted/50 border border-border p-4 rounded-none max-h-[300px] overflow-y-auto">
               <p className="text-sm leading-relaxed whitespace-pre-line">
                 {VOICE_TRAINING_TEXT}
               </p>

@@ -260,7 +260,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 				transform: "translate(-50%, -100%) translateY(-12px)",
 			}}
 		>
-			<div className="bg-popover border border-border rounded-xl shadow-2xl px-3 py-2.5 flex flex-col gap-2 min-w-[280px] max-w-[380px] relative">
+			<div className="bg-popover border border-border rounded-none shadow-2xl px-3 py-2.5 flex flex-col gap-2 min-w-[280px] max-w-[380px] relative">
 				{/* Close button */}
 				<button
 					onClick={() => setSelectionRange(null)}
@@ -283,7 +283,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 						onClick={() => setShowDeleteConfirm(true)}
 						disabled={isDeleting}
 						className={cn(
-							"flex items-center justify-center text-xs px-1.5 rounded-md transition-colors flex-shrink-0 disabled:cursor-not-allowed",
+							"flex items-center justify-center text-xs px-1.5 rounded-none transition-colors flex-shrink-0 disabled:cursor-not-allowed",
 							showDeleteConfirm
 								? "text-destructive bg-destructive/10"
 								: "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
@@ -312,7 +312,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 							>
 								<button
 									onClick={onAskAI}
-									className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-md bg-foreground text-background hover:bg-foreground/90 transition-colors font-medium flex-shrink-0 cursor-pointer"
+									className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-none bg-foreground text-background hover:bg-foreground/90 transition-colors font-medium flex-shrink-0 cursor-pointer"
 									title="ask ai"
 								>
 									<span className="pointer-events-none">
@@ -367,7 +367,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 															}}
 														>
 															<button
-																className="w-full h-full rounded-full border-2 shadow-md flex items-center justify-center text-[10px] font-bold cursor-pointer transition-all hover:scale-125 hover:shadow-lg"
+																className="w-full h-full rounded-none border-2 shadow-md flex items-center justify-center text-[10px] font-bold cursor-pointer transition-all hover:scale-125 hover:shadow-lg"
 																style={{
 																	borderColor: color,
 																	backgroundColor: `color-mix(in srgb, ${color} 15%, var(--popover))`,
@@ -404,7 +404,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 														}}
 													>
 														<button
-															className="w-full h-full rounded-full bg-muted border border-border shadow-md flex items-center justify-center text-[10px] font-medium text-muted-foreground cursor-pointer hover:scale-110 transition-all"
+															className="w-full h-full rounded-none bg-muted border border-border shadow-md flex items-center justify-center text-[10px] font-medium text-muted-foreground cursor-pointer hover:scale-110 transition-all"
 															title={`${overflow} more pipes`}
 															onMouseEnter={() => setHoveredPipeIndex(maxVisible)}
 															onMouseLeave={() => setHoveredPipeIndex(null)}
@@ -426,7 +426,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 															animate={{ opacity: 1, y: 0 }}
 															exit={{ opacity: 0 }}
 															transition={{ duration: 0.1 }}
-															className="absolute left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-foreground text-background text-[10px] whitespace-nowrap pointer-events-none shadow z-10"
+															className="absolute left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-none bg-foreground text-background text-[10px] whitespace-nowrap pointer-events-none shadow z-10"
 															style={{ top: -4 }}
 														>
 															{hoveredPipeIndex < visible.length
@@ -444,7 +444,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 						<button
 							onClick={handleRetranscribe}
 							disabled={isRetranscribing}
-							className="flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border hover:bg-muted transition-colors flex-shrink-0"
+							className="flex items-center gap-1 text-xs px-2 py-1 rounded-none border border-border hover:bg-muted transition-colors flex-shrink-0"
 							title="re-transcribe audio in this range via AI"
 						>
 							{isRetranscribing ? (
@@ -469,14 +469,14 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 							<button
 								onClick={() => setShowDeleteConfirm(false)}
 								disabled={isDeleting}
-								className="text-xs px-2.5 py-1 rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+								className="text-xs px-2.5 py-1 rounded-none border border-border hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 							>
 								cancel
 							</button>
 							<button
 								onClick={handleDeleteRange}
 								disabled={isDeleting}
-								className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+								className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-none bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
 							>
 								{isDeleting ? (
 									<>
@@ -500,13 +500,13 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 						{existingTags.map((t) => (
 							<span
 								key={t}
-								className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary border border-primary/25 max-w-[140px]"
+								className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-none bg-primary/15 text-primary border border-primary/25 max-w-[140px]"
 							>
 								<span className="truncate">{t}</span>
 								<button
 									onClick={() => handleRemoveTag(t)}
 									disabled={isApplying}
-									className="flex-shrink-0 rounded-full hover:bg-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+									className="flex-shrink-0 rounded-none hover:bg-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
 									aria-label={`remove tag ${t}`}
 								>
 									<X className="w-2.5 h-2.5" />
@@ -524,7 +524,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 							disabled={isApplying}
 							onClick={() => handleApplyTag(tag)}
 							className={cn(
-								"text-xs px-2.5 py-1 rounded-md border transition-colors max-w-[120px] truncate",
+								"text-xs px-2.5 py-1 rounded-none border transition-colors max-w-[120px] truncate",
 								existingTags.includes(tag)
 									? "bg-primary/20 border-primary/40 text-primary"
 									: "bg-muted/50 border-border hover:bg-muted hover:border-foreground/20 text-foreground"
@@ -545,12 +545,12 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 						placeholder="custom tag..."
 						disabled={isApplying}
 						maxLength={50}
-						className="flex-1 text-xs px-2 py-1 rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 min-w-0"
+						className="flex-1 text-xs px-2 py-1 rounded-none border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 min-w-0"
 					/>
 					<button
 						type="submit"
 						disabled={!customTag.trim() || isApplying}
-						className="text-xs px-2 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 flex-shrink-0"
+						className="text-xs px-2 py-1 rounded-none bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 flex-shrink-0"
 					>
 						<Plus className="w-3 h-3" />
 						add

@@ -22,13 +22,13 @@ export function CaptureFrequencyPreview({ seconds }: { seconds: number }) {
   const marks = auto ? 3 : Math.min(24, Math.max(2, Math.round(24 / seconds)));
   const perHour = auto ? null : Math.round(3600 / seconds);
   return (
-    <div className="mt-2.5 rounded-md border border-border bg-muted/40 px-2.5 py-2">
+    <div className="mt-2.5 rounded-none border border-border bg-muted/40 px-2.5 py-2">
       <div className="flex h-5 items-center gap-[3px] overflow-hidden">
         {Array.from({ length: marks }).map((_, i) => (
           <span
             key={i}
             className={cn(
-              "h-4 flex-1 rounded-[1px]",
+              "h-4 flex-1 rounded-none",
               auto ? "bg-foreground/30" : "bg-foreground",
             )}
           />
@@ -78,15 +78,15 @@ function DayStripRow({
 export function AudioCaptureModePreview({ mode }: { mode: string }) {
   const meetings = mode === "meetings-only";
   return (
-    <div className="mt-2.5 space-y-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-2">
+    <div className="mt-2.5 space-y-1.5 rounded-none border border-border bg-muted/40 px-2.5 py-2">
       <DayStripRow label="always" active={!meetings}>
-        <span className="block h-2.5 rounded-[2px] bg-foreground" />
+        <span className="block h-2.5 rounded-none bg-foreground" />
       </DayStripRow>
       <DayStripRow label="meetings" active={meetings}>
-        <span className="relative block h-2.5 rounded-[2px] bg-foreground/15">
-          <span className="absolute inset-y-0 left-[16%] w-[12%] rounded-[2px] bg-foreground" />
-          <span className="absolute inset-y-0 left-[46%] w-[8%] rounded-[2px] bg-foreground" />
-          <span className="absolute inset-y-0 left-[70%] w-[16%] rounded-[2px] bg-foreground" />
+        <span className="relative block h-2.5 rounded-none bg-foreground/15">
+          <span className="absolute inset-y-0 left-[16%] w-[12%] rounded-none bg-foreground" />
+          <span className="absolute inset-y-0 left-[46%] w-[8%] rounded-none bg-foreground" />
+          <span className="absolute inset-y-0 left-[70%] w-[16%] rounded-none bg-foreground" />
         </span>
       </DayStripRow>
       <p className="text-[10px] text-muted-foreground">
@@ -120,7 +120,7 @@ export function RetentionModePreview({
 }) {
   const kept = RETENTION_KEPT[mode];
   return (
-    <div className="mt-2.5 ml-6 rounded-md border border-border bg-muted/40 px-2.5 py-2">
+    <div className="mt-2.5 ml-6 rounded-none border border-border bg-muted/40 px-2.5 py-2">
       <p className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
         a past entry, after cleanup
       </p>
@@ -129,7 +129,7 @@ export function RetentionModePreview({
           <span
             key={chip}
             className={cn(
-              "rounded-full px-2 py-0.5 text-[11px]",
+              "rounded-none px-2 py-0.5 text-[11px]",
               kept[i]
                 ? "border border-border bg-background text-foreground"
                 : "text-muted-foreground/50 line-through",
@@ -159,7 +159,7 @@ function SegMeter({ label, level }: { label: string; level: number }) {
           <span
             key={i}
             className={cn(
-              "h-1.5 flex-1 rounded-[1px]",
+              "h-1.5 flex-1 rounded-none",
               i < level ? "bg-foreground" : "bg-foreground/15",
             )}
           />
@@ -197,7 +197,7 @@ export function PowerModePreview({
 }) {
   const p = POWER_PROFILE[mode] ?? POWER_PROFILE.auto;
   return (
-    <div className="mt-3 space-y-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-2">
+    <div className="mt-3 space-y-1.5 rounded-none border border-border bg-muted/40 px-2.5 py-2">
       <SegMeter label="capture cadence" level={p.meters[0]} />
       <SegMeter label="capture quality" level={p.meters[1]} />
       <SegMeter label="battery life" level={p.meters[2]} />
@@ -220,7 +220,7 @@ export function PowerModePreview({
 function FlowTrack() {
   return (
     <span className="relative mx-1 block h-px w-6 shrink-0 bg-border">
-      <span className="sp-flow-dot absolute top-1/2 h-[3px] w-[3px] -translate-y-1/2 rounded-full bg-foreground" />
+      <span className="sp-flow-dot absolute top-1/2 h-[3px] w-[3px] -translate-y-1/2 rounded-none bg-foreground" />
     </span>
   );
 }
@@ -235,7 +235,7 @@ function SourceTile({
 }) {
   return (
     <span className="flex flex-col items-center gap-1">
-      <span className="flex h-7 w-10 items-center justify-center rounded-[2px] border border-border bg-background">
+      <span className="flex h-7 w-10 items-center justify-center rounded-none border border-border bg-background">
         {children}
       </span>
       <span className="text-[9px] uppercase tracking-wider text-muted-foreground">
@@ -265,7 +265,7 @@ export function CloudMediaAnalysisPreview() {
   // never synchronizes (same trick as the meeting "listening" bars).
   const bars = [0.5, 0.9, 0.35, 0.8, 0.55, 1, 0.45];
   return (
-    <div className="mt-2.5 rounded-md border border-border bg-muted/40 px-2.5 py-2.5">
+    <div className="mt-2.5 rounded-none border border-border bg-muted/40 px-2.5 py-2.5">
       <div className="grid grid-cols-[auto_auto_1fr] items-center gap-x-1 gap-y-2.5">
         {/* lane 1 — audio → transcript */}
         <span className="flex items-center">
@@ -274,7 +274,7 @@ export function CloudMediaAnalysisPreview() {
               {bars.map((h, i) => (
                 <span
                   key={i}
-                  className="meeting-listening-stick w-[2px] rounded-[1px] bg-foreground"
+                  className="meeting-listening-stick w-[2px] rounded-none bg-foreground"
                   style={{
                     height: `${Math.round(h * 16)}px`,
                     animationDuration: `${0.9 + (i % 3) * 0.25}s`,
@@ -289,12 +289,12 @@ export function CloudMediaAnalysisPreview() {
 
         {/* enclave — centered between both lanes, padlock drawn in pure geometry */}
         <span className="row-span-2 flex flex-col items-center gap-1 self-center px-0.5">
-          <span className="relative flex h-9 w-9 items-center justify-center rounded-[3px] border border-foreground bg-background">
+          <span className="relative flex h-9 w-9 items-center justify-center rounded-none border border-foreground bg-background">
             <span className="flex flex-col items-center">
-              <span className="h-2 w-3 rounded-t-full border border-b-0 border-foreground" />
+              <span className="h-2 w-3 rounded-none border border-b-0 border-foreground" />
               <span className="h-2.5 w-3.5 bg-foreground" />
             </span>
-            <span className="absolute inset-0 animate-pulse rounded-[3px] border border-foreground/30" />
+            <span className="absolute inset-0 animate-pulse rounded-none border border-foreground/30" />
           </span>
           <span className="text-[9px] uppercase tracking-wider text-muted-foreground">
             enclave
@@ -310,7 +310,7 @@ export function CloudMediaAnalysisPreview() {
               {[0.9, 0.4, 0.7, 0.5, 0.85, 0.35].map((o, i) => (
                 <span
                   key={i}
-                  className="h-[5px] w-[5px] rounded-[1px] bg-foreground"
+                  className="h-[5px] w-[5px] rounded-none bg-foreground"
                   style={{ opacity: o }}
                 />
               ))}
@@ -335,13 +335,13 @@ export function CloudMediaAnalysisPreview() {
 // A sample of the actual notification, so the toggles aren't abstract.
 export function NotificationSamplePreview() {
   return (
-    <div className="mb-4 rounded-lg border border-border bg-card px-3 py-2.5">
+    <div className="mb-4 rounded-none border border-border bg-card px-3 py-2.5">
       <p className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
         what these look like
       </p>
-      <div className="flex items-start gap-2.5 rounded-md border border-border bg-background px-2.5 py-2">
-        <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] bg-foreground">
-          <span className="h-2.5 w-2.5 rounded-[2px] bg-background" />
+      <div className="flex items-start gap-2.5 rounded-none border border-border bg-background px-2.5 py-2">
+        <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-none bg-foreground">
+          <span className="h-2.5 w-2.5 rounded-none bg-background" />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">

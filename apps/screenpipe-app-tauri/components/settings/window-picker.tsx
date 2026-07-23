@@ -160,7 +160,7 @@ export function WindowPicker({
           />
         </div>
 
-        <div className="flex-1 overflow-y-auto border border-border rounded-md">
+        <div className="flex-1 overflow-y-auto border border-border rounded-none">
           {isLoading && (
             <div className="p-4 text-xs text-muted-foreground text-center">
               loading apps and windows...
@@ -195,7 +195,7 @@ export function WindowPicker({
                     <img
                       src={APP_ICON_URL(node.app)}
                       alt=""
-                      className="h-4 w-4 rounded-sm object-contain shrink-0"
+                      className="h-4 w-4 rounded-none object-contain shrink-0"
                       onError={(e) => {
                         (e.target as HTMLImageElement).style.visibility = "hidden";
                       }}

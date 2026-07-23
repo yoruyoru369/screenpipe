@@ -301,7 +301,7 @@ export const RegionOcrOverlay: FC<RegionOcrOverlayProps> = ({
           }}
         >
           {isProcessing && (
-            <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />
+            <Loader2 className="w-5 h-5 text-neutral-400 animate-spin" />
           )}
         </div>
       )}

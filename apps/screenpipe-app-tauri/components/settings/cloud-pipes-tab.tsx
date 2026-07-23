@@ -138,7 +138,7 @@ export function CloudPipesTab({ active }: { active: boolean }) {
       <Card>
         <CardContent className="p-4 space-y-3">
           <div className="flex items-center gap-3">
-            <span className={cn("h-2 w-2 rounded-full shrink-0", STATUS_DOT[r.status] || "bg-foreground/30")} />
+            <span className={cn("h-2 w-2 rounded-none shrink-0", STATUS_DOT[r.status] || "bg-foreground/30")} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium">{cloud.orgName || "org"} cloud runner</span>

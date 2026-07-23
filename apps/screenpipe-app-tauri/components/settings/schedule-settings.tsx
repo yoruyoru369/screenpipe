@@ -166,7 +166,7 @@ export function ScheduleSettings({
             <div>
               <h3 className="text-sm font-medium text-foreground">
                 Recording Schedule
-                <span className="ml-1.5 text-[9px] font-mono uppercase tracking-wider bg-muted text-muted-foreground px-1 py-0.5 rounded">
+                <span className="ml-1.5 text-[9px] font-mono uppercase tracking-wider bg-muted text-muted-foreground px-1 py-0.5 rounded-none">
                   beta
                 </span>
               </h3>
@@ -389,7 +389,7 @@ function RuleEditor({ rule, onUpdate, onRemove }: RuleEditorProps) {
           const validated = validateTimeInput(e.target.value);
           if (validated) onUpdate({ startTime: validated });
         }}
-        className="w-24 h-6 text-xs font-mono px-1.5 text-center rounded border border-input bg-background"
+        className="w-24 h-6 text-xs font-mono px-1.5 text-center rounded-none border border-input bg-background"
       />
 
       <span className="text-xs text-muted-foreground">to</span>
@@ -401,7 +401,7 @@ function RuleEditor({ rule, onUpdate, onRemove }: RuleEditorProps) {
           const validated = validateTimeInput(e.target.value);
           if (validated) onUpdate({ endTime: validated });
         }}
-        className="w-24 h-6 text-xs font-mono px-1.5 text-center rounded border border-input bg-background"
+        className="w-24 h-6 text-xs font-mono px-1.5 text-center rounded-none border border-input bg-background"
       />
 
       <Select

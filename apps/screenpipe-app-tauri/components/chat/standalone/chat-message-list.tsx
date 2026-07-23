@@ -293,7 +293,7 @@ export function ChatMessageList({
                         enterEditMode(message, pendingCaretRef.current ?? undefined);
                       }}
                       className={cn(
-                        "relative rounded-xl text-sm overflow-hidden max-w-full transition-all",
+                        "relative rounded-none text-sm overflow-hidden max-w-full transition-all",
                         message.role === "user"
                           ? "bg-muted/60 text-foreground px-4 py-3"
                           : "bg-background text-foreground py-1 w-full",
@@ -332,7 +332,7 @@ export function ChatMessageList({
                           <div className="flex items-center justify-end gap-2">
                             <button
                               type="button"
-                              className="text-xs px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                              className="text-xs px-2 py-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
                               onMouseDown={(e) => e.preventDefault()}
                               onMouseUp={(e) => e.stopPropagation()}
                               onClick={(e) => {
@@ -344,7 +344,7 @@ export function ChatMessageList({
                             </button>
                             <button
                               type="button"
-                              className="text-xs px-2 py-1 rounded-md bg-foreground text-background hover:bg-foreground/90 transition-colors"
+                              className="text-xs px-2 py-1 rounded-none bg-foreground text-background hover:bg-foreground/90 transition-colors"
                               onMouseDown={(e) => e.preventDefault()}
                               onMouseUp={(e) => e.stopPropagation()}
                               onClick={(e) => {
@@ -404,7 +404,7 @@ export function ChatMessageList({
                           ) : null}
                           <button
                             onClick={() => onCopyMessage(message)}
-                            className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
+                            className="p-1 rounded-none hover:bg-muted text-muted-foreground hover:text-foreground"
                             title="Copy message"
                           >
                             {copiedMessageId === message.id ? (
@@ -421,7 +421,7 @@ export function ChatMessageList({
                                 e.stopPropagation();
                                 enterEditMode(message);
                               }}
-                              className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
+                              className="p-1 rounded-none hover:bg-muted text-muted-foreground hover:text-foreground"
                               title="Edit"
                             >
                               <Pencil className="h-3 w-3" />
@@ -430,7 +430,7 @@ export function ChatMessageList({
                           {message.role === "assistant" && !isLoading && !hasFollowingSteeredAssistant && (
                             <button
                               onClick={() => onRetryAssistantMessage(message.id)}
-                              className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
+                              className="p-1 rounded-none hover:bg-muted text-muted-foreground hover:text-foreground"
                               title="Retry"
                             >
                               <RefreshCw className="h-3 w-3" />
@@ -443,7 +443,7 @@ export function ChatMessageList({
                             >
                               <PopoverTrigger asChild>
                                 <button
-                                  className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
+                                  className="p-1 rounded-none hover:bg-muted text-muted-foreground hover:text-foreground"
                                   title="More options"
                                 >
                                   <MoreHorizontal className="h-3 w-3" />
@@ -461,7 +461,7 @@ export function ChatMessageList({
                                       onCloseMessageMenu();
                                       onOpenScheduleDialog(message.id);
                                     }}
-                                    className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
+                                    className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-none hover:bg-muted text-left"
                                   >
                                     <Clock className="h-3.5 w-3.5 shrink-0" />
                                     Run on schedule
@@ -472,7 +472,7 @@ export function ChatMessageList({
                                     onCloseMessageMenu();
                                     branchConversation(message.id);
                                   }}
-                                  className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
+                                  className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-none hover:bg-muted text-left"
                                 >
                                   <GitBranch className="h-3.5 w-3.5 shrink-0" />
                                   Branch in new chat

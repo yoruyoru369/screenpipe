@@ -34,7 +34,7 @@ export function ConnectAppsNudge({
           >
             <IntegrationIcon
               icon={connection.icon || connection.id}
-              className="w-6 h-6 bg-muted/40 rounded-md flex items-center justify-center"
+              className="w-6 h-6 bg-muted/40 rounded-none flex items-center justify-center"
               fallbackClassName="h-3 w-3 text-muted-foreground"
             />
           </button>

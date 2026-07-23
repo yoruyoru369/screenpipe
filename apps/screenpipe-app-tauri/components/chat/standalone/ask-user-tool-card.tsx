@@ -235,7 +235,7 @@ export function AskUserToolCard({
   return (
     <form
       onSubmit={submit}
-      className="my-1 w-full max-w-2xl rounded-lg border border-border/70 bg-muted/20 p-3"
+      className="my-1 w-full max-w-2xl rounded-none border border-border/70 bg-muted/20 p-3"
       data-testid="ask-user-tool-card"
     >
       <div className="flex items-start justify-between gap-3">
@@ -254,7 +254,7 @@ export function AskUserToolCard({
           </div>
         </div>
         {submitted ? (
-          <span className="inline-flex h-6 items-center gap-1 rounded-md border border-border bg-background px-2 text-[11px] text-muted-foreground">
+          <span className="inline-flex h-6 items-center gap-1 rounded-none border border-border bg-background px-2 text-[11px] text-muted-foreground">
             <Check className="h-3 w-3" />
             sent
           </span>
@@ -271,7 +271,7 @@ export function AskUserToolCard({
                 type="button"
                 onClick={() => setActiveIndex(index)}
                 className={cn(
-                  "h-7 rounded-md border px-2 text-[11px] font-mono transition-colors",
+                  "h-7 rounded-none border px-2 text-[11px] font-mono transition-colors",
                   index === activeIndex
                     ? "border-foreground bg-foreground text-background"
                     : "border-border bg-background text-muted-foreground hover:text-foreground",
@@ -302,7 +302,7 @@ export function AskUserToolCard({
               return (
                 <label
                   key={option.value}
-                  className="flex cursor-pointer items-start gap-2 rounded-md border border-border/60 bg-background px-2.5 py-2 text-sm hover:border-foreground/30"
+                  className="flex cursor-pointer items-start gap-2 rounded-none border border-border/60 bg-background px-2.5 py-2 text-sm hover:border-foreground/30"
                 >
                   <input
                     type="checkbox"
@@ -336,7 +336,7 @@ export function AskUserToolCard({
                   values: event.target.value ? [event.target.value] : [],
                 });
               }}
-              className="h-9 w-full appearance-none rounded-md border border-border bg-background px-3 pr-8 text-sm text-foreground outline-none transition-colors focus:border-foreground"
+              className="h-9 w-full appearance-none rounded-none border border-border bg-background px-3 pr-8 text-sm text-foreground outline-none transition-colors focus:border-foreground"
             >
               <option value="">Choose an answer...</option>
               {activeQuestion.options.map((option) => (
@@ -351,7 +351,7 @@ export function AskUserToolCard({
 
         {selectedOption?.description || selectedOption?.preview ? (
           <div
-            className="rounded-md border border-border/60 bg-background px-3 py-2 text-xs text-muted-foreground"
+            className="rounded-none border border-border/60 bg-background px-3 py-2 text-xs text-muted-foreground"
             data-testid="ask-user-selected-option"
           >
             {selectedOption.description ? <div>{selectedOption.description}</div> : null}
@@ -369,7 +369,7 @@ export function AskUserToolCard({
           onChange={(event) => updateAnswer(activeQuestion.id, { customText: event.target.value })}
           rows={2}
           placeholder={activeQuestion.options.length > 0 ? "Type your own answer or add nuance..." : "Type your answer..."}
-          className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-foreground"
+          className="min-h-16 w-full resize-y rounded-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-foreground"
         />
       </div>
 
@@ -384,7 +384,7 @@ export function AskUserToolCard({
           data-testid="ask-user-reply"
           disabled={!canSubmit}
           className={cn(
-            "h-8 shrink-0 rounded-md px-3 text-xs font-medium transition-colors",
+            "h-8 shrink-0 rounded-none px-3 text-xs font-medium transition-colors",
             canSubmit
               ? "bg-foreground text-background hover:bg-foreground/90"
               : "cursor-not-allowed border border-border bg-background text-muted-foreground",

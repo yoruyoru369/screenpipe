@@ -20,8 +20,8 @@ export function GoogleOAuthUnverifiedAppHint() {
 
   return (
     <>
-      <div className="flex w-full max-w-3xl items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
-        <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+      <div className="flex w-full max-w-3xl items-start gap-2 rounded-none border border-neutral-500/20 bg-neutral-500/5 px-3 py-2 text-xs text-muted-foreground">
+        <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-neutral-500" />
         <div className="min-w-0 flex-1 space-y-1">
           <span className="block leading-relaxed">
             Google may show a blocked-app warning. Click{" "}
@@ -55,7 +55,7 @@ export function GoogleOAuthUnverifiedAppHint() {
           <img
             src={WALKTHROUGH_IMAGE}
             alt="Google OAuth warning walkthrough showing Advanced, then Go to Screenpipe unsafe"
-            className="max-h-[calc(100vh-10rem)] w-full rounded-md border border-border object-contain"
+            className="max-h-[calc(100vh-10rem)] w-full rounded-none border border-border object-contain"
           />
         </DialogContent>
       </Dialog>

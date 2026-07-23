@@ -222,7 +222,7 @@ export function GoogleCalendarCard({ onConnected, onDisconnected }: { onConnecte
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
-            <img src="/google-calendar-icon.svg" alt="Google Calendar" className="w-10 h-10 rounded-xl" />
+            <img src="/google-calendar-icon.svg" alt="Google Calendar" className="w-10 h-10 rounded-none" />
           </div>
 
           <div className="flex-1 min-w-0">
@@ -231,7 +231,7 @@ export function GoogleCalendarCard({ onConnected, onDisconnected }: { onConnecte
                 Google Calendar
               </h3>
               {connected && (
-                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-full">
+                <span className="px-2 py-0.5 text-xs font-medium bg-foreground text-background rounded-none">
                   connected
                 </span>
               )}
@@ -245,7 +245,7 @@ export function GoogleCalendarCard({ onConnected, onDisconnected }: { onConnecte
             {!connected ? (
               <div className="space-y-2">
                 {needsAttention && (
-                  <div className="flex items-start gap-1.5 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded px-2 py-1.5">
+                  <div className="flex items-start gap-1.5 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-none px-2 py-1.5">
                     <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
                     <span>
                       A previous connection exists but its token can't be read on this
@@ -370,7 +370,7 @@ export function GoogleCalendarCard({ onConnected, onDisconnected }: { onConnecte
                   return (
                     <div
                       key={event.id}
-                      className={`flex items-start gap-2 text-xs rounded-md px-2 py-1.5 ${
+                      className={`flex items-start gap-2 text-xs rounded-none px-2 py-1.5 ${
                         now
                           ? "bg-foreground/5 border border-foreground/10"
                           : "bg-muted/50"

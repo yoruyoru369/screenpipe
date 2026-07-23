@@ -128,7 +128,7 @@ export function CustomSummaryBuilder({
                 <button
                   key={range.value}
                   onClick={() => { setSelectedTime(range.value); setDateRange(undefined); }}
-                  className={`w-full text-left px-3 py-1.5 text-[12px] rounded-lg transition-colors ${
+                  className={`w-full text-left px-3 py-1.5 text-[12px] rounded-none transition-colors ${
                     selectedTime === range.value
                       ? "bg-primary/15 text-primary border border-primary/30 font-medium"
                       : "hover:bg-muted/50 text-muted-foreground border border-transparent"
@@ -142,7 +142,7 @@ export function CustomSummaryBuilder({
               <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
                 <PopoverTrigger asChild>
                   <button
-                    className={`w-full text-left px-3 py-1.5 text-[12px] rounded-lg transition-colors flex items-center gap-2 ${
+                    className={`w-full text-left px-3 py-1.5 text-[12px] rounded-none transition-colors flex items-center gap-2 ${
                       dateRange?.from
                         ? "bg-primary/15 text-primary border border-primary/30 font-medium"
                         : "hover:bg-muted/50 text-muted-foreground border border-transparent"
@@ -190,7 +190,7 @@ export function CustomSummaryBuilder({
                   <button
                     key={qt.label}
                     onClick={() => handleQuickTemplate(qt.prompt)}
-                    className="px-2 py-0.5 text-[10px] bg-muted/30 hover:bg-muted/60 rounded-full border border-border/30 hover:border-border/60 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                    className="px-2 py-0.5 text-[10px] bg-muted/30 hover:bg-muted/60 rounded-none border border-border/30 hover:border-border/60 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
                   >
                     {qt.label}
                   </button>

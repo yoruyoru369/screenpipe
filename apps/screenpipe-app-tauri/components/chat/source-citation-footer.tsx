@@ -175,13 +175,13 @@ function SourceCitationRow({
 
   const inner = (
     <>
-      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border border-border/60 bg-background/60 text-muted-foreground">
+      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-none border border-border/60 bg-background/60 text-muted-foreground">
         <SourceCitationIcon citation={citation} fallback={Icon} />
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
           <span className="truncate font-medium text-foreground/80">{citation.title}</span>
-          <span className="shrink-0 rounded border border-border/50 px-1 py-0.5 text-[10px] font-medium uppercase leading-none text-muted-foreground/75">
+          <span className="shrink-0 rounded-none border border-border/50 px-1 py-0.5 text-[10px] font-medium uppercase leading-none text-muted-foreground/75">
             {kindLabel}
           </span>
           {canOpen && <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground/70" />}
@@ -198,7 +198,7 @@ function SourceCitationRow({
 
   if (!interactive) {
     return (
-      <div className="flex min-w-0 items-start gap-2 rounded-md border border-border/40 bg-muted/20 px-2 py-1.5">
+      <div className="flex min-w-0 items-start gap-2 rounded-none border border-border/40 bg-muted/20 px-2 py-1.5">
         {inner}
       </div>
     );
@@ -232,7 +232,7 @@ function SourceCitationRow({
         }
         void openUrl(citation.href!);
       }}
-      className="flex min-w-0 items-start gap-2 rounded-md border border-border/40 bg-muted/20 px-2 py-1.5 text-left transition-colors hover:border-border/70 hover:bg-muted/35"
+      className="flex min-w-0 items-start gap-2 rounded-none border border-border/40 bg-muted/20 px-2 py-1.5 text-left transition-colors hover:border-border/70 hover:bg-muted/35"
     >
       {inner}
     </button>
@@ -248,7 +248,7 @@ export function SourceCitationIcon({
 }) {
   const iconSrc = sourceIconSrc(citation);
   if (iconSrc) {
-    return <img src={iconSrc} alt="" aria-hidden="true" className="h-3.5 w-3.5 rounded-sm" />;
+    return <img src={iconSrc} alt="" aria-hidden="true" className="h-3.5 w-3.5 rounded-none" />;
   }
 
   if (sourceUsesObsidianIcon(citation)) {

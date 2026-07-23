@@ -36,7 +36,7 @@ export function ChatInspector({
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-y-auto">
       {/* Compact block at the top, empty space below */}
-      <div className="mx-2 my-3 rounded-md border border-border/40 bg-background">
+      <div className="mx-2 my-3 rounded-none border border-border/40 bg-background">
         {/* Outputs */}
         <div className="px-3 pt-2.5 pb-1">
           <span className="text-[11px] uppercase tracking-wider text-muted-foreground/70 font-medium">
@@ -54,7 +54,7 @@ export function ChatInspector({
                 key={`${output.id || "output"}:${i}`}
                 type="button"
                 onClick={() => output.path && onOpenFile(output.path)}
-                className="flex items-center gap-2 w-full px-2 py-1.5 text-[13px] text-foreground/80 hover:bg-muted/40 rounded-sm text-left"
+                className="flex items-center gap-2 w-full px-2 py-1.5 text-[13px] text-foreground/80 hover:bg-muted/40 rounded-none text-left"
               >
                 <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
                 <span className="truncate">

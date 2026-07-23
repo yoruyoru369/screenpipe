@@ -56,7 +56,7 @@ export function MarkdownBlock({
         details({ children, ...props }) {
           return (
             <details
-              className="mt-4 border border-border rounded-md overflow-hidden not-prose"
+              className="mt-4 border border-border rounded-none overflow-hidden not-prose"
               {...(props as React.HTMLAttributes<HTMLDetailsElement>)}
             >
               {children}
@@ -142,7 +142,7 @@ export function MarkdownBlock({
               <a
                 href="#"
                 onClick={handleScreenpipeLinkClick}
-                className="underline underline-offset-2 text-blue-500 hover:text-blue-400 cursor-pointer inline"
+                className="underline underline-offset-2 text-neutral-500 hover:text-neutral-400 cursor-pointer inline"
                 {...props}
               >
                 {children}

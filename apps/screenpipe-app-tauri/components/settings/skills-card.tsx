@@ -108,7 +108,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
     <div className="space-y-4 text-sm">
       <p className="text-xs text-muted-foreground leading-relaxed">
         Skills are reusable{" "}
-        <code className="text-[11px] bg-muted px-1 rounded">SKILL.md</code>{" "}
+        <code className="text-[11px] bg-muted px-1 rounded-none">SKILL.md</code>{" "}
         playbooks — the same format Claude Code uses. Import them here and
         screenpipe&apos;s agent loads them in chat and in every pipe.
       </p>
@@ -135,7 +135,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
       />
 
       {error && (
-        <div className="flex items-start gap-1.5 text-xs rounded-md border border-destructive/40 bg-destructive/5 text-destructive p-2.5">
+        <div className="flex items-start gap-1.5 text-xs rounded-none border border-destructive/40 bg-destructive/5 text-destructive p-2.5">
           <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -164,7 +164,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
             {imported.map((s) => (
               <div
                 key={s.name}
-                className="flex items-start justify-between gap-2 border border-border rounded-md px-2.5 py-2"
+                className="flex items-start justify-between gap-2 border border-border rounded-none px-2.5 py-2"
               >
                 <div className="min-w-0">
                   <div className="text-xs font-medium truncate">{s.name}</div>
@@ -192,7 +192,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
             ))}
           </div>
         ) : loaded ? (
-          <div className="text-[11px] text-muted-foreground bg-muted/30 rounded-md px-2.5 py-2">
+          <div className="text-[11px] text-muted-foreground bg-muted/30 rounded-none px-2.5 py-2">
             No skills imported yet. Add one from your device below.
           </div>
         ) : (
@@ -214,7 +214,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
               type="button"
               onClick={() => doImport(s.path, s.path)}
               disabled={busyKey === s.path}
-              className="flex flex-col items-start gap-1 text-left border border-border rounded-lg p-2.5 min-h-[76px] hover:border-muted-foreground/50 hover:bg-accent/50 transition-colors disabled:opacity-60"
+              className="flex flex-col items-start gap-1 text-left border border-border rounded-none p-2.5 min-h-[76px] hover:border-muted-foreground/50 hover:bg-accent/50 transition-colors disabled:opacity-60"
             >
               <div className="flex items-center gap-1.5 w-full">
                 <BookOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -242,7 +242,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
           <button
             type="button"
             onClick={pickFolder}
-            className="flex flex-col items-center justify-center gap-1.5 text-center border border-dashed border-border rounded-lg p-2.5 min-h-[76px] hover:border-muted-foreground/50 hover:bg-accent/50 transition-colors"
+            className="flex flex-col items-center justify-center gap-1.5 text-center border border-dashed border-border rounded-none p-2.5 min-h-[76px] hover:border-muted-foreground/50 hover:bg-accent/50 transition-colors"
           >
             <FolderPlus className="h-4 w-4 text-muted-foreground" />
             <span className="text-xs font-medium">Add from folder…</span>
@@ -255,7 +255,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
         {loaded && importable.length === 0 && (
           <p className="text-[11px] text-muted-foreground">
             No new skills found in{" "}
-            <code className="text-[10px] bg-muted px-1 rounded">
+            <code className="text-[10px] bg-muted px-1 rounded-none">
               ~/.claude/skills
             </code>
             . Use “Add from folder…” to import from anywhere.

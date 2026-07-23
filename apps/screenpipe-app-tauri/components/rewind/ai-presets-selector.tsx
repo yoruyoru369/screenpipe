@@ -167,7 +167,7 @@ function ChatGptSignInButton() {
       {loading ? (
         <Loader2 className="h-3 w-3 mr-1 animate-spin" />
       ) : loggedIn ? (
-        <Check className="h-3 w-3 mr-1 text-green-500" />
+        <Check className="h-3 w-3 mr-1 text-neutral-500" />
       ) : (
         <LogIn className="h-3 w-3 mr-1" />
       )}
@@ -419,7 +419,7 @@ export function AIProviderConfig({
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   return (
-    <div className="w-full space-y-3 rounded-lg bg-card p-4">
+    <div className="w-full space-y-3 rounded-none bg-card p-4">
       <div>
         <h2 className="text-base font-semibold">
           {defaultPreset?.id ? "edit ai provider" : "ai provider"}
@@ -553,7 +553,7 @@ export function AIProviderConfig({
             }}
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/images/claude-ai.svg" alt="Claude API" className="h-3.5 w-3.5 rounded-sm" />
+            <img src="/images/claude-ai.svg" alt="Claude API" className="h-3.5 w-3.5 rounded-none" />
             <span>claude api</span>
           </Button>
         </div>
@@ -835,13 +835,13 @@ export function AIProviderConfig({
                   return (
                   <SelectItem key={m.id} value={m.id} disabled={locked} className={locked ? "opacity-60" : undefined}>
                     <span className="flex items-center gap-1.5">
-                      {m.health?.status === 'down' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-500" title="overloaded" />}
-                      {m.health?.status === 'degraded' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-yellow-500" title="degraded" />}
+                      {m.health?.status === 'down' && <span className="inline-block w-1.5 h-1.5 rounded-none bg-neutral-500" title="overloaded" />}
+                      {m.health?.status === 'degraded' && <span className="inline-block w-1.5 h-1.5 rounded-none bg-neutral-500" title="degraded" />}
                       {m.name}{m.free ? " (free)" : ""}
-                      {locked && <span className="text-[9px] font-medium text-muted-foreground border rounded px-1">business</span>}
+                      {locked && <span className="text-[9px] font-medium text-muted-foreground border rounded-none px-1">business</span>}
                       {!locked && costLabel && <span className="text-[9px] font-medium text-muted-foreground">{costLabel}</span>}
-                      {m.recommended_for?.includes('pipes') && <span className="text-[9px] text-muted-foreground bg-muted rounded px-1">pipes</span>}
-                      {m.health?.status === 'down' && <span className="text-[9px] text-red-400 ml-1">overloaded</span>}
+                      {m.recommended_for?.includes('pipes') && <span className="text-[9px] text-muted-foreground bg-muted rounded-none px-1">pipes</span>}
+                      {m.health?.status === 'down' && <span className="text-[9px] text-neutral-400 ml-1">overloaded</span>}
                     </span>
                   </SelectItem>
                   );
@@ -1378,7 +1378,7 @@ export const AIPresetsSelector = ({
     <>
       <div className={cn("flex flex-col w-full gap-2", containerClassName)}>
         {!isControlled && selectedPresetRequiresLogin && !showModelOnly && (
-          <div className="flex items-center gap-2 p-2 text-sm bg-muted border border-border rounded-lg">
+          <div className="flex items-center gap-2 p-2 text-sm bg-muted border border-border rounded-none">
             <AlertTriangle className="h-4 w-4 text-muted-foreground shrink-0" />
             <span className="text-foreground flex-1">
               Login required to use Screenpipe Cloud
@@ -1411,7 +1411,7 @@ export const AIPresetsSelector = ({
                   className={cn(
                     "w-full justify-between hover:bg-accent hover:text-accent-foreground",
                     compact && "h-8 text-xs",
-                    selectedPresetRequiresLogin && "border-amber-500/50",
+                    selectedPresetRequiresLogin && "border-foreground/50",
                     triggerClassName
                   )}
                 >
@@ -1419,7 +1419,7 @@ export const AIPresetsSelector = ({
                     showModelOnly ? (
                       <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
                         {selectedPresetRequiresLogin && (
-                          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+                          <AlertTriangle className="h-4 w-4 text-neutral-500 shrink-0" />
                         )}
                         <span
                           className="truncate text-left font-medium"
@@ -1436,14 +1436,14 @@ export const AIPresetsSelector = ({
                       <div className="flex w-full items-center justify-between gap-2 overflow-hidden min-w-0">
                         <div className="flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
                           {selectedPresetRequiresLogin && (
-                            <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+                            <AlertTriangle className="h-4 w-4 text-neutral-500 shrink-0" />
                           )}
                           <span className="font-medium truncate text-left">
                             {formatPresetName(selectedPresetData?.id || '')}
                           </span>
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0 flex-1 justify-end overflow-hidden">
-                          <span className="rounded bg-muted px-1.5 py-0.5 whitespace-nowrap shrink-0">
+                          <span className="rounded-none bg-muted px-1.5 py-0.5 whitespace-nowrap shrink-0">
                             {selectedPresetData?.provider}
                           </span>
                           <span className="hidden sm:block truncate min-w-0" title={selectedPresetData?.model}>
@@ -1468,7 +1468,7 @@ export const AIPresetsSelector = ({
                 ) : (
                   <p className="flex items-center gap-2">
                     <span>Press</span>
-                    <kbd className="px-1.5 py-0.5 text-xs font-semibold bg-muted rounded">
+                    <kbd className="px-1.5 py-0.5 text-xs font-semibold bg-muted rounded-none">
                       ⌘/
                     </kbd>
                     <span>to cycle presets</span>
@@ -1530,13 +1530,13 @@ export const AIPresetsSelector = ({
                             <span className="font-medium truncate max-w-[30%]">
                               {preset.id}
                             </span>
-                            <span className="rounded bg-primary/10 text-primary px-1.5 py-0.5 text-xs font-medium shrink-0">
+                            <span className="rounded-none bg-primary/10 text-primary px-1.5 py-0.5 text-xs font-medium shrink-0">
                               recommended
                             </span>
                           </div>
                           <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground shrink-0">
                             <div className="flex items-center gap-2">
-                              <span className="rounded bg-muted px-1.5 py-0.5 whitespace-nowrap">
+                              <span className="rounded-none bg-muted px-1.5 py-0.5 whitespace-nowrap">
                                 {preset.provider}
                               </span>
                               <span className="hidden sm:block truncate max-w-[30%]">
@@ -1626,19 +1626,19 @@ export const AIPresetsSelector = ({
                             {formatPresetName(preset.id)}
                           </span>
                           {isGated && (
-                            <span className="rounded bg-muted text-muted-foreground px-1.5 py-0.5 text-[10px] font-medium shrink-0 ml-1 border border-border/50">
+                            <span className="rounded-none bg-muted text-muted-foreground px-1.5 py-0.5 text-[10px] font-medium shrink-0 ml-1 border border-border/50">
                               business plan only
                             </span>
                           )}
                           {preset.defaultPreset && (
-                            <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium shrink-0">
+                            <span className="rounded-none bg-muted px-1.5 py-0.5 text-xs font-medium shrink-0">
                               default
                             </span>
                           )}
                         </div>
                         <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground shrink-0">
                           <div className="flex items-center gap-2">
-                            <span className="rounded bg-muted px-1.5 py-0.5 whitespace-nowrap">
+                            <span className="rounded-none bg-muted px-1.5 py-0.5 whitespace-nowrap">
                               {preset.provider}
                             </span>
                             <span className="truncate max-w-[120px]">

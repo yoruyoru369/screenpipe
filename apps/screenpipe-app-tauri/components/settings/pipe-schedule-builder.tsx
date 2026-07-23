@@ -189,7 +189,7 @@ export function PipeScheduleBuilder({
                         })
                       }
                       className={cn(
-                        "w-8 h-7 text-[10px] font-mono border rounded-sm transition-colors",
+                        "w-8 h-7 text-[10px] font-mono border rounded-none transition-colors",
                         on
                           ? "bg-foreground text-background border-foreground hover:bg-foreground/90"
                           : "bg-muted/40 text-muted-foreground border-border hover:bg-muted hover:text-foreground"
@@ -240,7 +240,7 @@ export function PipeScheduleBuilder({
                   const [h, m] = e.target.value.split(":").map(Number);
                   if (!Number.isNaN(h) && !Number.isNaN(m)) update({ at_hour: h, at_minute: m });
                 }}
-                className="h-8 w-28 text-xs font-mono px-2 text-center rounded border border-input bg-background"
+                className="h-8 w-28 text-xs font-mono px-2 text-center rounded-none border border-input bg-background"
               />
             </div>
           )}
@@ -277,7 +277,7 @@ export function PipeScheduleBuilder({
               onChange={(e) =>
                 update({ starting: e.target.value ? `${e.target.value}T00:00:00Z` : null })
               }
-              className="h-8 w-36 text-xs font-mono px-2 rounded border border-input bg-background"
+              className="h-8 w-36 text-xs font-mono px-2 rounded-none border border-input bg-background"
             />
           </div>
           <div className="flex items-center justify-between gap-2">
@@ -310,7 +310,7 @@ export function PipeScheduleBuilder({
                 onChange={(e) =>
                   update({ ending: e.target.value ? `${e.target.value}T23:59:59Z` : null })
                 }
-                className="h-8 w-36 text-xs font-mono px-2 rounded border border-input bg-background"
+                className="h-8 w-36 text-xs font-mono px-2 rounded-none border border-input bg-background"
               />
             </div>
           )}
@@ -334,7 +334,7 @@ export function PipeScheduleBuilder({
       )}
 
       {/* Summary / next run */}
-      <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
+      <div className="rounded-none border border-border bg-muted/30 px-2 py-1.5">
         {manual ? (
           <p className="text-[11px]">
             moves to <span className="text-foreground">manual</span> — runs only when you trigger it

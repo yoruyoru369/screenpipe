@@ -41,7 +41,7 @@ export function QueuedPromptsList({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
-      className="mb-2 rounded-lg border border-border/60 bg-background/95 backdrop-blur-sm shadow-sm overflow-hidden"
+      className="mb-2 rounded-none border border-border/60 bg-background/95 backdrop-blur-sm shadow-sm overflow-hidden"
     >
       <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-border/50 bg-background">
         <div className="flex items-center gap-1.5 min-w-0">

@@ -143,12 +143,12 @@ const PROSE_CLASSES = [
   "prose-p:my-2 prose-p:leading-relaxed",
   "prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5",
   // Inline code + code blocks — match shadcn muted surfaces
-  "prose-code:bg-muted prose-code:text-foreground prose-code:px-1 prose-code:py-0.5 prose-code:rounded",
+  "prose-code:bg-muted prose-code:text-foreground prose-code:px-1 prose-code:py-0.5 prose-code:rounded-none",
   "prose-code:before:content-none prose-code:after:content-none",
-  "prose-pre:bg-muted prose-pre:text-foreground prose-pre:text-xs prose-pre:rounded prose-pre:border prose-pre:border-border",
+  "prose-pre:bg-muted prose-pre:text-foreground prose-pre:text-xs prose-pre:rounded-none prose-pre:border prose-pre:border-border",
   "prose-blockquote:border-l-2 prose-blockquote:border-border prose-blockquote:not-italic prose-blockquote:text-muted-foreground",
   "prose-a:text-foreground prose-a:underline prose-a:underline-offset-2 prose-a:decoration-muted-foreground/50",
-  "prose-img:w-auto prose-img:rounded prose-img:border prose-img:border-border prose-img:bg-muted",
+  "prose-img:w-auto prose-img:rounded-none prose-img:border prose-img:border-border prose-img:bg-muted",
   "prose-hr:my-6 prose-hr:border-border",
 ].join(" ");
 

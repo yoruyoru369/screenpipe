@@ -139,7 +139,7 @@ export function ChatTitleMenu({
           }
         }}
         onBlur={() => void commitRename()}
-        className="relative z-10 h-7 px-2 max-w-[260px] text-xs font-medium bg-background border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-foreground/30"
+        className="relative z-10 h-7 px-2 max-w-[260px] text-xs font-medium bg-background border border-border rounded-none focus:outline-none focus:ring-1 focus:ring-foreground/30"
       />
     );
   }
@@ -154,7 +154,7 @@ export function ChatTitleMenu({
             e.stopPropagation();
             setOpen((o) => !o);
           }}
-          className="relative z-10 inline-flex items-center gap-1 max-w-[260px] h-7 px-2 rounded-md text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
+          className="relative z-10 inline-flex items-center gap-1 max-w-[260px] h-7 px-2 rounded-none text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
           title="Chat options"
         >
           <span className="truncate">{title}</span>
@@ -168,14 +168,14 @@ export function ChatTitleMenu({
         onMouseDown={(e) => e.stopPropagation()}
       >
         <button
-          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
+          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-none hover:bg-muted text-left"
           onClick={handleStartRename}
         >
           <Pencil className="h-3.5 w-3.5 shrink-0" />
           Rename
         </button>
         <button
-          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
+          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-none hover:bg-muted text-left"
           onClick={() => void handleTogglePin()}
         >
           <Pin className="h-3.5 w-3.5 shrink-0" />
@@ -183,7 +183,7 @@ export function ChatTitleMenu({
         </button>
         <div className="my-1 border-t border-border" />
         <button
-          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-destructive text-left"
+          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-none hover:bg-muted text-destructive text-left"
           onClick={() => void handleDelete()}
         >
           <Trash2 className="h-3.5 w-3.5 shrink-0" />

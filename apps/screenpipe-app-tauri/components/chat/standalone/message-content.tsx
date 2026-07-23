@@ -305,9 +305,9 @@ function BashToolDetails({ toolCall }: { toolCall: ToolCall }) {
 
   return (
     <div className="py-1.5 space-y-2">
-      <div className="rounded-md border border-border/50 bg-muted/20 px-2.5 py-2">
+      <div className="rounded-none border border-border/50 bg-muted/20 px-2.5 py-2">
         <div className="mb-1 flex min-w-0 items-center gap-1.5">
-          <span className="shrink-0 rounded border border-border/50 px-1.5 py-0.5 text-[10px] font-mono uppercase leading-none text-muted-foreground">
+          <span className="shrink-0 rounded-none border border-border/50 px-1.5 py-0.5 text-[10px] font-mono uppercase leading-none text-muted-foreground">
             {details.eyebrow}
           </span>
           {details.resultSummary && (
@@ -322,7 +322,7 @@ function BashToolDetails({ toolCall }: { toolCall: ToolCall }) {
             {details.fields.map((field) => (
               <span
                 key={`${field.label}:${field.value}`}
-                className="max-w-full rounded border border-border/40 bg-background/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                className="max-w-full rounded-none border border-border/40 bg-background/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
               >
                 <span className="text-muted-foreground/60">{field.label}</span>{" "}
                 <span className="text-foreground/70">{field.value}</span>
@@ -332,7 +332,7 @@ function BashToolDetails({ toolCall }: { toolCall: ToolCall }) {
         )}
       </div>
 
-      <details className="group rounded-md border border-border/30 bg-background/40 px-2 py-1.5">
+      <details className="group rounded-none border border-border/30 bg-background/40 px-2 py-1.5">
         <summary className="cursor-pointer select-none text-[10px] font-mono uppercase tracking-wide text-muted-foreground/70 transition-colors hover:text-foreground/70">
           technical details
         </summary>
@@ -357,7 +357,7 @@ function ToolCodeBlock({
   return (
     <div className="min-w-0">
       {label && <div className="mb-1 text-[10px] font-mono uppercase text-muted-foreground/50">{label}</div>}
-      <pre className="max-h-[220px] max-w-full overflow-auto rounded border border-border/30 bg-muted/20 p-2 text-xs leading-relaxed">
+      <pre className="max-h-[220px] max-w-full overflow-auto rounded-none border border-border/30 bg-muted/20 p-2 text-xs leading-relaxed">
         <code className="font-mono">
           {language === "json" ? <HighlightedJson code={code} /> : <HighlightedShell code={code} />}
         </code>
@@ -372,11 +372,11 @@ function HighlightedShell({ code }: { code: string }) {
     <>
       {parts.map((part, index) => {
         const className = /^https?:\/\//.test(part)
-          ? "text-cyan-700 dark:text-cyan-300"
+          ? "text-foreground underline underline-offset-2"
           : /^-[A-Za-z-]+$/.test(part)
-            ? "text-purple-700 dark:text-purple-300"
+            ? "text-foreground/80"
             : /^\$[A-Z0-9_]+$/.test(part)
-              ? "text-amber-700 dark:text-amber-300"
+              ? "text-foreground/70"
               : part === "curl"
                 ? "text-foreground"
                 : "text-muted-foreground";
@@ -392,11 +392,11 @@ function HighlightedJson({ code }: { code: string }) {
     <>
       {parts.map((part, index) => {
         const className = /^".*"\s*:$/s.test(part)
-          ? "text-purple-700 dark:text-purple-300"
+          ? "text-foreground"
           : /^"/s.test(part)
-            ? "text-emerald-700 dark:text-emerald-300"
+            ? "text-foreground/80"
             : /^(true|false|null|-?\d)/.test(part)
-              ? "text-amber-700 dark:text-amber-300"
+              ? "text-foreground/70"
               : "text-muted-foreground";
         return <span key={`${part}-${index}`} className={className}>{part}</span>;
       })}
@@ -630,10 +630,10 @@ function AppIcon({
   const staticPath = STATIC_APP_ICONS[normalizeAppKey(name)];
   const iconUrl = staticPath ?? `http://localhost:11435/app-icon?name=${encodeURIComponent(name)}`;
   return (
-    <div className={cn("rounded-sm flex-shrink-0 flex items-center justify-center overflow-hidden", sizeClass)}>
+    <div className={cn("rounded-none flex-shrink-0 flex items-center justify-center overflow-hidden", sizeClass)}>
       {iconFailed ? (
         <span
-          className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-sm", letterClass)}
+          className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-none", letterClass)}
           style={{ backgroundColor: color }}
         >
           {name.charAt(0).toUpperCase()}
@@ -660,12 +660,12 @@ function WebTargetIcon({
   const [iconFailed, setIconFailed] = React.useState(false);
   return (
     <div
-      className={cn("rounded-sm flex-shrink-0 flex items-center justify-center overflow-hidden bg-background", sizeClass)}
+      className={cn("rounded-none flex-shrink-0 flex items-center justify-center overflow-hidden bg-background", sizeClass)}
       title={target.label}
     >
       {iconFailed ? (
         <span
-          className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-sm", letterClass)}
+          className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-none", letterClass)}
           style={{ backgroundColor: color }}
         >
           {target.domain.charAt(0).toUpperCase()}
@@ -741,9 +741,9 @@ function AppStatsBlock({ content }: { content: string }) {
                   {formatMinutes(minutes)}
                 </span>
               </div>
-              <div className="h-[2px] bg-border rounded-full overflow-hidden">
+              <div className="h-[2px] bg-border rounded-none overflow-hidden">
                 <div
-                  className="h-full rounded-full transition-all"
+                  className="h-full rounded-none transition-all"
                   style={{ width: `${pct}%`, backgroundColor: color, opacity: 0.6 }}
                 />
               </div>
@@ -1298,7 +1298,7 @@ export function MessageContent({
       <button
         type="button"
         onClick={() => onRetry?.(message.retryPrompt!)}
-        className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-foreground text-background hover:bg-foreground/80 transition-colors"
+        className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-none bg-foreground text-background hover:bg-foreground/80 transition-colors"
       >
         <RefreshCw className="h-3 w-3" />
         Try again
@@ -1337,9 +1337,9 @@ export function MessageContent({
           <div
             key={`doc-${doc.name}-${i}`}
             title={`${doc.name} — ${doc.charCount.toLocaleString()} chars${doc.truncated ? " (truncated)" : ""}`}
-            className="flex items-center gap-2.5 h-20 max-w-[260px] rounded-xl border border-border/50 bg-muted/40 px-3 shadow-sm"
+            className="flex items-center gap-2.5 h-20 max-w-[260px] rounded-none border border-border/50 bg-muted/40 px-3 shadow-sm"
           >
-            <div className={`shrink-0 w-11 h-11 rounded-lg flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
+            <div className={`shrink-0 w-11 h-11 rounded-none flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
               {badge.label}
             </div>
             <div className="min-w-0 flex-1">
@@ -1356,7 +1356,7 @@ export function MessageContent({
           key={`img-${i}`}
           type="button"
           onClick={() => onImageClick?.(message.images ?? [], i)}
-          className="rounded-xl border border-border/50 shadow-sm overflow-hidden p-0 block text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="rounded-none border border-border/50 shadow-sm overflow-hidden p-0 block text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={img} alt={`Attached ${i + 1}`} className="h-20 w-20 min-h-20 min-w-20 object-cover cursor-pointer" />
@@ -1552,11 +1552,11 @@ export function MessageContent({
 // the goal is recognition at a glance, not pixel-perfect filetype branding.
 export function attachmentBadge(ext: string): { label: string; tint: string } {
   const e = ext.toLowerCase();
-  if (e === "pdf") return { label: "PDF", tint: "bg-red-500/15 text-red-600 dark:text-red-400" };
-  if (e === "docx" || e === "doc") return { label: "DOC", tint: "bg-blue-500/15 text-blue-600 dark:text-blue-400" };
-  if (e === "xlsx" || e === "xls" || e === "csv" || e === "tsv") return { label: e.toUpperCase(), tint: "bg-green-500/15 text-green-600 dark:text-green-400" };
-  if (e === "md" || e === "markdown") return { label: "MD", tint: "bg-purple-500/15 text-purple-600 dark:text-purple-400" };
-  if (e === "json") return { label: "JSON", tint: "bg-amber-500/15 text-amber-600 dark:text-amber-400" };
+  if (e === "pdf") return { label: "PDF", tint: "bg-foreground/10 text-foreground" };
+  if (e === "docx" || e === "doc") return { label: "DOC", tint: "bg-foreground/10 text-foreground" };
+  if (e === "xlsx" || e === "xls" || e === "csv" || e === "tsv") return { label: e.toUpperCase(), tint: "bg-foreground/10 text-foreground" };
+  if (e === "md" || e === "markdown") return { label: "MD", tint: "bg-foreground/10 text-foreground" };
+  if (e === "json") return { label: "JSON", tint: "bg-foreground/10 text-foreground" };
   return { label: (e || "FILE").toUpperCase().slice(0, 4), tint: "bg-muted text-muted-foreground" };
 }
 
@@ -1579,7 +1579,7 @@ function CollapsibleUserMessage({ label, fullContent }: { label: string; fullCon
             setExpanded(!expanded);
           }}
           onMouseUp={(e) => e.stopPropagation()}
-          className="shrink-0 p-0.5 rounded hover:bg-muted-foreground/10 text-muted-foreground hover:text-foreground transition-colors"
+          className="shrink-0 p-0.5 rounded-none hover:bg-muted-foreground/10 text-muted-foreground hover:text-foreground transition-colors"
           title={expanded ? "Collapse prompt" : "Show full prompt"}
         >
           {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}

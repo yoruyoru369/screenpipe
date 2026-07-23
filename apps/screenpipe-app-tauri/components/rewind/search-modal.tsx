@@ -365,7 +365,7 @@ function UiEventItem({ evt, onNavigate }: { evt: UiEventResult; onNavigate: () =
 
   return (
     <div
-      className="cursor-pointer border border-border rounded p-2 hover:border-foreground/50 transition-colors"
+      className="cursor-pointer border border-border rounded-none p-2 hover:border-foreground/50 transition-colors"
     >
       <div className="flex items-start justify-between gap-3">
         <div
@@ -1384,7 +1384,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
           {isLoadingTranscriptions && (
             <div className="space-y-3">
               {Array.from({ length: 5 }).map((_, i) => (
-                <div key={i} className="bg-muted animate-pulse rounded p-3 h-16" />
+                <div key={i} className="bg-muted animate-pulse rounded-none p-3 h-16" />
               ))}
             </div>
           )}
@@ -1401,7 +1401,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               <button
                 onClick={() => { setSpeakerAppFilter(null); setSelectedTranscriptionIndex(0); }}
                 className={cn(
-                  "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                  "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                   !speakerAppFilter
                     ? "bg-foreground text-background border-foreground"
                     : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1414,7 +1414,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   key={app}
                   onClick={() => { setSpeakerAppFilter(speakerAppFilter === app ? null : app); setSelectedTranscriptionIndex(0); }}
                   className={cn(
-                    "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                    "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                     speakerAppFilter === app
                       ? "bg-foreground text-background border-foreground"
                       : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1423,7 +1423,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={`http://localhost:11435/app-icon?name=${encodeURIComponent(app)}`}
-                    className="w-4 h-4 rounded-sm object-contain"
+                    className="w-4 h-4 rounded-none object-contain"
                     alt=""
                     onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                   />
@@ -1439,7 +1439,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               <button
                 onClick={() => { setSpeakerTimeFilter(null); setSelectedTranscriptionIndex(0); }}
                 className={cn(
-                  "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                  "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                   !speakerTimeFilter
                     ? "bg-foreground text-background border-foreground"
                     : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1453,7 +1453,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   key={range.dateKey}
                   onClick={() => { setSpeakerTimeFilter(speakerTimeFilter === range.dateKey ? null : range.dateKey); setSelectedTranscriptionIndex(0); }}
                   className={cn(
-                    "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1 whitespace-nowrap shrink-0",
+                    "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1 whitespace-nowrap shrink-0",
                     speakerTimeFilter === range.dateKey
                       ? "bg-foreground text-background border-foreground"
                       : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1487,7 +1487,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       }
                     }}
                     className={cn(
-                      "cursor-pointer rounded overflow-hidden border transition-all duration-150",
+                      "cursor-pointer rounded-none overflow-hidden border transition-all duration-150",
                       index === selectedTranscriptionIndex
                         ? "ring-2 ring-foreground border-foreground scale-[1.02] shadow-lg z-10"
                         : "border-border hover:border-foreground/50"
@@ -1550,7 +1550,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   key={key}
                   onClick={() => { setContentFilter(key); setSelectedIndex(0); setSelectedChatIndex(0); setHoveredIndex(null); }}
                   className={cn(
-                    "inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full border transition-colors",
+                    "inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-none border transition-colors",
                     contentFilter === key
                       ? "bg-foreground text-background border-foreground"
                       : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1586,7 +1586,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       key={t}
                       onClick={() => setQuery(`#${t}`)}
                       className={cn(
-                        "inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-full border transition-colors cursor-pointer",
+                        "inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-none border transition-colors cursor-pointer",
                         isActive
                           ? "bg-foreground text-background border-foreground"
                           : "border-border text-foreground/70 hover:bg-muted hover:border-foreground/30"
@@ -1617,7 +1617,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                     onNavigateToTimestamp(frame.timestamp, frame.frame_id, queryTokens, resultsJson, query);
                     if (!embedded) onClose();
                   }}
-                  className="cursor-pointer rounded overflow-hidden border border-border hover:border-foreground/50 transition-all duration-150"
+                  className="cursor-pointer rounded-none overflow-hidden border border-border hover:border-foreground/50 transition-all duration-150"
                 >
                   <FrameThumbnail
                     key={frame.frame_id}
@@ -1638,7 +1638,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       {frame.tag_names.map((t) => (
                         <span
                           key={t}
-                          className="px-1.5 py-0.5 text-[10px] rounded-full bg-foreground/8 text-foreground/60"
+                          className="px-1.5 py-0.5 text-[10px] rounded-none bg-foreground/8 text-foreground/60"
                         >
                           {t}
                         </span>
@@ -1654,7 +1654,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
           {isTagSearch && isSearchingTags && tagResults.length === 0 && allTags.length === 0 && (
             <div className="space-y-3">
               {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="bg-muted animate-pulse rounded p-3 h-12" />
+                <div key={i} className="bg-muted animate-pulse rounded-none p-3 h-12" />
               ))}
             </div>
           )}
@@ -1672,7 +1672,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
           {isPeopleSearch && isSearchingSpeakers && speakerResults.length === 0 && (
             <div className="space-y-3">
               {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="bg-muted animate-pulse rounded p-3 h-10" />
+                <div key={i} className="bg-muted animate-pulse rounded-none p-3 h-10" />
               ))}
             </div>
           )}
@@ -1692,12 +1692,12 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               {/* Skeleton filter chips */}
               <div className="flex gap-1.5 mb-2 overflow-hidden">
                 {Array.from({ length: 5 }).map((_, i) => (
-                  <div key={i} className="h-6 bg-muted animate-pulse rounded-full shrink-0" style={{ width: `${60 + i * 12}px` }} />
+                  <div key={i} className="h-6 bg-muted animate-pulse rounded-none shrink-0" style={{ width: `${60 + i * 12}px` }} />
                 ))}
               </div>
               <div className="flex gap-1.5 mb-3 overflow-hidden">
                 {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="h-6 bg-muted animate-pulse rounded-full shrink-0" style={{ width: `${50 + i * 15}px` }} />
+                  <div key={i} className="h-6 bg-muted animate-pulse rounded-none shrink-0" style={{ width: `${50 + i * 15}px` }} />
                 ))}
               </div>
               {/* Skeleton thumbnail grid */}
@@ -1708,11 +1708,11 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                 }}
               >
                 {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="bg-muted animate-pulse rounded overflow-hidden">
+                  <div key={i} className="bg-muted animate-pulse rounded-none overflow-hidden">
                     <div className="aspect-video" />
                     <div className="p-2 space-y-1">
-                      <div className="h-3 bg-muted-foreground/20 rounded w-16" />
-                      <div className="h-2 bg-muted-foreground/20 rounded w-24" />
+                      <div className="h-3 bg-muted-foreground/20 rounded-none w-16" />
+                      <div className="h-2 bg-muted-foreground/20 rounded-none w-24" />
                     </div>
                   </div>
                 ))}
@@ -1735,7 +1735,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       setSelectedSpeaker(speaker);
                       setSelectedTranscriptionIndex(0);
                     }}
-                    className="flex items-center gap-2 px-3 py-2 border border-border rounded-md
+                    className="flex items-center gap-2 px-3 py-2 border border-border rounded-none
                       hover:bg-muted hover:border-foreground/30 transition-colors cursor-pointer"
                   >
                     <User className="w-3.5 h-3.5 text-muted-foreground" />
@@ -1760,7 +1760,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                     <button
                       key={chat.id}
                       onClick={() => { void emit("chat-load-conversation", { conversationId: chat.id }); onClose(); }}
-                      className="w-full flex items-center gap-2.5 px-2 py-2 rounded text-left transition-colors hover:bg-muted/50"
+                      className="w-full flex items-center gap-2.5 px-2 py-2 rounded-none text-left transition-colors hover:bg-muted/50"
                     >
                       <MessageSquare className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
                       <span className="text-sm truncate">{chat.title}</span>
@@ -1788,7 +1788,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               {isLoadingChats && (
                 <div className="space-y-2">
                   {Array.from({ length: 5 }).map((_, i) => (
-                    <div key={i} className="bg-muted animate-pulse rounded p-3 h-10" />
+                    <div key={i} className="bg-muted animate-pulse rounded-none p-3 h-10" />
                   ))}
                 </div>
               )}
@@ -1825,7 +1825,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                             }}
                             onMouseEnter={() => setSelectedChatIndex(absoluteIdx)}
                             className={cn(
-                              "w-full flex items-center gap-2.5 px-2 py-2 rounded text-left transition-colors",
+                              "w-full flex items-center gap-2.5 px-2 py-2 rounded-none text-left transition-colors",
                               isSelected ? "bg-muted" : "hover:bg-muted/50"
                             )}
                           >
@@ -1855,11 +1855,11 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                 }}
               >
                 {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="bg-muted animate-pulse rounded overflow-hidden">
+                  <div key={i} className="bg-muted animate-pulse rounded-none overflow-hidden">
                     <div className="aspect-video" />
                     <div className="p-2 space-y-1">
-                      <div className="h-3 bg-muted-foreground/20 rounded w-16" />
-                      <div className="h-2 bg-muted-foreground/20 rounded w-24" />
+                      <div className="h-3 bg-muted-foreground/20 rounded-none w-16" />
+                      <div className="h-2 bg-muted-foreground/20 rounded-none w-24" />
                     </div>
                   </div>
                 ))}
@@ -1915,7 +1915,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   <button
                     onClick={() => { setAppFilter(null); setSelectedIndex(0); }}
                     className={cn(
-                      "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                      "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                       !appFilter
                         ? "bg-foreground text-background border-foreground"
                         : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1928,7 +1928,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       key={app}
                       onClick={() => { const newApp = appFilter === app ? null : app; setAppFilter(newApp); if (newApp) setDomainFilter(null); setSelectedIndex(0); }}
                       className={cn(
-                        "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                        "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                         appFilter === app
                           ? "bg-foreground text-background border-foreground"
                           : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1937,7 +1937,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src={`http://localhost:11435/app-icon?name=${encodeURIComponent(app)}`}
-                        className="w-4 h-4 rounded-sm object-contain"
+                        className="w-4 h-4 rounded-none object-contain"
                         alt=""
                         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                       />
@@ -1954,7 +1954,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   <button
                     onClick={() => { setDomainFilter(null); setSelectedIndex(0); }}
                     className={cn(
-                      "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                      "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                       !domainFilter
                         ? "bg-foreground text-background border-foreground"
                         : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1967,7 +1967,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       key={domain}
                       onClick={() => { setDomainFilter(domainFilter === domain ? null : domain); setSelectedIndex(0); }}
                       className={cn(
-                        "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                        "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                         domainFilter === domain
                           ? "bg-foreground text-background border-foreground"
                           : "border-border text-muted-foreground hover:border-foreground/40"
@@ -1991,7 +1991,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       searchKeywords(debouncedQuery, { limit: OCR_PAGE_SIZE, offset: 0 });
                     }}
                     className={cn(
-                      "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
+                      "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0",
                       !timeFilter
                         ? "bg-foreground text-background border-foreground"
                         : "border-border text-muted-foreground hover:border-foreground/40"
@@ -2019,7 +2019,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                         }
                       }}
                       className={cn(
-                        "px-2.5 py-1 text-[11px] rounded-full border transition-colors flex items-center gap-1 whitespace-nowrap shrink-0",
+                        "px-2.5 py-1 text-[11px] rounded-none border transition-colors flex items-center gap-1 whitespace-nowrap shrink-0",
                         timeFilter === range.dateKey
                           ? "bg-foreground text-background border-foreground"
                           : "border-border text-muted-foreground hover:border-foreground/40"
@@ -2051,7 +2051,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       onMouseEnter={() => setHoveredIndex(index)}
                       onMouseLeave={() => setHoveredIndex(null)}
                       className={cn(
-                        "cursor-pointer rounded overflow-hidden border transition-all duration-150",
+                        "cursor-pointer rounded-none overflow-hidden border transition-all duration-150",
                         isActive
                           ? "ring-2 ring-foreground border-foreground scale-[1.02] shadow-lg z-10"
                           : "border-border hover:border-foreground/50"
@@ -2070,7 +2070,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                           />
                         )}
                         {groupSize > 1 && (
-                          <span className="absolute top-1.5 right-1.5 px-1.5 py-0.5 text-[10px] font-medium bg-black/70 text-white rounded">
+                          <span className="absolute top-1.5 right-1.5 px-1.5 py-0.5 text-[10px] font-medium bg-black/70 text-white rounded-none">
                             {groupSize} frames
                           </span>
                         )}
@@ -2136,7 +2136,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                         <button
                           key={chat.id}
                           onClick={() => { void emit("chat-load-conversation", { conversationId: chat.id }); onClose(); }}
-                          className="w-full flex items-center gap-2.5 px-2 py-2 rounded text-left transition-colors hover:bg-muted/50"
+                          className="w-full flex items-center gap-2.5 px-2 py-2 rounded-none text-left transition-colors hover:bg-muted/50"
                         >
                           <MessageSquare className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
                           <span className="text-sm text-foreground/80 truncate">{chat.title}</span>
@@ -2158,7 +2158,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       <button
                         key={suggestion}
                         onClick={() => setQuery(suggestion)}
-                        className="px-3 py-1.5 text-sm border border-border rounded-md
+                        className="px-3 py-1.5 text-sm border border-border rounded-none
                           hover:bg-muted hover:border-foreground/30 transition-colors
                           text-foreground/80 hover:text-foreground cursor-pointer"
                       >
@@ -2185,7 +2185,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
     return (
       <div className={cn(
         "flex flex-col bg-card/95 backdrop-blur-xl",
-        standalone ? "h-full rounded-xl border border-border/50 shadow-2xl overflow-hidden" : "h-full",
+        standalone ? "h-full rounded-none border border-border/50 shadow-lg shadow-black/5 overflow-hidden" : "h-full",
       )}>
         {/* Search Input — Raycast-style large input */}
         <div className={cn(
@@ -2220,7 +2220,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
           {query && (
             <button
               onClick={() => setQuery("")}
-              className="p-1 hover:bg-muted rounded"
+              className="p-1 hover:bg-muted rounded-none"
             >
               <X className="w-3.5 h-3.5 text-muted-foreground" />
             </button>
@@ -2301,7 +2301,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
       />
 
       {/* Modal */}
-      <div className="relative w-full max-w-4xl mx-4 bg-card border border-border shadow-2xl overflow-hidden rounded-lg isolate">
+      <div className="relative w-full max-w-4xl mx-4 bg-card border border-border shadow-2xl overflow-hidden rounded-none isolate">
         {/* Search Input */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
           <Search className="w-4 h-4 text-muted-foreground flex-shrink-0" />
@@ -2328,7 +2328,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
           {query && (
             <button
               onClick={() => setQuery("")}
-              className="p-1 hover:bg-muted rounded"
+              className="p-1 hover:bg-muted rounded-none"
             >
               <X className="w-3 h-3 text-muted-foreground" />
             </button>

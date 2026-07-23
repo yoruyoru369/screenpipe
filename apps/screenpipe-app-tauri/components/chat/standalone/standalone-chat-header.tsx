@@ -99,7 +99,7 @@ export function StandaloneChatHeader({
       }}
     >
       {!isMac && !className && (
-        <div className="absolute top-0 left-0 w-8 h-8 border-l-2 border-t-2 border-foreground/10 rounded-tl-lg" />
+        <div className="absolute top-0 left-0 w-8 h-8 border-l-2 border-t-2 border-foreground/10 rounded-none" />
       )}
       {!hideInlineHistory && (
         <Button
@@ -145,7 +145,7 @@ export function StandaloneChatHeader({
           </Button>
           {!settings.disabledShortcuts.includes("showChatShortcut") &&
           settings.showChatShortcut ? (
-            <kbd suppressHydrationWarning className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-muted-foreground bg-muted/50 border border-border/50 rounded">
+            <kbd suppressHydrationWarning className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-muted-foreground bg-muted/50 border border-border/50 rounded-none">
               {formatShortcutDisplay(settings.showChatShortcut, isMac)}
             </kbd>
           ) : null}

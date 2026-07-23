@@ -895,7 +895,7 @@ function errorTypeBadge(errorType: string | null) {
   };
   const cls = colors[errorType] || "bg-muted text-muted-foreground";
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${cls}`}>
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-none text-[10px] font-medium ${cls}`}>
       {errorType.replace("_", " ")}
     </span>
   );
@@ -2076,7 +2076,7 @@ export function PipesSection() {
     <div className="space-y-4" data-testid="section-pipes">
       {/* Toolbar: swaps between search bar and selection bar */}
       {selectMode ? (
-        <div className="flex items-center gap-2 px-3 py-2 border border-border rounded-md bg-muted/50">
+        <div className="flex items-center gap-2 px-3 py-2 border border-border rounded-none bg-muted/50">
           <Checkbox
             checked={filteredPipes.length > 0 && selectedPipes.size === filteredPipes.length ? true : selectedPipes.size > 0 ? "indeterminate" : false}
             onCheckedChange={(checked) => {
@@ -2189,9 +2189,9 @@ export function PipesSection() {
                   <Skeleton className="h-4 w-4" />
                   <Skeleton className="h-4 w-32" />
                   <div className="flex-1" />
-                  <Skeleton className="h-5 w-20 rounded-full" />
-                  <Skeleton className="h-8 w-8 rounded-md" />
-                  <Skeleton className="h-5 w-9 rounded-full" />
+                  <Skeleton className="h-5 w-20 rounded-none" />
+                  <Skeleton className="h-8 w-8 rounded-none" />
+                  <Skeleton className="h-5 w-9 rounded-none" />
                 </div>
                 <div className="mt-3 space-y-1.5">
                   {[1, 2, 3].map((j) => (
@@ -2261,7 +2261,7 @@ export function PipesSection() {
                 <p>no manual pipes installed</p>
                 <p className="text-sm mt-2">
                   manual pipes use{" "}
-                  <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                  <code className="text-xs bg-muted px-1 py-0.5 rounded-none">
                     schedule: manual
                   </code>
                   {" "}in their frontmatter
@@ -2380,7 +2380,7 @@ export function PipesSection() {
                     pipeFavorites.toggle(pipe.config.name);
                   }}
                   className={cn(
-                    "shrink-0 p-0.5 rounded hover:bg-accent/60 transition-colors",
+                    "shrink-0 p-0.5 rounded-none hover:bg-accent/60 transition-colors",
                     pipeFavorites.isFavorite(pipe.config.name)
                       ? "text-foreground"
                       : "text-muted-foreground/40 hover:text-muted-foreground"
@@ -2783,7 +2783,7 @@ export function PipesSection() {
                 if (error.type === "daily_limit" || error.type === "credits_exhausted") return null;
                 return (
                   <div className="px-4 pb-2 -mt-1">
-                    <p className="text-[11px] text-red-500/80 truncate max-w-full pl-5">
+                    <p className="text-[11px] text-neutral-500/80 truncate max-w-full pl-5">
                       {error.message}
                     </p>
                   </div>
@@ -2939,9 +2939,9 @@ export function PipesSection() {
                               {[...Array(3)].map((_, i) => (
                                 <div key={i} className="border p-2 space-y-1.5 animate-pulse">
                                   <div className="flex items-center gap-2">
-                                    <div className="h-3 w-28 bg-muted rounded" />
-                                    <div className="h-5 w-16 bg-muted rounded" />
-                                    <div className="h-3 w-12 bg-muted rounded" />
+                                    <div className="h-3 w-28 bg-muted rounded-none" />
+                                    <div className="h-5 w-16 bg-muted rounded-none" />
+                                    <div className="h-3 w-12 bg-muted rounded-none" />
                                   </div>
                                 </div>
                               ))}
@@ -2977,7 +2977,7 @@ export function PipesSection() {
                                         setCopiedExecId(exec.id);
                                         setTimeout(() => setCopiedExecId((prev) => prev === exec.id ? null : prev), 1500);
                                       }}>
-                                        {copiedExecId === exec.id ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+                                        {copiedExecId === exec.id ? <Check className="w-3.5 h-3.5 text-neutral-500" /> : <Copy className="w-3.5 h-3.5" />}
                                       </button>
                                       <button className="text-muted-foreground hover:text-foreground p-0.5" title="open in chat" onClick={async () => {
                                         // Check if the recorder already saved this execution
@@ -3014,7 +3014,7 @@ export function PipesSection() {
                                   return (
                                     <pre
                                       ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
-                                      className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto bg-muted/50 rounded p-2 font-mono"
+                                      className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto bg-muted/50 rounded-none p-2 font-mono"
                                     >
                                       {lines.slice(-200).join("")}
                                       <span className="animate-pulse">▊</span>
@@ -3052,7 +3052,7 @@ export function PipesSection() {
                                 {log.success && log.stdout && cleanPipeStdout(log.stdout) && (
                                   <div className="relative group">
                                     <button
-                                      className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-muted"
+                                      className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-none hover:bg-muted"
                                       onClick={() => {
                                         commands.copyTextToClipboard(cleanPipeStdout(log.stdout));
                                         setCopiedExecId(-(i + 1));
@@ -3060,7 +3060,7 @@ export function PipesSection() {
                                       }}
                                       title="copy"
                                     >
-                                      {copiedExecId === -(i + 1) ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
+                                      {copiedExecId === -(i + 1) ? <Check className="h-3 w-3 text-neutral-500" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
                                     </button>
                                     <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide"><MemoizedReactMarkdown className="prose prose-xs dark:prose-invert max-w-none break-words text-xs [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_p]:text-xs [&_li]:text-xs [&_code]:text-[10px]">{cleanPipeStdout(log.stdout)}</MemoizedReactMarkdown></div>
                                   </div>
@@ -3220,7 +3220,7 @@ export function PipesSection() {
                           executions.map((exec) => (
                             <div
                               key={exec.id}
-                              className="border rounded p-2 space-y-1"
+                              className="border rounded-none p-2 space-y-1"
                             >
                               <div className="flex items-center gap-2 text-xs font-mono flex-wrap">
                                 <span className="text-muted-foreground">
@@ -3284,7 +3284,7 @@ export function PipesSection() {
                                 return (
                                   <pre
                                     ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
-                                    className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto bg-muted/50 rounded p-2 font-mono"
+                                    className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto bg-muted/50 rounded-none p-2 font-mono"
                                   >
                                     {lines.slice(-200).join("")}
                                     <span className="animate-pulse">▊</span>
@@ -3311,7 +3311,7 @@ export function PipesSection() {
                             .map((log, i) => (
                               <div
                                 key={i}
-                                className="border rounded p-2 space-y-1"
+                                className="border rounded-none p-2 space-y-1"
                               >
                                 <div className="flex items-center gap-2 text-xs font-mono">
                                   <span className="text-muted-foreground">
@@ -3381,7 +3381,7 @@ export function PipesSection() {
             <button
               type="submit"
               aria-label="create pipe"
-              className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-none border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
             >
               <ArrowRight className="h-4 w-4" />
             </button>
@@ -3468,7 +3468,7 @@ export function PipesSection() {
               </span>
             </DialogDescription>
           </DialogHeader>
-          <div className="flex items-start gap-2 p-3 rounded-md bg-destructive/10 border border-destructive/20">
+          <div className="flex items-start gap-2 p-3 rounded-none bg-destructive/10 border border-destructive/20">
             <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />
             <p className="text-sm text-muted-foreground">
               you have local edits to this pipe. updating will overwrite your prompt changes.

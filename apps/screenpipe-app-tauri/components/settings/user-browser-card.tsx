@@ -65,26 +65,26 @@ export function UserBrowserCard() {
     switch (status.kind) {
       case "loading":
         return (
-          <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-full inline-flex items-center gap-1">
+          <span className="px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded-none inline-flex items-center gap-1">
             <Loader2 className="h-3 w-3 animate-spin" />
             checking
           </span>
         );
       case "connected":
         return (
-          <span className="px-2 py-0.5 text-xs font-medium bg-green-500/10 text-green-600 dark:text-green-400 rounded-full">
+          <span className="px-2 py-0.5 text-xs font-medium bg-neutral-500/10 text-neutral-600 dark:text-neutral-400 rounded-none">
             connected
           </span>
         );
       case "disconnected":
         return (
-          <span className="px-2 py-0.5 text-xs font-medium bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 rounded-full">
+          <span className="px-2 py-0.5 text-xs font-medium bg-neutral-500/10 text-neutral-600 dark:text-neutral-400 rounded-none">
             extension not installed or not running
           </span>
         );
       case "error":
         return (
-          <span className="px-2 py-0.5 text-xs font-medium bg-red-500/10 text-red-600 dark:text-red-400 rounded-full">
+          <span className="px-2 py-0.5 text-xs font-medium bg-neutral-500/10 text-neutral-600 dark:text-neutral-400 rounded-none">
             unreachable
           </span>
         );
@@ -95,7 +95,7 @@ export function UserBrowserCard() {
     <Card className="border-border bg-card overflow-hidden">
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
-          <div className="flex-shrink-0 h-10 w-10 rounded-xl bg-muted flex items-center justify-center">
+          <div className="flex-shrink-0 h-10 w-10 rounded-none bg-muted flex items-center justify-center">
             {/* Same globe glyph used in the connections tile grid — keeps
                 identity consistent across the settings surface. */}
             <svg

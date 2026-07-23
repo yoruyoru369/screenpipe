@@ -169,15 +169,15 @@ export function ReferralCard() {
       <div className="space-y-1.5 text-sm text-muted-foreground mb-4">
         <p className="font-medium text-foreground text-xs uppercase tracking-wide">how it works</p>
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono bg-muted rounded-full w-5 h-5 flex items-center justify-center shrink-0">1</span>
+          <span className="text-xs font-mono bg-muted rounded-none w-5 h-5 flex items-center justify-center shrink-0">1</span>
           share your invite link
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono bg-muted rounded-full w-5 h-5 flex items-center justify-center shrink-0">2</span>
+          <span className="text-xs font-mono bg-muted rounded-none w-5 h-5 flex items-center justify-center shrink-0">2</span>
           they sign up and get <span className="font-medium text-foreground">10% off</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono bg-muted rounded-full w-5 h-5 flex items-center justify-center shrink-0">3</span>
+          <span className="text-xs font-mono bg-muted rounded-none w-5 h-5 flex items-center justify-center shrink-0">3</span>
           you get <span className="font-medium text-foreground">1 month free</span> when they subscribe
         </div>
       </div>

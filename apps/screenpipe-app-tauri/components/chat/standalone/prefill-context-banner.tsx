@@ -24,12 +24,12 @@ export function PrefillContextBanner({
               <img
                 src={appendAuthToken(`${getApiBaseUrl()}/frames/${prefill.frameId}`)}
                 alt="Attached frame"
-                className="w-16 h-12 object-cover rounded border border-border/50"
+                className="w-16 h-12 object-cover rounded-none border border-border/50"
               />
               <button
                 type="button"
                 onClick={prefill.onClearFrame}
-                className="absolute -top-1 -right-1 p-0.5 bg-background rounded-full border border-border shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                className="absolute -top-1 -right-1 p-0.5 bg-background rounded-none border border-border shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
               >
                 <X className="w-2.5 h-2.5 text-muted-foreground" />
               </button>
@@ -51,7 +51,7 @@ export function PrefillContextBanner({
         <button
           type="button"
           onClick={prefill.onClear}
-          className="p-1 hover:bg-muted rounded text-muted-foreground"
+          className="p-1 hover:bg-muted rounded-none text-muted-foreground"
         >
           <X className="w-3 h-3" />
         </button>

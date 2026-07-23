@@ -70,7 +70,7 @@ export function RecentChatSwitcher({
             exit={{ opacity: 0, scale: 0.985, y: 8 }}
             transition={{ duration: 0.14, ease: "easeOut" }}
             className={cn(
-              "pointer-events-auto overflow-hidden rounded-[22px] border border-border/60 bg-background/95 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-xl",
+              "pointer-events-auto overflow-hidden rounded-none border border-border/60 bg-background/95 shadow-[0_18px_50px_rgba(0,0,0,0.22)] backdrop-blur-xl",
               hasSessions
                 ? "w-[min(30rem,calc(100vw-2rem))] max-h-[min(24rem,68vh)]"
                 : "w-[min(22rem,calc(100vw-2rem))]"
@@ -103,7 +103,7 @@ export function RecentChatSwitcher({
                       type="button"
                       data-switcher-id={session.id}
                       className={cn(
-                        "flex w-full items-center justify-between gap-4 rounded-2xl px-4 py-3 text-left transition-colors",
+                        "flex w-full items-center justify-between gap-4 rounded-none px-4 py-3 text-left transition-colors",
                         isSelected ? "bg-muted/55 text-foreground" : "text-foreground/80"
                       )}
                       onMouseEnter={() => onHoverSelect(session.id)}

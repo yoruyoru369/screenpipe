@@ -31,7 +31,7 @@ import {
 
 const MODEL_FIT_CLASS: Record<PiExtensionModelFit, string> = {
   "local-friendly": "border-border bg-muted/40 text-foreground",
-  "strong-model": "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300",
+  "strong-model": "border-neutral-500/40 bg-neutral-500/10 text-neutral-800 dark:text-neutral-300",
   "cloud-preferred": "border-destructive/40 bg-destructive/10 text-destructive",
 };
 
@@ -57,7 +57,7 @@ function PiExtensionRow({
   onToggle: (checked: boolean) => void;
 }) {
   return (
-    <div className="rounded-md border border-border bg-card p-3">
+    <div className="rounded-none border border-border bg-card p-3">
       <div className="flex items-start gap-3">
         <Switch
           checked={enabled}
@@ -72,18 +72,18 @@ function PiExtensionRow({
               {item.name}
             </h4>
             <span
-              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${MODEL_FIT_CLASS[item.modelFit]}`}
+              className={`rounded-none border px-2 py-0.5 text-[10px] font-medium ${MODEL_FIT_CLASS[item.modelFit]}`}
             >
               {item.modelFitLabel}
             </span>
             {enabled && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1 rounded-none border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
                 <CheckCircle2 className="h-3 w-3" />
                 on
               </span>
             )}
             {stale && (
-              <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-800 dark:text-amber-300">
+              <span className="rounded-none border border-neutral-500/40 bg-neutral-500/10 px-2 py-0.5 text-[10px] text-neutral-800 dark:text-neutral-300">
                 repair needed
               </span>
             )}
@@ -92,7 +92,7 @@ function PiExtensionRow({
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             {item.details}
           </p>
-          <div className="rounded-md border border-border bg-muted/25 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+          <div className="rounded-none border border-border bg-muted/25 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
             {item.modelFitCopy}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
@@ -313,7 +313,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
           </Button>
         </div>
 
-        <div className="rounded-md border border-border bg-muted/25 p-3">
+        <div className="rounded-none border border-border bg-muted/25 p-3">
           <div className="flex items-start gap-2">
             <ShieldAlert className="mt-0.5 h-4 w-4 text-muted-foreground" />
             <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
@@ -339,7 +339,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
+        <div className="flex items-start gap-2 rounded-none border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="break-words">{error}</span>
         </div>
@@ -369,7 +369,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
               );
             })}
             {visibleItems.length === 0 && (
-              <div className="rounded-md border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
+              <div className="rounded-none border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
                 No matching curated Pi extensions.
               </div>
             )}
@@ -387,7 +387,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
               </span>
             </div>
             {registryError && (
-              <div className="rounded-md border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
+              <div className="rounded-none border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
                 Could not search npm right now. Curated packages are still available.
               </div>
             )}
@@ -406,12 +406,12 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
               );
             })}
             {!registryLoading && !registryError && visibleRegistryItems.length === 0 && (
-              <div className="rounded-md border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
+              <div className="rounded-none border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
                 No npm Pi packages matched this search.
               </div>
             )}
             {registryLoading && visibleRegistryItems.length === 0 && (
-              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
+              <div className="flex items-center gap-2 rounded-none border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 searching npm packages...
               </div>
@@ -419,7 +419,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
           </div>
 
           {visibleItems.length === 0 && visibleRegistryItems.length === 0 && registryError && (
-            <div className="rounded-md border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
+            <div className="rounded-none border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
               Try another search or refresh the catalog.
             </div>
           )}
@@ -433,7 +433,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
             {unknownPackages.map((pkg) => (
               <div
                 key={pkg.source}
-                className="flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-2 text-xs"
+                className="flex items-center justify-between gap-2 rounded-none border border-border px-2.5 py-2 text-xs"
               >
                 <span className="min-w-0 truncate font-mono">{pkg.source}</span>
                 <div className="flex shrink-0 items-center gap-2">

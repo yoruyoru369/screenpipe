@@ -98,7 +98,7 @@ export function NotificationPauseControl({
             Resume
           </button>
         ) : (
-          <span className="flex h-2 w-2 shrink-0 rounded-full bg-foreground" aria-hidden />
+          <span className="flex h-2 w-2 shrink-0 rounded-none bg-foreground" aria-hidden />
         )}
       </div>
 

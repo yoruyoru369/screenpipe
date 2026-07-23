@@ -215,8 +215,8 @@ export const MediaComponent = memo(function MediaComponent({
 
   if (error) {
     return (
-      <div className="w-full p-4 bg-red-100 border border-red-300 rounded-md">
-        <p className="text-red-700">{error}</p>
+      <div className="w-full p-4 bg-neutral-100 border border-neutral-300 rounded-none">
+        <p className="text-neutral-700">{error}</p>
         {renderFileLink()}
       </div>
     );
@@ -227,8 +227,8 @@ export const MediaComponent = memo(function MediaComponent({
       <div
         className={cn(
           isAudio
-            ? "w-full h-[84px] bg-muted animate-pulse rounded-md flex items-center justify-center"
-            : "w-full h-48 bg-muted animate-pulse rounded-md flex items-center justify-center",
+            ? "w-full h-[84px] bg-muted animate-pulse rounded-none flex items-center justify-center"
+            : "w-full h-48 bg-muted animate-pulse rounded-none flex items-center justify-center",
           className
         )}
       >
@@ -240,7 +240,7 @@ export const MediaComponent = memo(function MediaComponent({
   return (
     <div className={cn("w-full max-w-2xl text-center isolate", className)}>
       {isAudio ? (
-        <div className="relative z-10 bg-muted p-4 rounded-md min-h-[84px] flex items-center">
+        <div className="relative z-10 bg-muted p-4 rounded-none min-h-[84px] flex items-center">
           <audio ref={(el) => { mediaElementRef.current = el; }} controls className="w-full pointer-events-auto">
             <source src={mediaSrc} type={mimeType || "audio/mpeg"} />
             Your browser does not support the audio element.
@@ -248,7 +248,7 @@ export const MediaComponent = memo(function MediaComponent({
         </div>
       ) : (
         <div className="relative z-10">
-          <video ref={(el) => { mediaElementRef.current = el; }} controls className="w-full rounded-md pointer-events-auto">
+          <video ref={(el) => { mediaElementRef.current = el; }} controls className="w-full rounded-none pointer-events-auto">
             <source src={mediaSrc} type='video/mp4; codecs="hvc1"' />
             <source src={mediaSrc} type='video/mp4; codecs="hvec"' />
             <source src={mediaSrc} type="video/mp4" />

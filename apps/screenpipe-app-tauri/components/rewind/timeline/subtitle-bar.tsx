@@ -146,7 +146,7 @@ export function SubtitleBar({ frames, currentIndex, isPlaying, onClick, transcri
 						e.stopPropagation();
 						setIsCollapsed(false);
 					}}
-					className="flex items-center gap-1.5 px-2.5 py-1 bg-background/80 backdrop-blur-sm rounded-full border border-border/50 shadow-sm hover:bg-background/90 hover:border-border hover:shadow-md transition-all duration-200 text-muted-foreground hover:text-foreground"
+					className="flex items-center gap-1.5 px-2.5 py-1 bg-background/80 backdrop-blur-sm rounded-none border border-border/50 shadow-sm hover:bg-background/90 hover:border-border hover:shadow-md transition-all duration-200 text-muted-foreground hover:text-foreground"
 					title="Show captions"
 				>
 					<MessageSquareText className="w-3.5 h-3.5" />
@@ -170,7 +170,7 @@ export function SubtitleBar({ frames, currentIndex, isPlaying, onClick, transcri
 						e.stopPropagation();
 						setIsCollapsed(true);
 					}}
-					className="px-2 py-0.5 rounded-full bg-black/60 hover:bg-black/80 text-white/70 hover:text-white text-[10px] font-medium backdrop-blur-sm transition-colors flex items-center gap-1"
+					className="px-2 py-0.5 rounded-none bg-black/60 hover:bg-black/80 text-white/70 hover:text-white text-[10px] font-medium backdrop-blur-sm transition-colors flex items-center gap-1"
 					title="Hide captions"
 				>
 					<X className="w-3 h-3" />
@@ -179,15 +179,15 @@ export function SubtitleBar({ frames, currentIndex, isPlaying, onClick, transcri
 			</div>
 			<div
 				ref={scrollRef}
-				className="flex flex-col gap-1 px-3 py-2 bg-background/80 backdrop-blur-sm rounded border border-border/50 shadow-sm overflow-hidden transition-all duration-200 group-hover:bg-background/90 group-hover:border-border group-hover:shadow-md"
+				className="flex flex-col gap-1 px-3 py-2 bg-background/80 backdrop-blur-sm rounded-none border border-border/50 shadow-sm overflow-hidden transition-all duration-200 group-hover:bg-background/90 group-hover:border-border group-hover:shadow-md"
 			>
 
 				{/* Transcription status indicator */}
 				{transcriptionPaused && (
-					<div className="flex items-center gap-1.5 text-[10px] text-amber-500/80">
+					<div className="flex items-center gap-1.5 text-[10px] text-neutral-500/80">
 						<span className="relative flex h-1.5 w-1.5">
-							<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-							<span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-500"></span>
+							<span className="animate-ping absolute inline-flex h-full w-full rounded-none bg-neutral-400 opacity-75"></span>
+							<span className="relative inline-flex rounded-none h-1.5 w-1.5 bg-neutral-500"></span>
 						</span>
 						<span>transcription paused{meetingApp ? ` (${meetingApp})` : ""}</span>
 					</div>

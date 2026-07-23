@@ -192,13 +192,13 @@ function McpSection({ name, mcp }: { name: string; mcp: AgentCardProps["mcp"] })
         same machine as screenpipe.
       </p>
       <p className="text-xs text-muted-foreground">
-        1. Open <code className="bg-muted px-1 rounded">{mcp.configPath}</code>
+        1. Open <code className="bg-muted px-1 rounded-none">{mcp.configPath}</code>
       </p>
       <p className="text-xs text-muted-foreground">
         2. Merge this {mcp.format.toUpperCase()} block (preserve indentation):
       </p>
       <div className="relative group">
-        <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">
+        <pre className="bg-muted border border-border rounded-none p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">
           {mcp.snippet}
         </pre>
         <Button
@@ -240,7 +240,7 @@ function SkillSection({ name, skills }: { name: string; skills: SkillVariant[] }
             <button
               key={s.id}
               onClick={() => setActiveId(s.id)}
-              className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+              className={`px-2.5 py-1 text-xs rounded-none border transition-colors ${
                 s.id === active.id
                   ? "bg-foreground text-background border-foreground"
                   : "border-border text-muted-foreground hover:bg-muted"
@@ -334,7 +334,7 @@ function SkillVariantBody({ name, variant }: { name: string; variant: SkillVaria
               One-liner install:
             </p>
             <div className="relative group">
-              <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">
+              <pre className="bg-muted border border-border rounded-none p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">
                 {variant.cliInstall}
               </pre>
               <Button
@@ -381,8 +381,8 @@ function SkillVariantBody({ name, variant }: { name: string; variant: SkillVaria
 
         {savedPath && (
           <p className="text-xs text-muted-foreground">
-            saved to <code className="bg-muted px-1 rounded">{savedPath}</code> — move to{" "}
-            <code className="bg-muted px-1 rounded">{variant.localPath}</code> and restart {name}.
+            saved to <code className="bg-muted px-1 rounded-none">{savedPath}</code> — move to{" "}
+            <code className="bg-muted px-1 rounded-none">{variant.localPath}</code> and restart {name}.
           </p>
         )}
         {saveError && <p className="text-xs text-destructive">{saveError}</p>}
@@ -395,7 +395,7 @@ function SkillVariantBody({ name, variant }: { name: string; variant: SkillVaria
         </p>
         <p className="text-xs text-muted-foreground leading-relaxed">
           Copy the SKILL.md contents above and paste them into{" "}
-          <code className="bg-muted px-1 rounded">{variant.localPath}</code> on the remote
+          <code className="bg-muted px-1 rounded-none">{variant.localPath}</code> on the remote
           host. To let {name} reach the screenpipe data on <em>this</em> machine, use the{" "}
           <strong>Sync (remote)</strong> tab to push it over, or point any{" "}
           <code>localhost:3030</code> calls at this machine&apos;s IP/Tailscale name.
@@ -643,7 +643,7 @@ function RemoteSyncSection({
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground leading-relaxed">
-        Push your <code className="bg-muted px-1 rounded">~/.screenpipe</code> over
+        Push your <code className="bg-muted px-1 rounded-none">~/.screenpipe</code> over
         SFTP to the host where {agentName} runs. Use this when {agentName} lives on
         a VPS, home server, or another machine.
       </p>
@@ -664,7 +664,7 @@ function RemoteSyncSection({
                     <button
                       key={i}
                       onClick={() => selectHost(h)}
-                      className="px-2.5 py-1 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                      className="px-2.5 py-1 text-xs border border-border rounded-none hover:bg-muted transition-colors"
                     >
                       {h.alias ? (
                         <>
@@ -710,7 +710,7 @@ function RemoteSyncSection({
       ) : (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded">
+            <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded-none">
               {config.user}@{config.host}{config.port !== "22" ? `:${config.port}` : ""}
             </span>
             <button
@@ -841,7 +841,7 @@ function RemoteSyncSection({
       )}
 
       {isConfigured && (
-        <div className="px-3 py-2 bg-muted/50 border border-border rounded-md">
+        <div className="px-3 py-2 bg-muted/50 border border-border rounded-none">
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
             <span>{lastSync ? `last sync: ${lastSync}` : "not synced yet"}</span>
             {config.enabled && <span>every {config.intervalMinutes} min</span>}
@@ -1013,7 +1013,7 @@ function SecondBrainCallout({ name }: { name: string }) {
   }, [name]);
 
   return (
-    <div className="rounded-lg border border-border bg-muted/40 p-3 space-y-2">
+    <div className="rounded-none border border-border bg-muted/40 p-3 space-y-2">
       <div className="flex items-center gap-1.5">
         <Brain className="h-3.5 w-3.5 text-foreground/70" />
         <p className="text-xs font-semibold text-foreground">build a second brain</p>
@@ -1075,7 +1075,7 @@ export function AgentCard({
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={iconSrc} alt={name} className="w-10 h-10 rounded-xl" />
+            <img src={iconSrc} alt={name} className="w-10 h-10 rounded-none" />
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">

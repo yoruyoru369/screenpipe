@@ -74,7 +74,7 @@ export function ArtifactHtmlBody({
           </button>
         </div>
         {showSource ? (
-          <pre className="text-xs bg-muted/30 rounded p-2 whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto">
+          <pre className="text-xs bg-muted/30 rounded-none p-2 whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto">
             {content}
           </pre>
         ) : (

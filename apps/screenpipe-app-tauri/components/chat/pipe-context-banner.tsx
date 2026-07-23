@@ -43,7 +43,7 @@ export function PipeContextBanner({
   return (
     <div
       className={cn(
-        "flex items-center gap-2 px-3 py-1.5 mx-3 mt-2 rounded-md border border-border/50 bg-muted/30",
+        "flex items-center gap-2 px-3 py-1.5 mx-3 mt-2 rounded-none border border-border/50 bg-muted/30",
         "text-[11px] text-muted-foreground",
         className,
       )}
@@ -52,8 +52,8 @@ export function PipeContextBanner({
     >
       <span
         className={cn(
-          "inline-block h-1.5 w-1.5 rounded-full",
-          done ? "bg-muted-foreground/40" : "bg-emerald-500 animate-pulse",
+          "inline-block h-1.5 w-1.5 rounded-none",
+          done ? "bg-muted-foreground/40" : "bg-foreground animate-pulse",
         )}
       />
       <Activity className="h-3 w-3 shrink-0 opacity-60" />

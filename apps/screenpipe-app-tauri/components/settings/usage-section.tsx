@@ -373,7 +373,7 @@ export function UsageSection() {
                 </div>
                 <Skeleton className="h-4 w-12" />
               </div>
-              <Skeleton className="h-1.5 w-full rounded-full" />
+              <Skeleton className="h-1.5 w-full rounded-none" />
             </div>
           ))}
         </div>
@@ -423,7 +423,7 @@ export function UsageSection() {
       </div>
 
       {usage.length === 0 ? (
-        <div className="rounded-lg border border-dashed p-6 text-center">
+        <div className="rounded-none border border-dashed p-6 text-center">
           <p className="text-sm text-muted-foreground">
             {timeRange === "all"
               ? "No model data yet — tracking starts from your next conversation"
@@ -469,9 +469,9 @@ export function UsageSection() {
                     </span>
                   </div>
                 </div>
-                <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className="h-1.5 bg-muted rounded-none overflow-hidden">
                   <div
-                    className="h-full bg-foreground/20 rounded-full transition-all"
+                    className="h-full bg-foreground/20 rounded-none transition-all"
                     style={{ width: `${pct}%` }}
                   />
                 </div>
