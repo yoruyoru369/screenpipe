@@ -47,7 +47,7 @@ function OptionIcon({
       <img
         src={iconUrl}
         alt=""
-        className={cn("rounded-sm object-contain", className)}
+        className={cn("rounded-none object-contain", className)}
         loading="lazy"
         decoding="async"
         onLoad={(e) => {
@@ -302,7 +302,7 @@ export const MultiSelect = React.forwardRef<
             {...props}
             onClick={handleTogglePopover}
             className={cn(
-              "flex w-full p-1 rounded-md border min-h-10 h-auto items-center justify-between bg-inherit hover:bg-inherit [&_svg]:pointer-events-auto",
+              "flex w-full p-1 rounded-none border min-h-10 h-auto items-center justify-between bg-inherit hover:bg-inherit [&_svg]:pointer-events-auto",
               className
             )}
           >
@@ -420,7 +420,7 @@ export const MultiSelect = React.forwardRef<
                 >
                   <div
                     className={cn(
-                      "mr-2 flex h-4 w-4 items-center justify-center rounded-sm border border-primary",
+                      "mr-2 flex h-4 w-4 items-center justify-center rounded-none border border-primary",
                       selectedValues.length === allOptions.length
                         ? "bg-primary text-primary-foreground"
                         : "opacity-50 [&_svg]:invisible"
@@ -444,7 +444,7 @@ export const MultiSelect = React.forwardRef<
                     >
                       <div
                         className={cn(
-                          "mr-2 flex h-4 w-4 items-center justify-center rounded-sm border border-primary shrink-0",
+                          "mr-2 flex h-4 w-4 items-center justify-center rounded-none border border-primary shrink-0",
                           selectedValues.includes(option.value)
                             ? "bg-primary text-primary-foreground"
                             : "opacity-50 [&_svg]:invisible"

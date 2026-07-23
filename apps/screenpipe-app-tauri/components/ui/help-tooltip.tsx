@@ -30,7 +30,7 @@ export function HelpTooltip({ text }: { text: string }) {
 				onMouseLeave={() => setOpen(false)}
 			/>
 			{open && (
-				<div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-50 max-w-[260px] w-max rounded-md border bg-popover px-3 py-1.5 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95">
+				<div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-50 max-w-[260px] w-max rounded-none border bg-popover px-3 py-1.5 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95">
 					<p className="text-xs">{text}</p>
 				</div>
 			)}
