@@ -11,6 +11,17 @@ Read `VISION.md` before making product decisions, adding features, or changing U
 
 Refer to `DESIGN.md` before making design decisions.
 
+Desktop-app UI (apps/screenpipe-app-tauri) is enforced to DESIGN.md's
+"Black & White Geometric Minimalism" by
+`components/__tests__/design-system-compliance.test.ts` (runs in the vitest
+suite): no `rounded-{sm,md,lg,xl,2xl,3xl,full}` and no chromatic Tailwind
+palette classes (`text-red-500` etc.) anywhere under `components/` or `app/`.
+Use `rounded-none` and grayscale tokens (`neutral-*`, `foreground`, `muted`,
+or the `--success/--warning/--destructive/--info` vars — all gray) instead;
+`tailwind.config.ts` pins every borderRadius token to `var(--radius)` (= 0)
+as a backstop. Buttons stay UPPERCASE + `tracking-wide` + `duration-150`,
+dialog titles lowercase (see `components/ui/button.tsx` / `dialog.tsx`).
+
 ## File Headers
 Every source file (.rs, .ts, .tsx, .js, .jsx, .swift, .py) must include this comment at the top (below any shebangs or `use` directives that must be first):
 
