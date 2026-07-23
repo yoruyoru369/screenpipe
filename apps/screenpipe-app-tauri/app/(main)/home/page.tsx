@@ -939,7 +939,7 @@ function HomeContent() {
                   onClick={toggleSidebar}
                   aria-label={sidebarCollapsed ? "expand sidebar" : "collapse sidebar"}
                   className={cn(
-                    "p-1 rounded-md transition-colors",
+                    "p-1 rounded-none transition-colors",
                     sidebarCollapsed && activeSection === "timeline"
                       ? "backdrop-blur-sm bg-background/80 shadow-sm text-muted-foreground hover:text-foreground hover:bg-background"
                       : isTranslucent ? "vibrant-nav-item" : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
@@ -951,7 +951,7 @@ function HomeContent() {
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">
-                {sidebarCollapsed ? "expand sidebar" : "collapse sidebar"} <kbd className="ml-1 px-1 py-0.5 bg-muted rounded text-[10px]">⌘B</kbd>
+                {sidebarCollapsed ? "expand sidebar" : "collapse sidebar"} <kbd className="ml-1 px-1 py-0.5 bg-muted rounded-none text-[10px]">⌘B</kbd>
               </TooltipContent>
             </Tooltip>
 
@@ -964,7 +964,7 @@ function HomeContent() {
                     }}
                     aria-label="search"
                     className={cn(
-                      "p-1 rounded-md transition-colors",
+                      "p-1 rounded-none transition-colors",
                       isTranslucent ? "vibrant-nav-item" : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                     )}
                   >
@@ -975,7 +975,7 @@ function HomeContent() {
                   search
                   {!settings.disabledShortcuts.includes("searchShortcut") &&
                   settings.searchShortcut ? (
-                    <kbd className="ml-1 px-1 py-0.5 bg-muted rounded text-[10px]">
+                    <kbd className="ml-1 px-1 py-0.5 bg-muted rounded-none text-[10px]">
                       {formatShortcutDisplay(settings.searchShortcut, isMac)}
                     </kbd>
                   ) : null}
@@ -1027,7 +1027,7 @@ function HomeContent() {
                         }
                       }}
                       className={cn(
-                        "relative w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
+                        "relative w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-none transition-all duration-150 text-left group",
                         isActive
                           ? isTranslucent
                             ? "vibrant-nav-active"
@@ -1091,7 +1091,7 @@ function HomeContent() {
                     <button
                       onClick={() => openSettings("team")}
                       className={cn(
-                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
+                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-none transition-all duration-150 text-left group",
                         isTranslucent ? "vibrant-nav-item vibrant-nav-hover" : "hover:bg-card/50 text-muted-foreground hover:text-foreground",
                       )}
                     >
@@ -1108,7 +1108,7 @@ function HomeContent() {
                     <button
                       onClick={() => openSettings("referral")}
                       className={cn(
-                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
+                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-none transition-all duration-150 text-left group",
                         isTranslucent ? "vibrant-nav-item vibrant-nav-hover" : "hover:bg-card/50 text-muted-foreground hover:text-foreground",
                       )}
                     >
@@ -1126,7 +1126,7 @@ function HomeContent() {
                       data-testid="nav-settings"
                       onClick={() => openSettings("general")}
                       className={cn(
-                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
+                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-none transition-all duration-150 text-left group",
                         isTranslucent
                           ? "vibrant-nav-item vibrant-nav-hover"
                           : "hover:bg-card/50 text-muted-foreground hover:text-foreground",
@@ -1154,7 +1154,7 @@ function HomeContent() {
                         setActiveSection("help");
                       }}
                       className={cn(
-                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
+                        "w-full flex items-center space-x-2.5 px-2.5 py-1.5 rounded-none transition-all duration-150 text-left group",
                         isActive
                           ? isTranslucent
                             ? "vibrant-nav-active"
@@ -1189,7 +1189,7 @@ function HomeContent() {
               nowrap, so that's the FULL untruncated text width), and in a
               narrow window with the sidebar open the whole pane gets
               clipped at the right window edge instead of truncating. */}
-          <div className={cn("flex-1 min-w-0 flex flex-col h-full bg-background min-h-0 relative", isTranslucent ? "rounded-none" : "rounded-tr-lg")} data-testid="home-page">
+          <div className={cn("flex-1 min-w-0 flex flex-col h-full bg-background min-h-0 relative rounded-none")} data-testid="home-page">
             {/* ALWAYS-MOUNTED chat layer.
                 Hidden via CSS (display:none) when the user is on a non-chat
                 section, so the StandaloneChat component never unmounts. This

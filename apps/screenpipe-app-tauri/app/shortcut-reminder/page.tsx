@@ -378,7 +378,7 @@ export default function ShortcutReminderPage() {
             >
               {meeting.active && (
                 <span
-                  className="absolute rounded-full bg-white animate-pulse"
+                  className="absolute rounded-none bg-white animate-pulse"
                   style={{ top: -1, right: -1, width: `${dotPx}px`, height: `${dotPx}px` }}
                 />
               )}

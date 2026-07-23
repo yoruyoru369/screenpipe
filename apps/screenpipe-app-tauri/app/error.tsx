@@ -44,19 +44,19 @@ export default function GlobalError({
         <div className="flex gap-3">
           <button
             onClick={reset}
-            className="px-4 py-2 bg-white text-black rounded-md text-sm font-medium hover:bg-neutral-200 transition-colors"
+            className="px-4 py-2 bg-white text-black rounded-none text-sm font-medium hover:bg-neutral-200 transition-colors"
           >
             try again
           </button>
           <button
             onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-neutral-800 text-white rounded-md text-sm font-medium hover:bg-neutral-700 transition-colors"
+            className="px-4 py-2 bg-neutral-800 text-white rounded-none text-sm font-medium hover:bg-neutral-700 transition-colors"
           >
             reload
           </button>
           <button
             onClick={() => openFeedback(`App crashed: ${error.message || "unknown error"}`)}
-            className="px-4 py-2 bg-neutral-800 text-white rounded-md text-sm font-medium hover:bg-neutral-700 transition-colors"
+            className="px-4 py-2 bg-neutral-800 text-white rounded-none text-sm font-medium hover:bg-neutral-700 transition-colors"
           >
             report crash
           </button>

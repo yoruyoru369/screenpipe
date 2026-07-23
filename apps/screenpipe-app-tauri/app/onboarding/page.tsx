@@ -145,7 +145,7 @@ export default function OnboardingPage() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-background">
-        <div className="w-6 h-6 border border-foreground border-t-transparent rounded-full animate-spin" />
+        <div className="w-6 h-6 border border-foreground border-t-transparent rounded-none animate-spin" />
       </div>
     );
   }

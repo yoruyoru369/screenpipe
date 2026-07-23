@@ -490,7 +490,7 @@ function SettingsContent() {
                         data-testid={`settings-nav-${item.id}`}
                         onClick={() => setSection(item.id)}
                         className={cn(
-                          "w-full flex items-center space-x-2.5 px-3 py-2 rounded-lg text-left transition-all duration-150 group",
+                          "w-full flex items-center space-x-2.5 px-3 py-2 rounded-none text-left transition-all duration-150 group",
                           section === item.id
                             ? isTranslucent
                               ? "vibrant-nav-active"

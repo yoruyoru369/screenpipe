@@ -392,7 +392,7 @@ export default function OverlayPage() {
             <div className="w-full scrollbar-hide bg-background relative">
               {/* Subtle disconnected indicator - only show if we have data but no connection */}
               {hasAnyData && !isConnected && isServerDown && (
-                <div className="fixed top-10 right-4 z-50 flex items-center gap-2 px-3 py-1.5 bg-muted/90 backdrop-blur-sm rounded-full text-xs text-muted-foreground border">
+                <div className="fixed top-10 right-4 z-50 flex items-center gap-2 px-3 py-1.5 bg-muted/90 backdrop-blur-sm rounded-none text-xs text-muted-foreground border">
                   <WifiOff className="h-3 w-3" />
                   <span>reconnecting...</span>
                 </div>
@@ -417,7 +417,7 @@ export default function OverlayPage() {
                 {/* Header */}
                 <div className="text-center space-y-4">
                   <div className="flex flex-col items-center gap-3">
-                    <div className="w-16 h-16 rounded-full bg-destructive/20 flex items-center justify-center border border-destructive/15">
+                    <div className="w-16 h-16 rounded-none bg-destructive/20 flex items-center justify-center border border-destructive/15">
                       <AlertTriangle className="w-8 h-8 text-destructive" />
                     </div>
                     <div>
@@ -430,7 +430,7 @@ export default function OverlayPage() {
                 </div>
 
                 {/* Actions Card */}
-                <div className="bg-card border border-border rounded-lg p-6 space-y-6">
+                <div className="bg-card border border-border rounded-none p-6 space-y-6">
                   {/* Server Control */}
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
