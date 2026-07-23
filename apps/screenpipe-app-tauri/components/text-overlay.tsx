@@ -423,7 +423,7 @@ export const TextOverlay = memo(function TextOverlay({
 					>
 						{isHovered && (
 							<span
-								className="absolute left-0 whitespace-nowrap text-xs px-2 py-1 rounded shadow-lg border z-50"
+								className="absolute left-0 whitespace-nowrap text-xs px-2 py-1 rounded-none shadow-lg border z-50"
 								style={{
 									bottom: targetH + 4,
 									backgroundColor: "rgba(0, 0, 0, 0.85)",

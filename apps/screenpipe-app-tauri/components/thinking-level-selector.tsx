@@ -167,7 +167,7 @@ export function ThinkingLevelSelector({ streaming = false, sessionId = null }: T
               onClick={() => handleSetLevel(level.value)}
               disabled={isRpcLoading || piThinkingUnsupported}
               className={cn(
-                "w-full px-3 py-1.5 text-left text-sm rounded transition-colors",
+                "w-full px-3 py-1.5 text-left text-sm rounded-none transition-colors",
                 "hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed",
                 currentLevel === level.value && "bg-accent",
               )}

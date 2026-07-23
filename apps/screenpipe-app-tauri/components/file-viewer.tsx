@@ -352,7 +352,7 @@ export function ViewerFileContent({
               // transcript so a fenced block reads the same everywhere.
               ...createCodeMarkdownComponents({
                 inlineCodeClassName:
-                  "font-mono text-[12px] text-foreground bg-foreground/10 px-1 py-[1px] rounded border border-border",
+                  "font-mono text-[12px] text-foreground bg-foreground/10 px-1 py-[1px] rounded-none border border-border",
               }),
             }}
           >

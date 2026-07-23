@@ -63,7 +63,7 @@ function CategorySection({
       </div>
       <ul className="space-y-1.5 list-none pl-0">
         {items.map((item, i) => (
-          <li key={i} className="text-sm leading-relaxed pl-4 relative before:absolute before:left-0 before:top-2 before:w-1 before:h-1 before:rounded-full before:bg-foreground/30">
+          <li key={i} className="text-sm leading-relaxed pl-4 relative before:absolute before:left-0 before:top-2 before:w-1 before:h-1 before:rounded-none before:bg-foreground/30">
             {item}
           </li>
         ))}
@@ -177,7 +177,7 @@ export const ChangelogDialog: React.FC = () => {
                     const match = /language-(\w+)/.exec(className || "");
                     if (!match) {
                       return (
-                        <code className="px-1 py-0.5 rounded-sm font-mono text-sm" {...props}>
+                        <code className="px-1 py-0.5 rounded-none font-mono text-sm" {...props}>
                           {content}
                         </code>
                       );

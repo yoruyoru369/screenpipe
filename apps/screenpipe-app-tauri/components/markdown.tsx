@@ -202,7 +202,7 @@ export function createMediaAwareMarkdownComponents(
         <img
           src={imgSrc}
           alt={alt || ""}
-          className="max-w-full h-auto rounded-md my-2 border border-border"
+          className="max-w-full h-auto rounded-none my-2 border border-border"
           loading="lazy"
           onError={(e) => {
             const target = e.currentTarget;

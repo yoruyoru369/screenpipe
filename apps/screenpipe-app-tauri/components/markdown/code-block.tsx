@@ -182,7 +182,7 @@ export const MarkdownCodeBlock = React.memo(function MarkdownCodeBlock({
       data-testid="markdown-code-block"
       data-language={language || undefined}
       className={cn(
-        "group relative my-2 max-w-full overflow-hidden rounded-lg border border-border",
+        "group relative my-2 max-w-full overflow-hidden rounded-none border border-border",
         "bg-neutral-50 dark:bg-neutral-900/70 not-prose",
         className,
       )}
@@ -191,7 +191,7 @@ export const MarkdownCodeBlock = React.memo(function MarkdownCodeBlock({
         type="button"
         onClick={handleCopy}
         className={cn(
-          "absolute right-1.5 top-1.5 z-10 inline-flex items-center gap-1 rounded-md",
+          "absolute right-1.5 top-1.5 z-10 inline-flex items-center gap-1 rounded-none",
           "border border-border bg-background/90 px-2 py-1 text-[10px] font-mono uppercase tracking-wide",
           "text-muted-foreground shadow-sm transition-opacity",
           "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100",

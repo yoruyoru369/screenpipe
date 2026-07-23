@@ -185,7 +185,7 @@ export function RecordingStatus({
               aria-label={label}
               data-testid="recording-status-trigger"
               className={cn(
-                "flex items-center justify-center h-5 w-5 rounded-md transition-colors",
+                "flex items-center justify-center h-5 w-5 rounded-none transition-colors",
                 floatingOverMedia
                   ? "backdrop-blur-sm bg-background/80 shadow-sm hover:bg-background"
                   : isTranslucent ? "hover:bg-white/10" : "hover:bg-muted/60"
@@ -194,7 +194,7 @@ export function RecordingStatus({
               <span
                 aria-hidden="true"
                 className={cn(
-                  "h-2 w-2 rounded-full transition-all",
+                  "h-2 w-2 rounded-none transition-all",
                   // Drive the dot color off `currentColor` so it follows the
                   // theme on the translucent sidebar: `vibrant-sidebar-fg`
                   // resolves to black in light mode and white in dark mode
@@ -236,7 +236,7 @@ export function RecordingStatus({
               disabled={pauseLoading || (allPaused ? (isGloballyPaused && !onResumeRecording) : !onPauseRecording)}
               data-testid="recording-status-pause-all"
               title={allPaused ? "resume all recording" : "pause all screen and audio recording — resume anytime"}
-              className="flex w-full items-center justify-center gap-1.5 rounded-md bg-foreground px-2 py-1.5 text-[11px] font-medium text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex w-full items-center justify-center gap-1.5 rounded-none bg-foreground px-2 py-1.5 text-[11px] font-medium text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {allPaused
                 ? <Play aria-hidden="true" className="h-3 w-3 fill-current" />
@@ -298,7 +298,7 @@ export function RecordingStatus({
                           ? "pause recording for this device"
                           : "resume recording for this device"
                     }
-                    className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
+                    className="rounded-none px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors shrink-0"
                   >
                     {device.active ? "pause" : "resume"}
                   </button>

@@ -1049,7 +1049,7 @@ export function BrowserSidebar({
             title="Drag to resize"
           >
             <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border/60 group-hover/resize:bg-foreground/40 transition-colors" />
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-10 w-1 rounded-full bg-border group-hover/resize:bg-foreground/60 group-hover/resize:w-1.5 transition-all" />
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-10 w-1 rounded-none bg-border group-hover/resize:bg-foreground/60 group-hover/resize:w-1.5 transition-all" />
           </div>
           )}
 
@@ -1080,7 +1080,7 @@ export function BrowserSidebar({
                   <button
                     onClick={openCookieMenu}
                     title="Browser session cookies"
-                    className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                    className="p-1 rounded-none hover:bg-muted text-muted-foreground hover:text-foreground"
                   >
                     <Cookie className="h-3.5 w-3.5" />
                   </button>
@@ -1088,7 +1088,7 @@ export function BrowserSidebar({
                 <button
                   onClick={reload}
                   title="Reload"
-                  className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                  className="p-1 rounded-none hover:bg-muted text-muted-foreground hover:text-foreground"
                 >
                   <RotateCw className="h-3.5 w-3.5" />
                 </button>

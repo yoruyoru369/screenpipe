@@ -87,7 +87,7 @@ export function FilePreviewSidebar({
             <button
               onClick={revealInFinder}
               title="Reveal file"
-              className="px-2 py-1 rounded hover:bg-muted text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+              className="px-2 py-1 rounded-none hover:bg-muted text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
             >
               reveal
             </button>
@@ -97,7 +97,7 @@ export function FilePreviewSidebar({
           <button
             onClick={copyContent}
             title="Copy file content"
-            className="px-2 py-1 rounded hover:bg-muted text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+            className="px-2 py-1 rounded-none hover:bg-muted text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
           >
             {copyContentToast ? "copied" : "copy"}
           </button>
@@ -105,7 +105,7 @@ export function FilePreviewSidebar({
         <button
           onClick={copyPath}
           title="Copy file path"
-          className="px-2 py-1 rounded hover:bg-muted text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+          className="px-2 py-1 rounded-none hover:bg-muted text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
         >
           {copyPathToast ? "copied" : "path"}
         </button>

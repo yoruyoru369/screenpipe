@@ -283,7 +283,7 @@ export function PostInstallConnectionsModal({
               return (
                 <div
                   key={connId}
-                  className="border border-border rounded-lg overflow-hidden"
+                  className="border border-border rounded-none overflow-hidden"
                 >
                   <button
                     onClick={() =>
@@ -299,10 +299,10 @@ export function PostInstallConnectionsModal({
                           MCP
                         </div>
                       ) : (
-                        <div className="w-5 h-5 rounded-full border-2 border-muted-foreground/30" />
+                        <div className="w-5 h-5 rounded-none border-2 border-muted-foreground/30" />
                       )}
                       {status?.configured && (
-                        <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-foreground flex items-center justify-center">
+                        <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-none bg-foreground flex items-center justify-center">
                           <Check className="h-2 w-2 text-background" />
                         </div>
                       )}

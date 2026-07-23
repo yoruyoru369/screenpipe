@@ -213,7 +213,7 @@ function AnnouncementBanner({
             aria-label="dismiss"
             data-testid="announcement-dismiss"
             onClick={onDismiss}
-            className="rounded-sm p-1 text-muted-foreground transition-colors hover:text-foreground"
+            className="rounded-none p-1 text-muted-foreground transition-colors hover:text-foreground"
           >
             <X className="h-4 w-4" />
           </button>
@@ -267,7 +267,7 @@ function AnnouncementCard({
             aria-label="dismiss"
             data-testid="announcement-dismiss"
             onClick={onDismiss}
-            className="-mr-1 -mt-1 rounded-sm p-1 text-muted-foreground transition-colors hover:text-foreground"
+            className="-mr-1 -mt-1 rounded-none p-1 text-muted-foreground transition-colors hover:text-foreground"
           >
             <X className="h-4 w-4" />
           </button>

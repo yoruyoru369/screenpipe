@@ -841,7 +841,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
               {recentsLoading ? (
                 <div className="px-2.5 py-2 space-y-1.5">
                   {Array.from({ length: 3 }).map((_, i) => (
-                    <Skeleton key={i} className="h-6 w-full rounded-md" />
+                    <Skeleton key={i} className="h-6 w-full rounded-none" />
                   ))}
                 </div>
               ) : recents.length === 0 && pipes.length === 0 ? (
@@ -984,7 +984,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
               }}
               autoFocus
               className={cn(
-                "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none",
+                "w-full rounded-none border bg-background px-3 py-2 text-sm outline-none",
                 "focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background"
               )}
               placeholder="Chat title"
@@ -1038,7 +1038,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
               }}
               autoFocus
               className={cn(
-                "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none",
+                "w-full rounded-none border bg-background px-3 py-2 text-sm outline-none",
                 "focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background"
               )}
               placeholder="Group name"
@@ -1143,7 +1143,7 @@ export function CollapsedChatSidebarButton({
               }}
               onPointerLeave={() => setSuppressTooltip(false)}
               className={cn(
-                "w-full flex items-center justify-center px-2.5 py-1.5 rounded-lg transition-all duration-150 text-left group",
+                "w-full flex items-center justify-center px-2.5 py-1.5 rounded-none transition-all duration-150 text-left group",
                 isTranslucent
                   ? "vibrant-nav-item vibrant-nav-hover"
                   : "hover:bg-card/50 text-muted-foreground hover:text-foreground",
@@ -1285,12 +1285,12 @@ function ChatRowsSkeleton({ rows }: { rows: number }) {
       {Array.from({ length: rows }).map((_, index) => (
         <div
           key={index}
-          className="flex items-center gap-2 px-2.5 py-1 rounded-md select-none"
+          className="flex items-center gap-2 px-2.5 py-1 rounded-none select-none"
         >
-          <span className="h-1.5 w-1.5 rounded-full border border-muted-foreground/25 bg-transparent animate-pulse shrink-0" />
+          <span className="h-1.5 w-1.5 rounded-none border border-muted-foreground/25 bg-transparent animate-pulse shrink-0" />
           <Skeleton
             className={cn(
-              "h-3 rounded-sm bg-muted-foreground/15",
+              "h-3 rounded-none bg-muted-foreground/15",
               CHAT_ROW_SKELETON_WIDTHS[index % CHAT_ROW_SKELETON_WIDTHS.length]
             )}
           />
@@ -1328,7 +1328,7 @@ function Section({
         onClick={() => onCollapsedChange(!collapsed)}
         className={cn(
           // Light header row — avoid the "boxed section" look.
-          "group/section shrink-0 px-2.5 py-1 flex items-center gap-1 rounded-sm text-left",
+          "group/section shrink-0 px-2.5 py-1 flex items-center gap-1 rounded-none text-left",
           // Suppress the default macOS blue focus ring — it bleeds into the
           // adjacent animated grid during collapse and leaves a cyan stripe.
           "focus:outline-none",
@@ -1501,7 +1501,7 @@ function RecentsBody({
                 type="button"
                 onClick={() => toggleSectionCollapsed(section.key)}
                 className={cn(
-                  "group/subsection w-full px-2.5 pt-1 pb-0.5 flex items-center gap-2 text-left rounded-sm",
+                  "group/subsection w-full px-2.5 pt-1 pb-0.5 flex items-center gap-2 text-left rounded-none",
                   "hover:bg-muted/10 transition-colors"
                 )}
                 aria-expanded={!isCollapsed}
@@ -1570,7 +1570,7 @@ function PipeGroupRow({
         type="button"
         onClick={onToggleExpand}
         className={cn(
-          "group/pipe w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left select-none",
+          "group/pipe w-full flex items-center gap-2 px-2.5 py-1 rounded-none text-left select-none",
           "text-muted-foreground hover:bg-muted/20 transition-colors"
         )}
         aria-expanded={expanded}
@@ -1954,7 +1954,7 @@ export function SidebarChatRow({
       <ContextMenuTrigger asChild disabled={!canShowActions}>
     <div
       className={cn(
-        "group relative flex items-center gap-2 px-2.5 py-1 rounded-md select-none",
+        "group relative flex items-center gap-2 px-2.5 py-1 rounded-none select-none",
         "transition-colors",
         isCurrent
           ? "bg-muted/70 text-foreground"
@@ -2032,7 +2032,7 @@ export function SidebarChatRow({
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
                 className={cn(
-                  "p-0.5 rounded hover:bg-muted transition-opacity duration-150 inline-flex items-center justify-center",
+                  "p-0.5 rounded-none hover:bg-muted transition-opacity duration-150 inline-flex items-center justify-center",
                   menuOpen
                     ? "opacity-100 visible"
                     : "opacity-0 invisible group-hover:opacity-100 group-hover:visible"
@@ -2092,7 +2092,7 @@ function RowRightSignal({
   const { content, label } = ((): { content: React.ReactNode; label: string | null } => {
     if (isError) {
       return {
-        content: <AlertCircle className="h-3 w-3 text-red-500" aria-label="error" />,
+        content: <AlertCircle className="h-3 w-3 text-neutral-500" aria-label="error" />,
         label: "error",
       };
     }

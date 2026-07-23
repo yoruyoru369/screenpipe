@@ -914,7 +914,7 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
     <div className="space-y-6">
       {/* First-visit welcome banner */}
       {showWelcome && (
-        <div className="relative border border-foreground/20 bg-muted/50 rounded-md p-4">
+        <div className="relative border border-foreground/20 bg-muted/50 rounded-none p-4">
           <button
             onClick={dismissWelcome}
             className="absolute top-2 right-2 text-muted-foreground hover:text-foreground text-sm px-1.5"
@@ -1170,7 +1170,7 @@ function PipeCard({
       <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
         <div className="flex items-center gap-1.5">
           {pipe.featured && (
-            <Star className="h-3 w-3 fill-amber-400 text-amber-400 flex-shrink-0" />
+            <Star className="h-3 w-3 fill-neutral-400 text-neutral-400 flex-shrink-0" />
           )}
           <Badge variant="secondary" className="text-[10px] px-2 py-0.5 font-normal rounded-none">
             {pipe.category}
@@ -1502,7 +1502,7 @@ if the pipe's final user-facing file lives outside the pipe's own \`./output/\` 
               <div className="border border-border rounded-none p-6">
                 <MemoizedReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:text-foreground prose-pre:rounded-md prose-pre:border prose-pre:border-border prose-pre:text-xs prose-code:bg-muted prose-code:text-foreground prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:before:content-none prose-code:after:content-none"
+                  className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:text-foreground prose-pre:rounded-none prose-pre:border prose-pre:border-border prose-pre:text-xs prose-code:bg-muted prose-code:text-foreground prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-none prose-code:text-xs prose-code:before:content-none prose-code:after:content-none"
                   components={{
                     a: ({ href, children }) => (
                       <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
@@ -1529,7 +1529,7 @@ if the pipe's final user-facing file lives outside the pipe's own \`./output/\` 
             {readmeContent ? (
               <MemoizedReactMarkdown
                 remarkPlugins={[remarkGfm]}
-                className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:text-foreground prose-pre:rounded-md prose-pre:border prose-pre:border-border prose-pre:text-xs prose-code:bg-muted prose-code:text-foreground prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:before:content-none prose-code:after:content-none"
+                className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:text-foreground prose-pre:rounded-none prose-pre:border prose-pre:border-border prose-pre:text-xs prose-code:bg-muted prose-code:text-foreground prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-none prose-code:text-xs prose-code:before:content-none prose-code:after:content-none"
                 components={{
                   a: ({ href, children }) => (
                     <a
@@ -1571,7 +1571,7 @@ if the pipe's final user-facing file lives outside the pipe's own \`./output/\` 
                   ) : status === "denied" ? (
                     <XCircle className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                   ) : (
-                    <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/30 flex-shrink-0" />
+                    <div className="h-4 w-4 rounded-none border-2 border-muted-foreground/30 flex-shrink-0" />
                   )}
                   <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
                     {perm.icon}
@@ -2016,7 +2016,7 @@ export function PermissionsReview({
                 ) : status === "denied" ? (
                   <XCircle className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
                 ) : (
-                  <div className="h-3.5 w-3.5 rounded-full border border-muted-foreground/30 flex-shrink-0" />
+                  <div className="h-3.5 w-3.5 rounded-none border border-muted-foreground/30 flex-shrink-0" />
                 )}
                 <span className="flex items-center gap-1 text-muted-foreground">
                   {perm.icon}

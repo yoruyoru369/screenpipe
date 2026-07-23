@@ -294,7 +294,7 @@ export function NotificationBell() {
         <button
           aria-label={unreadCount > 0 ? `notifications, ${unreadCount} unread` : "notifications"}
           data-testid="notification-bell-trigger"
-          className="relative p-1.5 rounded-md hover:bg-muted/60 transition-colors"
+          className="relative p-1.5 rounded-none hover:bg-muted/60 transition-colors"
         >
           <Bell className="h-3.5 w-3.5 text-muted-foreground" />
           {/* Quiet unread marker — a dot, not a count. Chrome only
@@ -302,7 +302,7 @@ export function NotificationBell() {
           {unreadCount > 0 && (
             <span
               data-testid="notification-bell-unread-dot"
-              className="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-foreground"
+              className="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-none bg-foreground"
             />
           )}
         </button>
@@ -391,7 +391,7 @@ export function NotificationBell() {
                             <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
                           )}
                           {!entry.read && (
-                            <span className="w-1.5 h-1.5 rounded-full bg-foreground shrink-0" />
+                            <span className="w-1.5 h-1.5 rounded-none bg-foreground shrink-0" />
                           )}
                           <span className="text-[11px] font-medium text-foreground truncate">
                             {entry.title}
@@ -438,7 +438,7 @@ export function NotificationBell() {
                             e.stopPropagation();
                             dismissOne(entry.id);
                           }}
-                          className="p-0.5 rounded hover:bg-muted/60 opacity-0 group-hover/notif:opacity-100 group-focus/notif:opacity-100 group-focus-within/notif:opacity-100 focus:opacity-100 transition-opacity"
+                          className="p-0.5 rounded-none hover:bg-muted/60 opacity-0 group-hover/notif:opacity-100 group-focus/notif:opacity-100 group-focus-within/notif:opacity-100 focus:opacity-100 transition-opacity"
                           title="dismiss"
                         >
                           <X className="w-3 h-3 text-muted-foreground/50 hover:text-foreground" />
@@ -456,7 +456,7 @@ export function NotificationBell() {
                             data-testid={`notification-bell-action-${entry.id}-${i}`}
                             onClick={() => runAction(entry, action)}
                             className={cn(
-                              "text-[10px] px-2 py-0.5 rounded transition-colors",
+                              "text-[10px] px-2 py-0.5 rounded-none transition-colors",
                               action.primary
                                 ? "bg-foreground text-background hover:bg-foreground/90"
                                 : "border border-border text-muted-foreground hover:text-foreground hover:bg-muted/40",

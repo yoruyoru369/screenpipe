@@ -487,7 +487,7 @@ export const ShareLogsButton = ({
         </div>
 
         {screenshot && (
-          <div className="relative w-32 aspect-video rounded-lg overflow-hidden bg-secondary/10 border border-border">
+          <div className="relative w-32 aspect-video rounded-none overflow-hidden bg-secondary/10 border border-border">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={screenshot}
@@ -497,7 +497,7 @@ export const ShareLogsButton = ({
             <Button
               variant="ghost"
               size="icon"
-              className="absolute top-1 right-1 h-5 w-5 rounded-full bg-background/80 hover:bg-background/95 border border-border"
+              className="absolute top-1 right-1 h-5 w-5 rounded-none bg-background/80 hover:bg-background/95 border border-border"
               onClick={() => setScreenshot(null)}
             >
               <X className="h-2.5 w-2.5" />

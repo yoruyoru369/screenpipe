@@ -205,7 +205,7 @@ export function PipeInstallDialog() {
             </AlertDialogDescription>
           </AlertDialogHeader>
 
-          <div className="my-2 text-xs font-mono text-muted-foreground break-all bg-muted rounded px-3 py-2">
+          <div className="my-2 text-xs font-mono text-muted-foreground break-all bg-muted rounded-none px-3 py-2">
             {request?.url}
           </div>
 
@@ -225,7 +225,7 @@ export function PipeInstallDialog() {
               onAcknowledgedChange={setInstallRiskAcknowledged}
             />
           ) : preview ? (
-            <div className="border rounded overflow-hidden">
+            <div className="border rounded-none overflow-hidden">
               <div className="px-3 py-1.5 bg-muted text-[10px] uppercase tracking-wider text-muted-foreground border-b">
                 pipe.md preview
               </div>
