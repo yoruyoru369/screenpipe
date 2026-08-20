@@ -1,3 +1,6 @@
+<!-- doc-covers: crates/screenpipe-core/src/pipes, crates/screenpipe-engine/src/pipes_api.rs, crates/screenpipe-engine/src/pipe_store.rs -->
+<!-- doc-verified: 7493feff7 -->
+
 # Pipe memory.md
 
 Every pipe receives the same `memory.md` policy in its system prompt. Pipe-specific prompts no longer need to copy that policy.
