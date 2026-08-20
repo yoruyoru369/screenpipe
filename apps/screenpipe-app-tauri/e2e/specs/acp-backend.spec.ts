@@ -587,19 +587,20 @@ describe("ACP backend", function () {
       label?: string;
     }>;
     const values = options.map((option) => option.value);
-    // The whole picker comes from the static catalog (lib/acp/agents.json) in
-    // file order, with the custom entry appended last (acpAdapterInfo falls
-    // back to it).
+    // The picker comes from the static catalog (lib/acp/agents.json) in file
+    // order, filters catalog entries marked disabled, and appends the custom
+    // entry last (acpAdapterInfo falls back to it). Disabled agents remain
+    // covered by the Rust catalog tests, but must not be offered as choices.
     expect(values).toEqual([
       "pi-acp",
       "codex-acp",
       "claude-acp",
-      "opencode",
       "cursor",
       "github-copilot-cli",
-      "kimi",
       "custom",
     ]);
+    expect(values).not.toContain("opencode");
+    expect(values).not.toContain("kimi");
     expect(options.map((option) => option.label)).toContain("Another ACP agent");
     const body = (await browser.execute(() => document.body.innerText)) as string;
     expect(body).toContain("Your existing sign-in and agent settings stay in that app.");

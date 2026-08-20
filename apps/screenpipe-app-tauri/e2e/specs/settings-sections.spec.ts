@@ -6,9 +6,13 @@ import { existsSync } from 'node:fs';
 import { openHomeWindow, waitForAppReady, t } from '../helpers/test-utils.js';
 import { saveScreenshot } from '../helpers/screenshot-utils.js';
 import { invokeOrThrow } from '../helpers/tauri.js';
+import { E2E_SEED_FLAGS } from '../helpers/app-launcher.js';
 
 const FOCUS_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? '11436');
 const NOTIFICATIONS_URL = `http://127.0.0.1:${FOCUS_PORT}/notifications`;
+const recordingDisabled = E2E_SEED_FLAGS.split(',').some(
+  (flag) => flag.trim().toLowerCase() === 'no-recording',
+);
 
 interface NotificationHistoryEntry {
   id?: string;
@@ -105,7 +109,15 @@ describe('Settings sections', () => {
     const sidebar = await $('[data-testid="settings-nav-general"]');
     if (!(await sidebar.isExisting())) {
       await openSettings();
+      return;
     }
+    // Every case starts from a known mounted section. The persisted last
+    // section is intentionally user-facing, but it must not leak between
+    // independent E2E journeys and make a later selector race a route change.
+    await sidebar.click();
+    await $('[data-testid="section-settings-general"]').waitForExist({
+      timeout: t(30_000),
+    });
   });
 
   // ─── Happy paths ──────────────────────────────────────────────────────────
@@ -131,7 +143,18 @@ describe('Settings sections', () => {
     await section.waitForExist({ timeout: 8_000 });
     const sectionText = (await section.getText()).toLowerCase();
     expect(sectionText).toContain('screen context capture');
-    expect(sectionText).toContain('screen recording');
+    expect(sectionText).toContain('screen capture quality');
+    const hasScreenRecordingCard = (await browser.execute(() =>
+      Boolean(
+        Array.from(
+          document.querySelectorAll('[data-testid="section-settings-screen"] h3'),
+        ).find((heading) => heading.textContent?.trim().toLowerCase() === 'screen recording'),
+      ),
+    )) as boolean;
+    // The default CI fixture disables capture so the test does not require
+    // TCC/device access. With a recording-enabled seed the actual control must
+    // still be present; this checks the gating contract instead of stale copy.
+    expect(hasScreenRecordingCard).toBe(!recordingDisabled);
     expect(sectionText).not.toContain('audio recording');
     expect(sectionText).not.toContain('live meeting notes');
 

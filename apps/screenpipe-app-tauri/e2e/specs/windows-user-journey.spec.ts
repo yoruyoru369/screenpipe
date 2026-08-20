@@ -14,10 +14,14 @@ import { existsSync } from "node:fs";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { closeWindow, invokeOrThrow, waitForWindowHandle, waitForWindowUrl } from "../helpers/tauri.js";
+import { E2E_SEED_FLAGS } from "../helpers/app-launcher.js";
 
 const isWindows = process.platform === "win32";
 const SEARCH_QUERY = "screenpipe windows ux journey";
 const SEARCH_INPUT_SELECTOR = 'input[placeholder*="search memory"]';
+const recordingDisabled = E2E_SEED_FLAGS.split(",").some(
+  (flag) => flag.trim().toLowerCase() === "no-recording",
+);
 const APP_SERVER_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
 const APP_SERVER_BASE_URL = `http://127.0.0.1:${APP_SERVER_PORT}`;
 const MAIN_WINDOW_LABELS = ["main", "main-window"] as const;
@@ -376,10 +380,29 @@ async function waitForAnyMainWindowHandle(timeoutMs = t(20_000)): Promise<MainWi
 }
 
 async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_000)): Promise<void> {
+  const sectionSelector =
+    section === "recording"
+      ? '[data-testid="section-settings-screen"]'
+      : `[data-testid="section-settings-${section}"]`;
   await browser.waitUntil(
     async () => {
-      const url = new URL(await browser.getUrl());
-      return url.pathname === "/settings" && url.searchParams.get("section") === section;
+      try {
+        const url = new URL(await browser.getUrl());
+        const mounted = (await browser.execute(
+          (selector: string) => Boolean(document.querySelector(selector)),
+          sectionSelector,
+        )) as boolean;
+        return (
+          url.pathname === "/settings" &&
+          url.searchParams.get("section") === section &&
+          mounted
+        );
+      } catch {
+        // WebView2 can tear down the execution context for one poll while
+        // Next.js commits the new settings route. Keep polling the same
+        // contract instead of turning that transient into a failed journey.
+        return false;
+      }
     },
     {
       timeout: timeoutMs,
@@ -471,7 +494,7 @@ describe("Windows user journey", function () {
         const sectionText = (await screenSection.getText()).toLowerCase();
         return (
           sectionText.includes("screen context capture") &&
-          sectionText.includes("screen recording") &&
+          sectionText.includes("screen capture quality") &&
           !sectionText.includes("audio recording")
         );
       },
@@ -481,6 +504,15 @@ describe("Windows user journey", function () {
         timeoutMsg: "Screen settings did not show only screen capture controls",
       },
     );
+
+    const hasScreenRecordingCard = (await browser.execute(() =>
+      Boolean(
+        Array.from(
+          document.querySelectorAll('[data-testid="section-settings-screen"] h3'),
+        ).find((heading) => heading.textContent?.trim().toLowerCase() === "screen recording"),
+      ),
+    )) as boolean;
+    expect(hasScreenRecordingCard).toBe(!recordingDisabled);
 
     const screenScreenshot = await saveScreenshot("windows-user-journey-screen-settings");
     expect(existsSync(screenScreenshot)).toBe(true);

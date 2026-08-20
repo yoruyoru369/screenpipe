@@ -33,7 +33,7 @@ use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
@@ -48,6 +48,92 @@ pub(crate) const CLOUD_API_KEY_ENV: &str = "SCREENPIPE_API_KEY";
 /// SQL. `pi::prewarm_screenpipe_mcp` seeds the cache at install. Bump alongside
 /// packages/screenpipe-mcp.
 pub(crate) const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@0.19.2";
+/// The latest package currently available on the public npm registry. Keep it
+/// as a runtime-only fallback until SCREENPIPE_MCP_PKG is published; the
+/// workspace package remains pinned to the release version above.
+pub(crate) const SCREENPIPE_MCP_FALLBACK_PKG: &str = "screenpipe-mcp@0.19.1";
+
+static RESOLVED_SCREENPIPE_MCP_PKG: OnceLock<&'static str> = OnceLock::new();
+
+pub(crate) fn screenpipe_mcp_candidates() -> [&'static str; 2] {
+    [SCREENPIPE_MCP_PKG, SCREENPIPE_MCP_FALLBACK_PKG]
+}
+
+fn package_version(package: &str) -> &str {
+    package.strip_prefix("screenpipe-mcp@").unwrap_or(package)
+}
+
+/// Probe a package without exposing stdout/stderr or inherited secrets. Bun
+/// exits quickly with a non-zero status when the requested version cannot be
+/// resolved; a still-running MCP process means resolution succeeded and the
+/// process is terminated after the probe window.
+fn probe_screenpipe_mcp_package(bun: &str, package: &str) -> bool {
+    let mut command = Command::new(bun);
+    command
+        .args(["x", package])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    scrub_runtime_env(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // A resolved MCP executable normally stays alive waiting for
+                // stdio input. Reaching the bounded probe deadline therefore
+                // means resolution succeeded; only an early non-zero exit is
+                // treated as an unavailable package.
+                return true;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// Resolve the package once per ACP/Pi process. The primary release remains
+/// authoritative; fallback is selected only when the requested npm version
+/// cannot be resolved or started. Logs contain package version and phase only.
+pub(crate) fn resolve_screenpipe_mcp_package(bun: &str, phase: &str) -> &'static str {
+    if let Some(package) = RESOLVED_SCREENPIPE_MCP_PKG.get() {
+        return package;
+    }
+
+    let candidates = screenpipe_mcp_candidates();
+    let selected = candidates
+        .iter()
+        .copied()
+        .find(|package| probe_screenpipe_mcp_package(bun, package))
+        .unwrap_or(SCREENPIPE_MCP_PKG);
+    if selected != SCREENPIPE_MCP_PKG {
+        eprintln!(
+            "[screenpipe-mcp] fallback selected version={} phase={}",
+            package_version(selected),
+            phase
+        );
+    }
+    let _ = RESOLVED_SCREENPIPE_MCP_PKG.set(selected);
+    selected
+}
+
+fn resolved_screenpipe_mcp_package() -> &'static str {
+    RESOLVED_SCREENPIPE_MCP_PKG
+        .get()
+        .copied()
+        .unwrap_or(SCREENPIPE_MCP_PKG)
+}
 
 /// Environment carried into the runtime process by `pi.rs` that belongs to the
 /// runtime alone and must never be inherited by any child it spawns — neither
@@ -2156,7 +2242,7 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
             servers.push(McpServer::Http(McpServerHttp::new(name, url)));
         }
     } else {
-        let mut args = vec!["x".into(), SCREENPIPE_MCP_PKG.into()];
+        let mut args = vec!["x".into(), resolved_screenpipe_mcp_package().into()];
         let mut env = Vec::new();
         if let Some(url) = engine_api_url() {
             args.extend(["--screenpipe-url".into(), url.clone()]);
@@ -2233,16 +2319,79 @@ fn free_loopback_port() -> Option<u16> {
 
 /// Block briefly until a loopback port accepts a connection, so we never hand
 /// the agent a url before its server is listening. Runs once at session start.
-fn wait_port_ready(port: u16, timeout: std::time::Duration) {
+fn wait_port_ready(port: u16, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     while std::time::Instant::now() < deadline {
         if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok()
         {
-            return;
+            return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    false
+}
+
+fn spawn_core_mcp_http(config: &RuntimeConfig, port: u16) -> Option<std::process::Child> {
+    use std::process::{Command, Stdio};
+
+    let primary = resolved_screenpipe_mcp_package();
+    let candidates = if primary == SCREENPIPE_MCP_FALLBACK_PKG {
+        [SCREENPIPE_MCP_FALLBACK_PKG, SCREENPIPE_MCP_PKG]
+    } else {
+        [SCREENPIPE_MCP_PKG, SCREENPIPE_MCP_FALLBACK_PKG]
+    };
+    let engine_url = engine_api_url();
+    let api_key = env_nonempty("SCREENPIPE_LOCAL_API_KEY");
+
+    for (index, package) in candidates.iter().copied().enumerate() {
+        let mut cmd = Command::new(&config.bun_path);
+        cmd.args(["x", package, "--http", "--port"])
+            .arg(port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        if let Some(engine_port) =
+            env_nonempty("SCREENPIPE_LOCAL_API_PORT").or_else(|| env_nonempty("SCREENPIPE_PORT"))
+        {
+            cmd.arg("--screenpipe-port").arg(engine_port);
+        }
+        if let Some(url) = &engine_url {
+            cmd.env("SCREENPIPE_API_URL", url);
+        }
+        if let Some(key) = &api_key {
+            cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
+        }
+        scrub_runtime_env(&mut cmd);
+
+        match cmd.spawn() {
+            Ok(mut child) => {
+                if wait_port_ready(port, std::time::Duration::from_secs(8)) {
+                    return Some(child);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!(
+                    "[screenpipe-mcp] readiness timeout version={} phase=http-readiness",
+                    package_version(package)
+                );
+            }
+            Err(_) => {
+                eprintln!(
+                    "[screenpipe-mcp] start failed version={} phase=http-start",
+                    package_version(package),
+                );
+            }
+        }
+
+        if let Some(next_package) = candidates.get(index + 1) {
+            eprintln!(
+                "[screenpipe-mcp] retry version={} phase=http-start",
+                package_version(next_package)
+            );
+        }
+    }
+    None
 }
 
 /// Stand up loopback Streamable-HTTP MCP servers for an http-only agent and
@@ -2288,35 +2437,15 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
 
     // Core search over http. `screenpipe-mcp --http` dispatches to the package's
     // Streamable-HTTP server (there is no separate screenpipe-mcp-http package,
-    // only that mode). Best-effort: `bun x` may fetch it on first run, so it can
-    // lag; we still advertise it (the agent retries) rather than block on it.
+    // only that mode). Prefer the release pin and retry the published fallback
+    // when the primary package cannot resolve or become ready.
     if let Some(port) = free_loopback_port() {
-        let mut cmd = Command::new(&config.bun_path);
-        cmd.arg("x")
-            .arg(SCREENPIPE_MCP_PKG)
-            .arg("--http")
-            .arg("--port")
-            .arg(port.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
-        if let Some(engine_port) =
-            env_nonempty("SCREENPIPE_LOCAL_API_PORT").or_else(|| env_nonempty("SCREENPIPE_PORT"))
-        {
-            cmd.arg("--screenpipe-port").arg(engine_port);
-        }
-        if let Some(url) = &engine_url {
-            cmd.env("SCREENPIPE_API_URL", url);
-        }
-        if let Some(key) = &api_key {
-            cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
-        }
-        match cmd.spawn() {
-            Ok(child) => {
+        match spawn_core_mcp_http(config, port) {
+            Some(child) => {
                 children.push(child);
                 urls.push(("screenpipe".into(), format!("http://127.0.0.1:{port}/mcp")));
             }
-            Err(error) => eprintln!("[acp-runtime] core http mcp server failed to start: {error}"),
+            None => eprintln!("[acp-runtime] core http mcp server failed to start"),
         }
     }
 
@@ -3554,6 +3683,7 @@ pub async fn run_from_env() -> Result<(), String> {
     // main can flush the final ACP error/result and choose its exit code. The
     // OS closes the handle immediately when the hidden runtime exits.
     let config = RuntimeConfig::from_env()?;
+    resolve_screenpipe_mcp_package(&config.bun_path, "acp-runtime");
     let output = ParentOutput::new();
     let state = Arc::new(RuntimeState::new(output.clone(), &config));
     // Agents that ignore client stdio MCP servers (Cursor) get screenpipe's
@@ -3826,6 +3956,14 @@ mod tests {
             .as_str()
             .expect("screenpipe-mcp package version");
         assert_eq!(SCREENPIPE_MCP_PKG, format!("screenpipe-mcp@{version}"));
+    }
+
+    #[test]
+    fn screenpipe_mcp_candidates_keep_release_first_and_public_fallback_second() {
+        assert_eq!(
+            screenpipe_mcp_candidates(),
+            ["screenpipe-mcp@0.19.2", "screenpipe-mcp@0.19.1"]
+        );
     }
 
     #[test]

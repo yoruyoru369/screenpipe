@@ -29,6 +29,7 @@ import {
   HAS_SEARCH_FIXTURE,
   openSearch,
   closeSearchIfOpen,
+  waitForSearchFixtureIndex,
 } from "../../helpers/search.js";
 import {
   authHeaders,
@@ -56,6 +57,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
   // The backend expands `vect` to the prefix query `"vect"*`, so the visible
   // `vector` fixture frames must survive screenshot verification and reflow.
   it("keeps fuzzy-prefix results while reflowing the wide grid", async () => {
+    await waitForSearchFixtureIndex("vect", 11);
     await openSearch("vect");
 
     await invokeOrThrow("resize_search_window", {
@@ -72,7 +74,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
     );
 
     const columnCount = await browser.execute(() => {
-      const grid = document.querySelector(".grid");
+      const grid = document.querySelector("[data-frame-grid]");
       if (!grid) return -1;
       return getComputedStyle(grid as Element)
         .gridTemplateColumns.split(" ")
@@ -111,6 +113,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
   });
 
   it("keeps only screenshot-visible matches and carries them into timeline navigation", async () => {
+    await waitForSearchFixtureIndex("retentionverify", 5);
     await openSearch("retentionverify");
 
     await browser.waitUntil(
@@ -255,6 +258,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
    * the real path.
    */
   it("runs real snapshot OCR for candidates with no stored boxes and leaves the row untouched", async () => {
+    await waitForSearchFixtureIndex("retentionverify", 5);
     await openSearch("retentionverify");
 
     await browser.waitUntil(
@@ -320,6 +324,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
    * engine to the pixel". The word sits at roughly top 0.214 in the fixture.
    */
   it("positions the highlight from real OCR bounds when the snapshot has rendered text", async () => {
+    await waitForSearchFixtureIndex("visibleocr", 1);
     await openSearch("visibleocr");
 
     await browser.waitUntil(
@@ -392,6 +397,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
   });
 
   it("keeps embedded Timeline navigation scoped to the selected client-side facet", async () => {
+    await waitForSearchFixtureIndex("retentionverify", 5);
     await openHomeWindow();
     const timelineNav = await $('[data-testid="nav-timeline"]');
     await timelineNav.waitForExist({ timeout: t(15_000) });
@@ -476,6 +482,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
   });
 
   it("removes a search result when its exact thumbnail is unavailable", async () => {
+    await waitForSearchFixtureIndex("exactthumbnailverify", 1);
     await openSearch("exactthumbnailverify");
 
     await browser.waitUntil(

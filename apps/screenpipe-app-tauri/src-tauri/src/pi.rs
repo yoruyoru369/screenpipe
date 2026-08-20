@@ -5254,9 +5254,10 @@ pub(crate) fn find_bun_executable() -> Option<String> {
 /// exits right after the download completes.
 fn prewarm_screenpipe_mcp(bun: &str) {
     use std::process::Stdio;
+    let package = crate::acp_runtime::resolve_screenpipe_mcp_package(bun, "pi-prewarm");
     let mut cmd = bun_command(bun);
     cmd.arg("x")
-        .arg(crate::acp_runtime::SCREENPIPE_MCP_PKG)
+        .arg(package)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -5276,7 +5277,7 @@ fn prewarm_screenpipe_mcp(bun: &str) {
                     Err(_) => break,
                 }
             }
-            info!("screenpipe-mcp prewarm complete ({})", crate::acp_runtime::SCREENPIPE_MCP_PKG);
+            info!("screenpipe-mcp prewarm complete ({package})");
         }
         Err(e) => warn!("screenpipe-mcp prewarm could not spawn bun: {}", e),
     }

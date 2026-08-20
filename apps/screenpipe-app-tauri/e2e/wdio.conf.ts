@@ -28,6 +28,7 @@ const sessionRecorder = shouldRecordDesktopSession ? new TestRecorder() : null;
 const sessionVideoDir = resolve(__dirname, 'videos', 'session');
 const isCi = Boolean(process.env.CI);
 const isWindowsCi = isCi && process.platform === 'win32';
+const isLinuxCi = isCi && process.platform === 'linux';
 const isDestructiveDbFaultRun = (process.env.SCREENPIPE_E2E_SEED ?? '')
   .split(',')
   .some((flag) => flag.trim().toLowerCase() === 'db-hard-fault');
@@ -210,7 +211,15 @@ export const config: TestrunnerConfig = {
   // Local runs skip retries so flakes surface immediately during development.
   // A destructive DB-fault spec cannot reuse the same quarantined process for
   // a file retry. Focused fault runs start clean once and fail directly.
-  specFileRetries: isCi && !isDestructiveDbFaultRun ? 3 : 0,
+  // Linux runs the broadest serial suite and has a hard 120-minute job budget;
+  // one retry per file keeps transient recovery without repeatedly replaying
+  // the entire suite past the cancellation boundary. Windows keeps two for
+  // the slower WebDriver2 process startup, while macOS uses two as well.
+  specFileRetries: isCi && !isDestructiveDbFaultRun
+    ? isLinuxCi
+      ? 1
+      : 2
+    : 0,
   specFileRetriesDelay: 5,
   framework: 'mocha',
   reporters: getReporters() as Options.Testrunner['reporters'],

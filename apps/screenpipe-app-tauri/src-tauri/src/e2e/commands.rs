@@ -193,10 +193,14 @@ fn installed_tray_recording_status() -> Result<Option<String>, String> {
 /// stale handle after users disable it from Settings > Display.
 #[command]
 fn shortcut_reminder_visible(app_handle: tauri::AppHandle) -> bool {
-    app_handle
+    let webview_visible = app_handle
         .get_webview_window("shortcut-reminder")
         .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    // Windows and macOS normally render the pill in a native overlay rather
+    // than the hidden Tauri webview. Report the platform surface too so the
+    // E2E contract observes the same visible state users see.
+    webview_visible || crate::native_shortcut_reminder::is_reminder_visible()
 }
 
 /// E2E helper: open an auto-detected meeting the way the audio-process
