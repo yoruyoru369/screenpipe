@@ -360,7 +360,7 @@ async fn seed_search_fixture(db: &DatabaseManager) {
             true,
             None,
             Some(visible_text_query),
-            if visible { Some("hybrid") } else { Some("accessibility") },
+            Some("hybrid"),
             None,
             None,
             None,
