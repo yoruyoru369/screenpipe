@@ -276,6 +276,11 @@ jobs:
     - name: Verify background AI-tool connection
       shell: pwsh
       working-directory: ./apps/screenpipe-app-tauri
+      env:
+        # A previous Tauri WebDriver listener can remain in Windows TIME_WAIT
+        # briefly after teardown. Keep this preparatory run isolated from the
+        # main suite and the core-recording lane below.
+        SCREENPIPE_E2E_WEBDRIVER_PORT: "4446"
       run: bun run test:e2e:onboarding-background-ai-tools
 
     - name: Run E2E Tests
@@ -283,6 +288,7 @@ jobs:
       working-directory: ./apps/screenpipe-app-tauri
       env:
         RECORD_VIDEO: "true"
+        SCREENPIPE_E2E_WEBDRIVER_PORT: "4447"
       run: |
         Remove-Item -LiteralPath ./e2e/results -Recurse -Force -ErrorAction SilentlyContinue
         bun run test:e2e
@@ -293,6 +299,7 @@ jobs:
       env:
         RECORD_VIDEO: "true"
         SCREENPIPE_E2E_SEED: "onboarding,no-audio"
+        SCREENPIPE_E2E_WEBDRIVER_PORT: "4448"
       run: |
         bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/windows-core-recording.spec.ts
 
@@ -637,9 +644,9 @@ jobs:
         export DISPLAY=:99
         export RECORD_VIDEO=1
 
-        bun run test:e2e:onboarding-background-ai-tools
+        SCREENPIPE_E2E_WEBDRIVER_PORT=4446 bun run test:e2e:onboarding-background-ai-tools
         rm -rf ./e2e/results
-        bun run test:e2e
+        SCREENPIPE_E2E_WEBDRIVER_PORT=4447 bun run test:e2e
 
     - name: Generate E2E Coverage Report
       if: always()
@@ -917,12 +924,14 @@ jobs:
       shell: bash
       working-directory: ./apps/screenpipe-app-tauri
       run: |
-        bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/spotlight-exclusion.spec.ts
+        SCREENPIPE_E2E_WEBDRIVER_PORT=4446 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/spotlight-exclusion.spec.ts
         sleep 2
 
     - name: Verify background AI-tool connection
       shell: bash
       working-directory: ./apps/screenpipe-app-tauri
+      env:
+        SCREENPIPE_E2E_WEBDRIVER_PORT: "4447"
       run: bun run test:e2e:onboarding-background-ai-tools
 
     - name: Run E2E Tests
@@ -934,6 +943,7 @@ jobs:
       working-directory: ./apps/screenpipe-app-tauri
       env:
         RECORD_VIDEO: "true"
+        SCREENPIPE_E2E_WEBDRIVER_PORT: "4448"
       run: |
         rm -rf ./e2e/results
         bun run test:e2e
