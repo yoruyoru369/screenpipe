@@ -692,6 +692,16 @@ describe("Windows user journey", function () {
     await displayNav.waitForDisplayed({ timeout: t(15_000) });
     await displayNav.click();
 
+    // The full Windows lane keeps one app process across spec files, and an
+    // earlier journey may have legitimately left the reminder hidden while
+    // opening another surface. Establish the same user-visible precondition
+    // as the Display control before asserting the native/webview surface;
+    // startup timing must not decide whether this journey can exercise its
+    // real dock actions.
+    await invokeOrThrow("show_shortcut_reminder", {
+      shortcut: "Control+Super+S",
+    });
+
     // The overlay carries recording health, live meeting state and meeting
     // alerts, so it ships unhideable and Display offers only a size. The
     // `overlay-hiding-control` remote flag can restore the switch, but it is
