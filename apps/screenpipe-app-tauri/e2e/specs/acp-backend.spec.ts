@@ -603,7 +603,17 @@ describe("ACP backend", function () {
     expect(values).not.toContain("kimi");
     expect(options.map((option) => option.label)).toContain("Another ACP agent");
     const body = (await browser.execute(() => document.body.innerText)) as string;
-    expect(body).toContain("Your existing sign-in and agent settings stay in that app.");
+    // Keep the copy contract aligned with the boundary card rendered for the
+    // selected agent. It explains that the ACP agent owns its sign-in/model
+    // settings while Screenpipe only supplies context and tools; the old
+    // one-line wording was removed from the product card.
+    expect(body).toContain("What Pi controls, and what Screenpipe controls");
+    expect(body).toContain(
+      "You sign in to Pi itself. Your Screenpipe plan does not pay for it.",
+    );
+    expect(body).toContain(
+      "Screenpipe supplies what you have seen, said, and heard as tools Pi can call.",
+    );
   });
 
   it("uses the official Rust ACP SDK for stream, plan, tool, permission, and cancel", async () => {

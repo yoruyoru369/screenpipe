@@ -63,14 +63,15 @@ fn package_version(package: &str) -> &str {
     package.strip_prefix("screenpipe-mcp@").unwrap_or(package)
 }
 
-/// Probe a package without exposing stdout/stderr or inherited secrets. Bun
-/// exits quickly with a non-zero status when the requested version cannot be
-/// resolved; a still-running MCP process means resolution succeeded and the
-/// process is terminated after the probe window.
+/// Probe a package without exposing stdout/stderr or inherited secrets. The
+/// `--help` probe asks the package to finish after Bun resolves it, which keeps
+/// an unavailable npm version distinguishable from a long-lived MCP server.
+/// The bounded timeout remains a success fallback for older packages that do
+/// not implement `--help` and keep waiting for stdio input.
 fn probe_screenpipe_mcp_package(bun: &str, package: &str) -> bool {
     let mut command = Command::new(bun);
     command
-        .args(["x", package])
+        .args(["x", package, "--help"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -87,10 +88,10 @@ fn probe_screenpipe_mcp_package(bun: &str, package: &str) -> bool {
             Ok(None) if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                // A resolved MCP executable normally stays alive waiting for
-                // stdio input. Reaching the bounded probe deadline therefore
-                // means resolution succeeded; only an early non-zero exit is
-                // treated as an unavailable package.
+                // Some older MCP packages ignore --help and stay alive waiting
+                // for stdio. Reaching the bounded probe deadline therefore
+                // still means resolution succeeded; only an early non-zero
+                // exit is treated as an unavailable package.
                 return true;
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -116,7 +117,7 @@ pub(crate) fn resolve_screenpipe_mcp_package(bun: &str, phase: &str) -> &'static
         .iter()
         .copied()
         .find(|package| probe_screenpipe_mcp_package(bun, package))
-        .unwrap_or(SCREENPIPE_MCP_PKG);
+        .unwrap_or(SCREENPIPE_MCP_FALLBACK_PKG);
     if selected != SCREENPIPE_MCP_PKG {
         eprintln!(
             "[screenpipe-mcp] fallback selected version={} phase={}",

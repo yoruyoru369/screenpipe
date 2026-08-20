@@ -274,9 +274,13 @@ async fn seed_search_fixture(db: &DatabaseManager) {
         warn!("e2e search-fixture: failed to insert highlight frame: {e}");
     }
 
-    // Five accessibility candidates for visibility verification. Only two
-    // have matching screenshot OCR; the other three contain the query solely
-    // in hidden accessibility text and must never reach the result grid.
+    // Five accessibility-derived candidates for visibility verification. Only
+    // two have matching screenshot OCR; mark those as hybrid because their
+    // stored OCR boxes supplement the accessibility match. The other three
+    // contain the query solely in hidden accessibility text and must never
+    // reach the result grid. This keeps the production search rule (semantic
+    // accessibility-only rows are not thumbnail results) testable without
+    // weakening it.
     let visibility_query = "retentionverify";
     let visible_json = r#"[
         {"text":"retentionverify","conf":"97","left":"0.20","top":"0.20","width":"0.22","height":"0.04"}
@@ -356,7 +360,7 @@ async fn seed_search_fixture(db: &DatabaseManager) {
             true,
             None,
             Some(visible_text_query),
-            Some("accessibility"),
+            if visible { Some("hybrid") } else { Some("accessibility") },
             None,
             None,
             None,
@@ -391,7 +395,7 @@ async fn seed_search_fixture(db: &DatabaseManager) {
             true,
             None,
             Some(visibility_query),
-            Some("accessibility"),
+            Some("hybrid"),
             None,
             None,
             None,

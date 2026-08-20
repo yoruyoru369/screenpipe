@@ -399,7 +399,34 @@ describe('Settings sections', () => {
 
   it('keeps the low-disk guard on by default, preserves explicit opt-out, and stops capture when enabled', async () => {
     const navStorage = await $('[data-testid="settings-nav-storage"]');
+    await navStorage.waitForDisplayed({ timeout: t(15_000) });
     await navStorage.click();
+
+    // The sidebar click updates the URL and mounts Storage in separate React
+    // commits. Do not query the toggle while the previous section is still in
+    // the DOM; that race made the Windows lane report a missing guard even
+    // though the Storage route eventually rendered.
+    await browser.waitUntil(
+      async () => {
+        try {
+          const url = new URL(await browser.getUrl());
+          return (
+            url.pathname === '/settings' &&
+            url.searchParams.get('section') === 'storage'
+          );
+        } catch {
+          return false;
+        }
+      },
+      {
+        timeout: t(20_000),
+        interval: 250,
+        timeoutMsg: 'Settings URL did not become /settings?section=storage',
+      },
+    );
+    await $('[data-testid="section-settings-storage"]').waitForDisplayed({
+      timeout: t(20_000),
+    });
 
     const toggle = await $('[data-testid="low-disk-recording-guard-toggle"]');
     await toggle.waitForExist({ timeout: t(8_000) });

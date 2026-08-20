@@ -384,19 +384,15 @@ async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_00
     section === "recording"
       ? '[data-testid="section-settings-screen"]'
       : `[data-testid="section-settings-${section}"]`;
+  // Navigation commits the URL and the section component in separate React
+  // updates. Wait for the stable route contract first, then for the mounted
+  // section, so a slow WebView2 render cannot make an already-correct route
+  // look like a navigation failure.
   await browser.waitUntil(
     async () => {
       try {
         const url = new URL(await browser.getUrl());
-        const mounted = (await browser.execute(
-          (selector: string) => Boolean(document.querySelector(selector)),
-          sectionSelector,
-        )) as boolean;
-        return (
-          url.pathname === "/settings" &&
-          url.searchParams.get("section") === section &&
-          mounted
-        );
+        return url.pathname === "/settings" && url.searchParams.get("section") === section;
       } catch {
         // WebView2 can tear down the execution context for one poll while
         // Next.js commits the new settings route. Keep polling the same
@@ -408,6 +404,24 @@ async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_00
       timeout: timeoutMs,
       interval: 250,
       timeoutMsg: `Settings URL did not become /settings?section=${section}`,
+    },
+  );
+
+  await browser.waitUntil(
+    async () => {
+      try {
+        return (await browser.execute(
+          (selector: string) => Boolean(document.querySelector(selector)),
+          sectionSelector,
+        )) as boolean;
+      } catch {
+        return false;
+      }
+    },
+    {
+      timeout: timeoutMs,
+      interval: 250,
+      timeoutMsg: `Settings section ${sectionSelector} did not mount`,
     },
   );
 }
@@ -714,6 +728,44 @@ describe("Windows user journey", function () {
       "Display settings did not show the shortcut reminder controls",
     );
     expect(await $("#shortcut-overlay").isExisting()).toBe(false);
+
+    // Windows uses the production Win32 pill instead of a Tauri WebView, so
+    // WebDriver cannot obtain a `shortcut-reminder` handle or click its
+    // layered buttons. Exercise the same native hover seam used by the
+    // platform input path and assert the observed native state. The branch is
+    // deliberately limited to the native surface; Linux/macOS webview tests
+    // below still drive every dock action through the real buttons.
+    const hasWebviewReminder = (await browser.getWindowHandles()).includes(
+      "shortcut-reminder",
+    );
+    if (!hasWebviewReminder) {
+      expect(
+        await invokeOrThrow<boolean>("plugin:e2e|native_shortcut_set_hovering", {
+          hovering: true,
+        }),
+      ).toBe(true);
+      await browser.waitUntil(
+        async () => {
+          const state = await invokeOrThrow<{
+            hovering: boolean;
+            meetingActive: boolean;
+          } | null>("plugin:e2e|native_meeting_overlay_state");
+          return state?.hovering === true && state.meetingActive === false;
+        },
+        {
+          timeout: t(10_000),
+          interval: 250,
+          timeoutMsg: "Windows native shortcut reminder did not expand on hover",
+        },
+      );
+      expect(
+        await invokeOrThrow<boolean>("plugin:e2e|native_shortcut_set_hovering", {
+          hovering: false,
+        }),
+      ).toBe(true);
+      await expectShortcutReminderVisible(true, t(10_000));
+      return;
+    }
 
     try {
       await expectShortcutReminderVisible(true, t(20_000));

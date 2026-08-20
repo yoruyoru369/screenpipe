@@ -1008,10 +1008,11 @@ fn pi_package_dir(install_dir: &Path) -> PathBuf {
 /// Seed the pi-agent package.json with overrides and dependencies to fix resolution.
 /// `hosted-git-info` requires `lru-cache@^10`, but bun on Windows can hoist
 /// an ESM-only lru-cache@7.x that breaks CJS `require()`.
-/// `@earendil-works/pi-ai` and `@anthropic-ai/sdk` are transitive deps that
-/// bun on Windows fails to hoist into the top-level node_modules, so we
-/// pin them as direct deps. Writing these before `bun add` ensures correct
-/// versions are used.
+/// `@earendil-works/pi-ai`, `@anthropic-ai/sdk`, `chalk`, and `isexe` are
+/// transitive/runtime deps that bun on Windows can fail to hoist into the
+/// top-level node_modules, so we pin them as direct deps. Writing these before
+/// `bun add` ensures correct versions are used and makes a partial cache copy
+/// observable by the integrity check before Pi is launched.
 ///
 /// Also strips legacy `@mariozechner/*` keys (the namespace was renamed
 /// upstream — see issue #3527) so installs migrating from 2.4.258 and
@@ -1030,6 +1031,8 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
     let expected_pi_version = json!(PI_PACKAGE.rsplit('@').next().unwrap_or(""));
     let expected_pi_ai_version = json!(PI_AI_PACKAGE.rsplit('@').next().unwrap_or(""));
     let expected_cross_spawn = json!("^7.0.6");
+    let expected_chalk = json!("5.6.2");
+    let expected_isexe = json!("^2.0.0");
     let expected_overrides = json!({
         "hosted-git-info": {
             "lru-cache": "^10.0.0"
@@ -1086,6 +1089,14 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
                                 .insert("cross-spawn".to_string(), expected_cross_spawn.clone());
                             changed = true;
                         }
+                        if deps_obj.get("chalk") != Some(&expected_chalk) {
+                            deps_obj.insert("chalk".to_string(), expected_chalk.clone());
+                            changed = true;
+                        }
+                        if deps_obj.get("isexe") != Some(&expected_isexe) {
+                            deps_obj.insert("isexe".to_string(), expected_isexe.clone());
+                            changed = true;
+                        }
                     }
                 }
                 if changed {
@@ -1097,11 +1108,13 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
                         let _ = std::fs::remove_file(install_dir.join("bun.lock"));
                         let _ = std::fs::remove_file(install_dir.join("bun.lockb"));
                         info!(
-                            "Patched pi-agent package.json (pins: pi {}, anthropic sdk {}, pi-ai {}, cross-spawn {}; dropped {} legacy @mariozechner deps)",
+                            "Patched pi-agent package.json (pins: pi {}, anthropic sdk {}, pi-ai {}, cross-spawn {}, chalk {}, isexe {}; dropped {} legacy @mariozechner deps)",
                             expected_pi_version,
                             expected_sdk,
                             expected_pi_ai_version,
                             expected_cross_spawn,
+                            expected_chalk,
+                            expected_isexe,
                             removed_legacy
                         );
                     }
@@ -1125,6 +1138,8 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
             "@earendil-works/pi-coding-agent": expected_pi_version,
             "@earendil-works/pi-ai": expected_pi_ai_version,
             "cross-spawn": expected_cross_spawn,
+            "chalk": expected_chalk,
+            "isexe": expected_isexe,
         },
         "overrides": {
             "hosted-git-info": {
@@ -1216,7 +1231,13 @@ fn local_pi_install_integrity_error(install_dir: &Path) -> Option<String> {
     }
 
     let resolve_start = pi_dir.join("dist");
-    for package_name in ["@earendil-works/pi-ai", "@anthropic-ai/sdk", "cross-spawn"] {
+    for package_name in [
+        "@earendil-works/pi-ai",
+        "@anthropic-ai/sdk",
+        "cross-spawn",
+        "chalk",
+        "isexe",
+    ] {
         if resolve_node_module_package_from(&resolve_start, install_dir, package_name).is_none() {
             return Some(format!(
                 "missing Pi dependency {} from {}",
@@ -6109,6 +6130,20 @@ printf '%s\n' '{"type":"agent_end"}'
             "export class AgentSessionRuntime {}",
         )
         .expect("write agent session runtime");
+        // Keep the fixture aligned with the runtime integrity contract. The
+        // tests below intentionally remove other dependencies to exercise the
+        // repair path, while these two Windows-sensitive runtime packages are
+        // present in every healthy fixture.
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "chalk"),
+            "chalk",
+            "5.6.2",
+        );
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "isexe"),
+            "isexe",
+            "2.0.0",
+        );
     }
 
     /// Regression guard for the empty "Pi background install failed: " log
