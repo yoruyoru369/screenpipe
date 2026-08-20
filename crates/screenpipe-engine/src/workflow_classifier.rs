@@ -150,17 +150,30 @@ pub async fn start_workflow_classifier(
     }
 }
 
-/// Query the local screenpipe `/search` API for recent activity across all content types.
-async fn get_recent_activities(client: &Client, port: u16) -> Option<Vec<ActivityEntry>> {
-    let now = chrono::Utc::now();
-    let five_min_ago = now - chrono::Duration::minutes(5);
+/// How far back the classifier looks for activity.
+const ACTIVITY_WINDOW_MINUTES: i64 = 5;
 
-    let url = format!(
+/// Build the `/search` URL for the classifier's activity window.
+///
+/// Timestamps are emitted in `Z` form on purpose: `/search` reads its query
+/// through axum's `Query` extractor, which decodes with `serde_urlencoded`,
+/// and that turns a literal `+` in a query value into a space. An RFC-3339
+/// offset (`+00:00`) therefore arrives mangled and the request 400s — which
+/// this caller swallows as "no activity", so the classifier goes quiet with
+/// no error surfaced anywhere.
+fn build_activity_search_url(port: u16, now: chrono::DateTime<chrono::Utc>) -> String {
+    let window_start = now - chrono::Duration::minutes(ACTIVITY_WINDOW_MINUTES);
+    format!(
         "http://localhost:{}/search?content_type=all&limit=20&start_time={}&end_time={}",
         port,
-        five_min_ago.to_rfc3339(),
-        now.to_rfc3339(),
-    );
+        window_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
+/// Query the local screenpipe `/search` API for recent activity across all content types.
+async fn get_recent_activities(client: &Client, port: u16) -> Option<Vec<ActivityEntry>> {
+    let url = build_activity_search_url(port, chrono::Utc::now());
 
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
@@ -341,6 +354,23 @@ fn format_activities_for_classifier(activities: &[ActivityEntry]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: an RFC-3339 offset (`+00:00`) in the query decodes to a
+    /// space server-side, so `/search` answered 400 and the classifier saw no
+    /// activity at all.
+    #[test]
+    fn activity_search_url_carries_no_literal_plus() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:28:32.918117+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let url = build_activity_search_url(3030, now);
+        assert!(
+            !url.contains('+'),
+            "a literal '+' in the query decodes to a space server-side: {url}"
+        );
+        assert!(url.contains("start_time=2026-08-20T12:23:32Z"), "{url}");
+        assert!(url.contains("end_time=2026-08-20T12:28:32Z"), "{url}");
+    }
 
     #[test]
     fn hash_changes_with_different_activities() {

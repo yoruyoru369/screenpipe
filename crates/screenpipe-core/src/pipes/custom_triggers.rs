@@ -68,6 +68,12 @@ const MODEL_RETRY_SECS: u64 = 300;
 /// Cap on OCR/UI text considered per activity entry.
 pub const MAX_TEXT_PER_ENTRY: usize = 600;
 
+/// How far back one tick looks for activity to score against.
+pub const ACTIVITY_WINDOW_MINUTES: i64 = 2;
+
+/// Cap on activity entries fetched per tick.
+pub const ACTIVITY_ENTRY_LIMIT: usize = 20;
+
 /// File written into the pipe dir describing what fired it. Same name as the
 /// connection-trigger context so pipe prompts have one place to look.
 const TRIGGER_CONTEXT_FILE: &str = ".trigger-context.json";
@@ -520,19 +526,31 @@ pub fn activity_hash(entries: &[ActivityEntry]) -> u64 {
     h.finish()
 }
 
+/// Build the `/search` URL for one activity tick.
+///
+/// Timestamps are emitted in `Z` form on purpose. `/search` reads its query
+/// through axum's `Query` extractor, which decodes with `serde_urlencoded` —
+/// and that treats a literal `+` in a query *value* as a space. An RFC-3339
+/// offset (`+00:00`) therefore arrives as ` 00:00`, fails to parse, and the
+/// endpoint rejects the whole request with 400, so the matcher never sees any
+/// activity and no custom trigger can ever fire.
+pub fn build_activity_search_url(api_base: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let window_start = now - chrono::Duration::minutes(ACTIVITY_WINDOW_MINUTES);
+    format!(
+        "{}/search?content_type=all&limit={}&start_time={}&end_time={}",
+        api_base,
+        ACTIVITY_ENTRY_LIMIT,
+        window_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
 async fn fetch_recent_activity(
     client: &reqwest::Client,
     api_base: &str,
     api_key: Option<&str>,
 ) -> std::result::Result<Vec<ActivityEntry>, String> {
-    let now = chrono::Utc::now();
-    let window_start = now - chrono::Duration::minutes(2);
-    let url = format!(
-        "{}/search?content_type=all&limit=20&start_time={}&end_time={}",
-        api_base,
-        window_start.to_rfc3339(),
-        now.to_rfc3339(),
-    );
+    let url = build_activity_search_url(api_base, chrono::Utc::now());
     let mut req = client.get(&url);
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
@@ -978,5 +996,46 @@ mod tests {
     fn score_trigger_empty_inputs() {
         assert_eq!(score_trigger("", "anything"), 0.0);
         assert_eq!(score_trigger("anything", ""), 0.0);
+    }
+
+    fn fixed_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-20T12:28:32.918117+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// Regression: an RFC-3339 offset (`+00:00`) in the query made `/search`
+    /// answer 400 on every tick, so no custom trigger could ever fire.
+    #[test]
+    fn activity_search_url_carries_no_literal_plus() {
+        let url = build_activity_search_url("http://127.0.0.1:3030", fixed_now());
+        assert!(
+            !url.contains('+'),
+            "a literal '+' in the query decodes to a space server-side: {url}"
+        );
+        assert!(url.contains("start_time=2026-08-20T12:26:32Z"), "{url}");
+        assert!(url.contains("end_time=2026-08-20T12:28:32Z"), "{url}");
+    }
+
+    /// The timestamps must still parse after the server's form-urlencoded
+    /// decoding, which is where the `+` was being turned into a space.
+    #[test]
+    fn activity_search_url_survives_form_urlencoded_decoding() {
+        let url = build_activity_search_url("http://127.0.0.1:3030", fixed_now());
+        let decoded = url.replace('+', " ");
+        assert_eq!(decoded, url, "url changed under '+' → ' ' decoding");
+        for param in ["start_time=", "end_time="] {
+            let value: String = decoded
+                .split(param)
+                .nth(1)
+                .expect("param present")
+                .chars()
+                .take_while(|c| *c != '&')
+                .collect();
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&value).is_ok(),
+                "server would reject '{value}' with 400"
+            );
+        }
     }
 }
