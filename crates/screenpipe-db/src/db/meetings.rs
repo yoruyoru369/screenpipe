@@ -4,6 +4,18 @@
 
 use super::*;
 
+/// True when the error is the `idx_meetings_calendar_event_id` uniqueness
+/// violation — i.e. another meeting already owns this calendar event.
+fn is_calendar_event_conflict(e: &SqlxError) -> bool {
+    let msg = e.to_string();
+    // SQLite names a partial unique index on a plain column by that column
+    // ("meetings.calendar_event_id"); expression indexes report the index name
+    // instead. Accept both so this stays correct if the index shape changes.
+    msg.contains("UNIQUE constraint failed")
+        && (msg.contains("meetings.calendar_event_id")
+            || msg.contains("idx_meetings_calendar_event_id"))
+}
+
 impl DatabaseManager {
     // ── Meeting persistence ──────────────────────────────────────────
     //
@@ -20,18 +32,65 @@ impl DatabaseManager {
         title: Option<&str>,
         attendees: Option<&str>,
     ) -> Result<i64, SqlxError> {
+        self.insert_meeting_with_calendar(meeting_app, detection_source, title, attendees, None)
+            .await
+    }
+
+    /// Insert a meeting, optionally claiming a calendar event as its identity.
+    ///
+    /// `calendar_event_id` is protected by `idx_meetings_calendar_event_id`, so
+    /// a second meeting cannot claim an event another meeting already owns. On
+    /// that collision the meeting is still created — it simply keeps no
+    /// calendar identity and gets named from its own content instead.
+    pub async fn insert_meeting_with_calendar(
+        &self,
+        meeting_app: &str,
+        detection_source: &str,
+        title: Option<&str>,
+        attendees: Option<&str>,
+        calendar_event_id: Option<&str>,
+    ) -> Result<i64, SqlxError> {
+        match self
+            .try_insert_meeting(
+                meeting_app,
+                detection_source,
+                title,
+                attendees,
+                calendar_event_id,
+            )
+            .await
+        {
+            Err(e) if calendar_event_id.is_some() && is_calendar_event_conflict(&e) => {
+                // Lost the race to another meeting between the pre-check and
+                // this insert. The event belongs to whoever claimed it first.
+                self.try_insert_meeting(meeting_app, detection_source, None, None, None)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    async fn try_insert_meeting(
+        &self,
+        meeting_app: &str,
+        detection_source: &str,
+        title: Option<&str>,
+        attendees: Option<&str>,
+        calendar_event_id: Option<&str>,
+    ) -> Result<i64, SqlxError> {
         let mut tx = self.begin_immediate_with_retry().await?;
         let now = chrono::Utc::now()
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string();
         let id = sqlx::query(
-            "INSERT INTO meetings (meeting_start, meeting_app, detection_source, title, attendees) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO meetings (meeting_start, meeting_app, detection_source, title, attendees, calendar_event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&now)
         .bind(meeting_app)
         .bind(detection_source)
         .bind(title)
         .bind(attendees)
+        .bind(calendar_event_id)
         .execute(&mut **tx.conn())
         .await?
         .last_insert_rowid();
@@ -39,25 +98,108 @@ impl DatabaseManager {
         Ok(id)
     }
 
+    /// The meeting that already owns `calendar_event_id`, if any.
+    pub async fn meeting_id_for_calendar_event(
+        &self,
+        calendar_event_id: &str,
+    ) -> Result<Option<i64>, SqlxError> {
+        if calendar_event_id.is_empty() {
+            return Ok(None);
+        }
+        sqlx::query_scalar::<_, i64>("SELECT id FROM meetings WHERE calendar_event_id = ?1")
+            .bind(calendar_event_id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    /// Claim `calendar_event_id` for `meeting_id`. Atomic, and idempotent for
+    /// the owner: returns true when this meeting owns the event afterwards,
+    /// whether this call did the claiming or a previous one did.
+    ///
+    /// Callers treat false as "another meeting owns this, drop the
+    /// calendar-derived fields", so re-claiming your own event must not read
+    /// as a refusal. Returns false only when the event belongs to someone
+    /// else, this meeting already owns a *different* event, or the meeting
+    /// does not exist.
+    pub async fn bind_calendar_event(
+        &self,
+        meeting_id: i64,
+        calendar_event_id: &str,
+    ) -> Result<bool, SqlxError> {
+        if calendar_event_id.is_empty() {
+            return Ok(false);
+        }
+        let mut tx = self.begin_immediate_with_retry().await?;
+        sqlx::query(
+            "UPDATE meetings SET calendar_event_id = ?2 \
+             WHERE id = ?1 \
+               AND (calendar_event_id IS NULL OR calendar_event_id = '') \
+               AND NOT EXISTS ( \
+                     SELECT 1 FROM meetings other \
+                      WHERE other.calendar_event_id = ?2 AND other.id != ?1 \
+               )",
+        )
+        .bind(meeting_id)
+        .bind(calendar_event_id)
+        .execute(&mut **tx.conn())
+        .await?;
+        // Ownership, not "did this statement write a row" — the owner
+        // re-claiming its own event updates nothing and still owns it.
+        let owns = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM meetings WHERE id = ?1 AND calendar_event_id = ?2",
+        )
+        .bind(meeting_id)
+        .bind(calendar_event_id)
+        .fetch_one(&mut **tx.conn())
+        .await?
+            > 0;
+        tx.commit().await?;
+        Ok(owns)
+    }
+
     /// End a meeting and persist the reason it ended. `end_reason` should be
     /// one of the `MEETING_END_REASON_*` constants (or `None` for legacy /
     /// natural grace-timeout ends). The reason drives the auto-merge filter
     /// in [`Self::find_recent_meeting_for_app`] — explicit stops are excluded.
+    /// Returns true only for the transition from open to ended; racing duplicate
+    /// callers receive false even if they upgrade the end reason.
     pub async fn end_meeting(
         &self,
         id: i64,
         meeting_end: &str,
         end_reason: Option<&str>,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         let mut tx = self.begin_immediate_with_retry().await?;
-        sqlx::query("UPDATE meetings SET meeting_end = ?1, end_reason = ?2 WHERE id = ?3")
-            .bind(normalize_timestamp_for_range_query(meeting_end))
-            .bind(end_reason)
-            .bind(id)
-            .execute(&mut **tx.conn())
-            .await?;
+        let newly_ended =
+            sqlx::query_scalar::<_, bool>("SELECT meeting_end IS NULL FROM meetings WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&mut **tx.conn())
+                .await?
+                .unwrap_or(false);
+        // The detector and an explicit stop can race on the same active row.
+        // Preserve the first committed end so duplicate end paths share one
+        // stable generation. An explicit user stop may still upgrade the end
+        // reason when it races an automatic end, and cannot be downgraded by a
+        // later detector delivery. A real resume clears both fields before the
+        // next end, so that later generation can commit normally.
+        sqlx::query(
+            "UPDATE meetings
+             SET meeting_end = COALESCE(meeting_end, ?1),
+                 end_reason = CASE
+                   WHEN end_reason = 'explicit_stop' THEN end_reason
+                   WHEN ?2 = 'explicit_stop' THEN ?2
+                   WHEN meeting_end IS NULL THEN ?2
+                   ELSE end_reason
+                 END
+             WHERE id = ?3",
+        )
+        .bind(normalize_timestamp_for_range_query(meeting_end))
+        .bind(end_reason)
+        .bind(id)
+        .execute(&mut **tx.conn())
+        .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(newly_ended)
     }
 
     /// Collect text typed during a meeting's time interval from ui_events.
@@ -187,12 +329,22 @@ impl DatabaseManager {
         meeting_end: &str,
         append_typed_text: bool,
         end_reason: Option<&str>,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<String, SqlxError> {
         // First end the meeting so the time range is set
-        self.end_meeting(id, meeting_end, end_reason).await?;
+        let newly_ended = self.end_meeting(id, meeting_end, end_reason).await?;
+        // Return the database-owned generation to callers. Competing end paths
+        // may propose different timestamps, but events must carry the exact
+        // first value committed above so scheduler deduplication stays stable.
+        let persisted_end = self
+            .get_meeting_by_id(id)
+            .await?
+            .meeting_end
+            .ok_or(SqlxError::RowNotFound)?;
 
-        if !append_typed_text {
-            return Ok(());
+        // A racing duplicate end may upgrade end_reason above, but must not
+        // append the same typed-text/files suffix to the note a second time.
+        if !newly_ended || !append_typed_text {
+            return Ok(persisted_end);
         }
 
         // Build the auto-injected suffix from the available signals. Each
@@ -208,7 +360,7 @@ impl DatabaseManager {
             sections.push(files);
         }
         if sections.is_empty() {
-            return Ok(());
+            return Ok(persisted_end);
         }
         let suffix = sections.join("\n\n");
 
@@ -236,7 +388,7 @@ impl DatabaseManager {
             tx.commit().await?;
         }
 
-        Ok(())
+        Ok(persisted_end)
     }
 
     /// Reopen a previously-ended meeting (clears both `meeting_end` and

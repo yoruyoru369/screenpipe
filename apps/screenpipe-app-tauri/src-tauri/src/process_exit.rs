@@ -174,6 +174,14 @@ fn relaunch_binary(app: &AppHandle) -> Option<PathBuf> {
 /// The replacement gets its own process group: launchd kills a job's whole
 /// process group when the job exits, so an inherited group dies with us.
 pub fn force_app_relaunch(app: AppHandle, status: i32) -> ! {
+    // Apply a staged update now, at the last moment before this process goes
+    // away — installing any earlier orphans the running bundle and kills TCC
+    // attribution (see staged_update.rs). Idempotent with the RunEvent::Exit
+    // call. The relaunch binary path below was cached at process start, so
+    // the spawn hits the freshly installed bundle.
+    #[cfg(target_os = "macos")]
+    crate::staged_update::install_staged_if_any(&app);
+
     let env = app.env();
     if let Some(binary) = relaunch_binary(&app) {
         let mut command = Command::new(&binary);
@@ -209,6 +217,9 @@ pub fn request_app_relaunch(app: AppHandle, reason: &'static str, delay: Duratio
 }
 
 /// Guards against stacking confirmation dialogs on repeated Cmd+Q presses.
+/// macOS-only: `confirm_and_request_app_quit` and the NSAlert that clears the
+/// flag are both `cfg(target_os = "macos")`.
+#[cfg(target_os = "macos")]
 static QUIT_CONFIRM_SHOWING: AtomicBool = AtomicBool::new(false);
 
 /// True when the in-flight `terminate:` request comes from OS shutdown,
@@ -402,6 +413,12 @@ pub fn confirm_and_request_app_quit(app: AppHandle) {
         return;
     }
 
+    if crate::db_recovery_notifications::recovery_active() {
+        info!("Quit ignored while protected database recovery is active");
+        crate::db_recovery_notifications::notify_recovery_quit_blocked();
+        return;
+    }
+
     let recording_active = app
         .try_state::<RecordingState>()
         .map(|state| state.capture_intended())
@@ -541,6 +558,12 @@ pub fn confirm_and_request_app_quit(app: AppHandle) {
 
 /// Shared quit entry point for tray menu, app menu (Cmd+Q), etc.
 pub fn request_app_quit(app: AppHandle) {
+    if crate::db_recovery_notifications::recovery_active() {
+        info!("Quit ignored while protected database recovery is active");
+        crate::db_recovery_notifications::notify_recovery_quit_blocked();
+        return;
+    }
+
     QUIT_REQUESTED.store(true, Ordering::SeqCst);
 
     if QUIT_TEARDOWN_STARTED.swap(true, Ordering::SeqCst) {

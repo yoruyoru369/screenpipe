@@ -11,6 +11,10 @@ use tauri::Emitter;
 pub const JOB_EVENT: &str = "job:event";
 pub const EXPORT_EVENT: &str = "export:event";
 pub const ENGINE_EVENT: &str = "engine:event";
+/// Native notification/shortcut action routing exists where there is a native
+/// overlay (`commands/native_actions.rs`): the SwiftUI panel on macOS, the win32
+/// pill on windows. Linux handles actions in the webview.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub const NOTIFICATION_ACTION_EVENT: &str = "notification:action";
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -22,6 +26,9 @@ pub enum JobEvent {
         label: String,
         message: Option<String>,
     },
+    // Part of the checked-in TypeScript surface (`lib/utils/tauri.ts`) that
+    // `bun run bindings:check` verifies; no Rust emitter uses it today.
+    #[allow(dead_code)]
     Progress {
         #[serde(rename = "jobId")]
         job_id: String,
@@ -83,6 +90,11 @@ pub struct EngineEvent {
     pub data: Value,
 }
 
+// Emitted only by the macOS native action callback, but the type stays on
+// every platform because `define_specta_builder!` exports it to `tauri.ts`.
+// Plain `//` on purpose: `///` would be re-emitted into the generated
+// TypeScript and break `bun run bindings:check`.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationActionEvent {
@@ -103,6 +115,9 @@ pub fn emit_engine(app: &tauri::AppHandle, event: EngineEvent) {
     let _ = app.emit(ENGINE_EVENT, event);
 }
 
+// Both native overlays route notification actions through here: the SwiftUI
+// panel on macOS and the win32 pill on windows.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn emit_notification_action(app: &tauri::AppHandle, event: NotificationActionEvent) {
     let _ = app.emit(NOTIFICATION_ACTION_EVENT, event);
 }

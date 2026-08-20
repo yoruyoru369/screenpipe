@@ -10,6 +10,7 @@
 //! implementations without touching any pipe code.
 
 pub mod bash_env;
+pub mod cli_runtime;
 pub mod pi;
 
 use anyhow::Result;
@@ -217,5 +218,11 @@ pub trait AgentExecutor: Send + Sync {
     /// restarting the engine.
     fn user_token(&self) -> Option<String> {
         None
+    }
+
+    /// Hosted-AI base URL used when pre-configuring an agent provider.
+    /// Non-cloud executors keep the production default and ignore it.
+    fn screenpipe_api_url(&self) -> &str {
+        pi::SCREENPIPE_API_URL
     }
 }

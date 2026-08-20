@@ -8,7 +8,18 @@ import type { SettingsField } from "./settings-search";
 
 /** Settings search index for this section. Co-located with the component so adding a field here means updating one file. See `SettingsField` in `./settings-search` for the schema. */
 export const searchIndex: SettingsField[] = [
-  { label: "Blocklist", keywords: ["ignore", "exclude", "block"] },
+  {
+    label: "Content filters",
+    keywords: ["ignore", "exclude", "block", "blocklist", "allowlist", "apps", "windows"],
+  },
+  {
+    label: "Excluded websites",
+    keywords: ["url", "domain", "site", "browser", "ignore", "exclude"],
+  },
+  {
+    label: "Ignore incognito windows",
+    keywords: ["private", "browser", "enhanced", "automation"],
+  },
   { label: "PII masking", keywords: ["mask", "redact", "columns", "url", "fields"] },
   {
     label: "Remote support logs",
@@ -17,24 +28,21 @@ export const searchIndex: SettingsField[] = [
   { label: "Telemetry" },
 ];
 import { LockedSetting, ManagedSwitch } from "@/components/enterprise-locked-setting";
-import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
+import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import {
   Eye,
   EyeOff,
-  Globe,
   Shield,
   Monitor,
   Loader2,
-  AlertCircle,
   RefreshCw,
-  AppWindowMac,
   Tv,
   Lock,
   Copy,
   ClipboardX,
   Keyboard,
   MousePointerClick,
-  FolderTree,
   ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -43,20 +51,21 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { HelpTooltip } from "@/components/ui/help-tooltip";
-import { MultiSelect } from "@/components/ui/multi-select";
 import { WindowPicker } from "./window-picker";
+import { ContentFiltersCard } from "./capture-filters/content-filters-card";
+import { addRule, type WindowRules } from "@/lib/settings/capture-filters";
 import { InputMonitoringPanel } from "./input-monitoring-card";
 import { ApplyRestartBar } from "./apply-restart-bar";
 import { useSettings, Settings } from "@/lib/hooks/use-settings";
 import { ScheduleSettings } from "./schedule-settings";
 import { RemoteSupportLogsCard } from "./remote-support-logs-card";
-import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { platform } from "@tauri-apps/plugin-os";
 import { useToast } from "@/components/ui/use-toast";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { useInstalledApps } from "@/lib/hooks/use-installed-apps";
 import { commands } from "@/lib/utils/tauri";
+import { planEnhancedIncognitoPermission } from "@/lib/utils/incognito-permission";
 import posthog from "posthog-js";
 import * as Sentry from "@sentry/react";
 import { defaultOptions } from "tauri-plugin-sentry-api";
@@ -67,136 +76,6 @@ import {
   debounce,
   FieldValidationResult,
 } from "@/lib/utils/validation";
-
-const formatCount = (count: number): string => {
-  if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
-  return `${count}`;
-};
-
-const getAppIconUrl = (appName: string): string => {
-  return `http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`;
-};
-
-const createWindowOptions = (
-  windowItems: { name: string; count: number; app_name?: string }[],
-  existingPatterns: string[],
-  installedApps: string[] = []
-) => {
-  // For each observed window, surface BOTH the bare title (matches anywhere)
-  // and a scoped `App::Title` variant (matches that one window of that one
-  // app). Users can pick whichever matches their intent.
-  const seen = new Set<string>();
-  const windowOptions: ReturnType<typeof toOption>[] = [];
-  const sorted = [...windowItems].sort((a, b) => b.count - a.count);
-
-  function toOption(args: {
-    value: string;
-    label: string;
-    iconHint?: string;
-    description: string;
-  }) {
-    return {
-      value: args.value,
-      label: args.label,
-      icon: AppWindowMac,
-      iconUrl: getAppIconUrl(args.iconHint || args.value),
-      description: args.description,
-    };
-  }
-
-  for (const item of sorted) {
-    if (!seen.has(item.name)) {
-      seen.add(item.name);
-      windowOptions.push(
-        toOption({
-          value: item.name,
-          label: item.name,
-          iconHint: item.app_name || item.name,
-          description: [
-            item.app_name && item.app_name !== item.name
-              ? item.app_name
-              : null,
-            `${formatCount(item.count)} captures`,
-          ]
-            .filter(Boolean)
-            .join(" · "),
-        })
-      );
-    }
-    if (item.app_name && item.app_name !== item.name) {
-      const scoped = `${item.app_name}::${item.name}`;
-      if (!seen.has(scoped)) {
-        seen.add(scoped);
-        windowOptions.push(
-          toOption({
-            value: scoped,
-            label: scoped,
-            iconHint: item.app_name,
-            description: `scoped: only this window of ${item.app_name}`,
-          })
-        );
-      }
-    }
-  }
-
-  const seenLower = new Set(Array.from(seen, (s) => s.toLowerCase()));
-
-  // Installed apps that have no captures yet. Lets users add an ignore/include
-  // rule for an app before it's ever recorded; the icon still resolves by name
-  // so these render with their real app icon despite zero captures.
-  const installedOptions = installedApps
-    .filter((app) => app && !seenLower.has(app.toLowerCase()))
-    .map((app) => {
-      seenLower.add(app.toLowerCase());
-      return toOption({
-        value: app,
-        label: app,
-        iconHint: app,
-        description: "installed · not captured yet",
-      });
-    });
-
-  const customOptions = existingPatterns
-    .filter((pattern) => !seenLower.has(pattern.toLowerCase()))
-    .map((pattern) => ({
-      value: pattern,
-      label: pattern,
-      icon: AppWindowMac,
-      iconUrl: getAppIconUrl(pattern.includes("::") ? pattern.split("::")[0] : pattern),
-    }));
-
-  return [...windowOptions, ...installedOptions, ...customOptions];
-};
-
-const getFaviconUrl = (domain: string): string => {
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=32`;
-};
-
-const createUrlOptions = (
-  urlItems: { name: string; count: number }[],
-  existingUrls: string[]
-) => {
-  const urlOptions = [...urlItems]
-    .sort((a, b) => b.count - a.count)
-    .map((item) => ({
-      value: item.name,
-      label: item.name,
-      iconUrl: getFaviconUrl(item.name),
-      icon: Globe,
-      description: `${formatCount(item.count)} visits this week`,
-    }));
-
-  const customOptions = existingUrls
-    .filter((url) => !urlItems.some((item) => item.name === url))
-    .map((url) => ({
-      value: url,
-      label: url,
-      iconUrl: getFaviconUrl(url),
-      icon: Globe,
-    }));
-
-  return [...urlOptions, ...customOptions];
-};
 
 function EncryptDataCard({
   encryptStore,
@@ -483,18 +362,17 @@ function RedactionWherePreview({
 
 export function PrivacySection() {
   const { settings, updateSettings } = useSettings();
-  const isEnterprise = useIsEnterpriseBuild();
   // Input Monitoring is a macOS-only TCC permission; the grant card only
   // renders there (alongside the keyboard/click capture toggles it gates).
   const isMacOS = typeof window !== "undefined" && platform() === "macos";
   const { toast } = useToast();
   // when the admin forces the PII backend (local/cloud) we lock the radios so
   // the employee can't override it (the value itself is applied to settings by
-  // useEnterprisePolicy.applyPiiPolicy on every policy poll).
-  const { getManagedValue } = useEnterprisePolicy();
+  // The managed policy runtime reapplies PII policy on every policy poll.
+  const { getManagedValue, isManagedDeployment } = useManagedPolicy();
   const managedPiiBackend = getManagedValue("piiBackend");
   // Same idea for input capture: the admin can force keyboard/click rows on
-  // or off org-wide (applied by useEnterprisePolicy.applyInputCapturePolicy).
+  // or off org-wide (applied by the managed policy runtime).
   // These settings are inverted ("disable…"), so ManagedSwitch — which assumes
   // checked == managed value — doesn't fit; lock the switches manually.
   const managedKeyboardCapture = getManagedValue("disableKeyboardCapture");
@@ -502,6 +380,7 @@ export function PrivacySection() {
 
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isEnhancingIncognito, setIsEnhancingIncognito] = useState(false);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [picker, setPicker] = useState<"ignored" | "included" | null>(null);
 
@@ -529,7 +408,7 @@ export function PrivacySection() {
 
   const { items: windowItems, isLoading: isWindowItemsLoading } =
     useSqlAutocomplete("window");
-  const { items: urlItems, isLoading: isUrlItemsLoading } =
+  const { items: urlItems } =
     useSqlAutocomplete("url");
   // Installed apps with no captures yet — merged into the app filters so users
   // can block/allow an app before it's ever recorded.
@@ -860,7 +739,89 @@ export function PrivacySection() {
   };
 
   const handleIncognitoToggle = (checked: boolean) => {
-    handleSettingsChange({ ignoreIncognitoWindows: checked }, true);
+    handleSettingsChange(
+      checked
+        ? { ignoreIncognitoWindows: true }
+        : {
+            ignoreIncognitoWindows: false,
+            enhancedIncognitoDetection: false,
+          },
+      true,
+    );
+  };
+
+  const enhancedIncognitoDetection = Boolean(
+    settings.enhancedIncognitoDetection ?? false,
+  );
+
+  const handleEnhancedIncognitoDetection = async () => {
+    if (enhancedIncognitoDetection) {
+      handleSettingsChange({ enhancedIncognitoDetection: false }, true);
+      return;
+    }
+
+    setIsEnhancingIncognito(true);
+    try {
+      // Arc exposes private-window state through Accessibility already, so it
+      // never needs Automation access for this feature.
+      let browserStatuses = await commands.getBrowsersAutomationStatus();
+      let permissionPlan = planEnhancedIncognitoPermission(browserStatuses);
+
+      if (permissionPlan.kind === "prompt") {
+        for (const browserName of permissionPlan.browserNames) {
+          await commands.requestSingleBrowserAutomation(browserName);
+        }
+        // Read TCC again instead of trusting an individual prompt result. This
+        // handles browsers closing mid-flow and permission changes made in
+        // System Settings while a prompt is visible.
+        browserStatuses = await commands.getBrowsersAutomationStatus();
+        permissionPlan = planEnhancedIncognitoPermission(browserStatuses);
+      }
+
+      if (permissionPlan.kind === "arc-only") {
+        toast({
+          title: "basic detection is enough",
+          description: "Arc private windows are already detected without extra access",
+        });
+        return;
+      }
+
+      if (permissionPlan.kind === "open-browser") {
+        toast({
+          title: "open a supported browser first",
+          description: "open Chrome, Edge, Brave, or another Chromium browser, then try again",
+        });
+        return;
+      }
+
+      if (
+        permissionPlan.kind === "settings" ||
+        permissionPlan.kind === "prompt"
+      ) {
+        await commands.openPermissionSettings("automation");
+        toast({
+          title: "browser access needed",
+          description: "allow screenpipe to control your browser in macOS Automation settings",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      handleSettingsChange({ enhancedIncognitoDetection: true }, true);
+      toast({
+        title: "enhanced detection ready",
+        description: "apply changes to use browser-native incognito detection",
+      });
+    } catch (error) {
+      console.error("Failed to enable enhanced incognito detection:", error);
+      toast({
+        title: "couldn't enable enhanced detection",
+        description: "check macOS Automation settings and try again",
+        variant: "destructive",
+      });
+    } finally {
+      setIsEnhancingIncognito(false);
+    }
   };
 
   const handleDrmPauseToggle = (checked: boolean) => {
@@ -903,117 +864,34 @@ export function PrivacySection() {
     }
   };
 
-  // Add one pattern from the WindowPicker. Reuses the MultiSelect change
-  // handler so the mutual-exclusion logic (a pattern in ignore is removed
-  // from include and vice versa) stays in one place.
+  // The two window lists travel together: `addRule` and friends drop a pattern
+  // from the opposite list so a window can't be included and ignored at once.
+  const windowRules = useMemo<WindowRules>(
+    () => ({
+      ignored: settings.ignoredWindows,
+      included: settings.includedWindows,
+    }),
+    [settings.ignoredWindows, settings.includedWindows]
+  );
+
+  const handleWindowRulesChange = useCallback(
+    (next: WindowRules) => {
+      handleSettingsChange(
+        { ignoredWindows: next.ignored, includedWindows: next.included },
+        true
+      );
+    },
+    [handleSettingsChange]
+  );
+
+  // Add one pattern from the WindowPicker.
   const addIgnoredPattern = (pattern: string) => {
-    const lower = pattern.toLowerCase();
-    if (settings.ignoredWindows.some((w) => w.toLowerCase() === lower)) return;
-    handleIgnoredWindowsChange([...settings.ignoredWindows, pattern]);
+    handleWindowRulesChange(addRule(windowRules, pattern, "ignored"));
   };
   const addIncludedPattern = (pattern: string) => {
-    const lower = pattern.toLowerCase();
-    if (settings.includedWindows.some((w) => w.toLowerCase() === lower)) return;
-    handleIncludedWindowsChange([...settings.includedWindows, pattern]);
+    handleWindowRulesChange(addRule(windowRules, pattern, "included"));
   };
 
-  const handleIgnoredWindowsChange = (values: string[]) => {
-    const lowerCaseValues = values.map((v) => v.toLowerCase());
-    const currentLowerCase = settings.ignoredWindows.map((v) =>
-      v.toLowerCase()
-    );
-    const addedValues = values.filter(
-      (v) => !currentLowerCase.includes(v.toLowerCase())
-    );
-    const removedValues = settings.ignoredWindows.filter(
-      (v) => !lowerCaseValues.includes(v.toLowerCase())
-    );
-
-    if (addedValues.length > 0) {
-      const newValue = addedValues[0];
-      handleSettingsChange(
-        {
-          ignoredWindows: [...settings.ignoredWindows, newValue],
-          includedWindows: settings.includedWindows.filter(
-            (w) => w.toLowerCase() !== newValue.toLowerCase()
-          ),
-        },
-        true
-      );
-    } else if (removedValues.length > 0) {
-      const removedValue = removedValues[0];
-      handleSettingsChange(
-        {
-          ignoredWindows: settings.ignoredWindows.filter(
-            (w) => w !== removedValue
-          ),
-        },
-        true
-      );
-    }
-  };
-
-  const handleIncludedWindowsChange = (values: string[]) => {
-    const lowerCaseValues = values.map((v) => v.toLowerCase());
-    const currentLowerCase = settings.includedWindows.map((v) =>
-      v.toLowerCase()
-    );
-    const addedValues = values.filter(
-      (v) => !currentLowerCase.includes(v.toLowerCase())
-    );
-    const removedValues = settings.includedWindows.filter(
-      (v) => !lowerCaseValues.includes(v.toLowerCase())
-    );
-
-    if (addedValues.length > 0) {
-      const newValue = addedValues[0];
-      handleSettingsChange(
-        {
-          includedWindows: [...settings.includedWindows, newValue],
-          ignoredWindows: settings.ignoredWindows.filter(
-            (w) => w.toLowerCase() !== newValue.toLowerCase()
-          ),
-        },
-        true
-      );
-    } else if (removedValues.length > 0) {
-      const removedValue = removedValues[0];
-      handleSettingsChange(
-        {
-          includedWindows: settings.includedWindows.filter(
-            (w) => w !== removedValue
-          ),
-        },
-        true
-      );
-    }
-  };
-
-  const handleIgnoredUrlsChange = (values: string[]) => {
-    const currentUrls = settings.ignoredUrls || [];
-    const lowerCaseValues = values.map((v) => v.toLowerCase());
-    const currentLowerCase = currentUrls.map((v) => v.toLowerCase());
-    const addedValues = values.filter(
-      (v) => !currentLowerCase.includes(v.toLowerCase())
-    );
-    const removedValues = currentUrls.filter(
-      (v) => !lowerCaseValues.includes(v.toLowerCase())
-    );
-
-    if (addedValues.length > 0) {
-      const newValue = addedValues[0];
-      handleSettingsChange(
-        { ignoredUrls: [...currentUrls, newValue] },
-        true
-      );
-    } else if (removedValues.length > 0) {
-      const removedValue = removedValues[0];
-      handleSettingsChange(
-        { ignoredUrls: currentUrls.filter((u) => u !== removedValue) },
-        true
-      );
-    }
-  };
 
   return (
     <div className="space-y-5">
@@ -1189,7 +1067,7 @@ export function PrivacySection() {
         </Card>
         </LockedSetting>
 
-        {isEnterprise && <AdminTeamTokenCard />}
+        {isManagedDeployment && <AdminTeamTokenCard />}
 
         {/* LAN access — off by default. Toggling on force-enables api_auth
             (the backend mirrors this guard in RecordingConfig::from_settings
@@ -1252,18 +1130,39 @@ export function PrivacySection() {
               <div>
                 <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
                   Ignore Incognito Windows
-                  <HelpTooltip text="automatically detects and skips private/incognito browser windows in 20+ languages. on macos, uses native browser APIs for chromium browsers (chrome, edge, brave, arc)." />
+                  <HelpTooltip text="automatically detects and skips private/incognito browser windows in 20+ languages without extra access. on macOS, enhance enables browser-native detection for supported Chromium browsers." />
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Skip all private browsing sessions
+                  Skip private browsing sessions
                 </p>
               </div>
             </div>
-            <Switch
-              id="ignoreIncognitoWindows"
-              checked={Boolean(settings.ignoreIncognitoWindows ?? true)}
-              onCheckedChange={handleIncognitoToggle}
-            />
+            <div className="flex items-center gap-1.5">
+              {isMacOS && Boolean(settings.ignoreIncognitoWindows ?? true) && (
+                <Button
+                  type="button"
+                  variant={enhancedIncognitoDetection ? "outline" : "ghost"}
+                  size="sm"
+                  className="h-7 px-2 text-[10px] uppercase tracking-wide"
+                  onClick={handleEnhancedIncognitoDetection}
+                  disabled={isEnhancingIncognito}
+                  aria-pressed={enhancedIncognitoDetection}
+                  title="use browser-native detection; requires macOS Automation access"
+                >
+                  {isEnhancingIncognito ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : (
+                    <Shield className="mr-1 h-3 w-3" />
+                  )}
+                  {enhancedIncognitoDetection ? "enhanced" : "enhance"}
+                </Button>
+              )}
+              <Switch
+                id="ignoreIncognitoWindows"
+                checked={Boolean(settings.ignoreIncognitoWindows ?? true)}
+                onCheckedChange={handleIncognitoToggle}
+              />
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -1745,114 +1644,31 @@ export function PrivacySection() {
           Content filters
         </h2>
 
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center space-x-2.5 mb-2">
-              <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
-              <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
-                Ignored Apps
-                <HelpTooltip text="Skip captures for these patterns. Plain text (e.g. '1Password') matches the app or any window title that contains it. Use 'App::Title' to scope to one window of an app (e.g. 'Slack::#hr' blocks only #hr in Slack)." />
-              </h3>
-            </div>
-            <div className="ml-[26px]">
-              <div data-testid="privacy-ignored-apps-select">
-                <MultiSelect
-                  options={createWindowOptions(
-                    windowItems || [],
-                    settings.ignoredWindows,
-                    installedApps
-                  )}
-                  defaultValue={settings.ignoredWindows}
-                  value={settings.ignoredWindows}
-                  onValueChange={handleIgnoredWindowsChange}
-                  placeholder="Select apps to ignore..."
-                  allowCustomValues
-                />
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-[11px] mt-1.5 gap-1.5"
-                onClick={() => setPicker("ignored")}
-              >
-                <FolderTree className="h-3 w-3" /> browse apps & windows
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center space-x-2.5 mb-2">
-              <Eye className="h-4 w-4 text-muted-foreground shrink-0" />
-              <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
-                Included Apps
-                <HelpTooltip text="When set, only matching windows are captured. Plain text is a global include (e.g. 'Slack' = only Slack). 'App::Title' creates a per-app whitelist (e.g. 'Slack::#engineering' keeps only that channel in Slack; other apps stay unaffected)." />
-              </h3>
-            </div>
-            <div className="ml-[26px]">
-              <div data-testid="privacy-included-apps-select">
-                <MultiSelect
-                  options={createWindowOptions(
-                    windowItems || [],
-                    settings.includedWindows,
-                    installedApps
-                  )}
-                  defaultValue={settings.includedWindows}
-                  value={settings.includedWindows}
-                  onValueChange={handleIncludedWindowsChange}
-                  placeholder="Only capture these apps (optional)..."
-                  allowCustomValues
-                />
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-[11px] mt-1.5 gap-1.5"
-                onClick={() => setPicker("included")}
-              >
-                <FolderTree className="h-3 w-3" /> browse apps & windows
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center space-x-2.5 mb-2">
-              <Globe className="h-4 w-4 text-muted-foreground shrink-0" />
-              <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
-                Ignored URLs
-                <HelpTooltip text="Browser URLs matching these patterns will not be captured. Use for privacy — e.g. add 'bank.com' to skip banking sites." />
-              </h3>
-            </div>
-            <div className="ml-[26px]">
-              <MultiSelect
-                options={createUrlOptions(
-                  urlItems || [],
-                  settings.ignoredUrls || []
-                )}
-                defaultValue={settings.ignoredUrls || []}
-                value={settings.ignoredUrls || []}
-                onValueChange={handleIgnoredUrlsChange}
-                placeholder="e.g. wellsfargo.com, chase.com..."
-                allowCustomValues={true}
-              />
-              {(settings.ignoredUrls || []).some(
-                (url) =>
-                  url.length < 5 ||
-                  ["bank", "pay", "money", "finance"].includes(
-                    url.toLowerCase()
-                  )
-              ) && (
-                <p className="text-xs text-yellow-600 dark:text-yellow-500 flex items-center gap-1 mt-1">
-                  <AlertCircle className="h-3 w-3" />
-                  Short patterns may over-match. Use specific domains.
-                </p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        <ContentFiltersCard
+          rules={windowRules}
+          ignoredUrls={settings.ignoredUrls || []}
+          categoryOwned={settings.categoryOwnedFilters}
+          observedWindows={windowItems || []}
+          observedDomains={urlItems || []}
+          installedApps={installedApps}
+          isLoadingApps={isWindowItemsLoading}
+          onRulesChange={handleWindowRulesChange}
+          onIgnoredUrlsChange={(next) =>
+            handleSettingsChange({ ignoredUrls: next }, true)
+          }
+          onTargetsChange={(next) =>
+            handleSettingsChange(
+              {
+                ignoredWindows: next.rules.ignored,
+                includedWindows: next.rules.included,
+                ignoredUrls: next.ignoredUrls,
+                categoryOwnedFilters: next.owned ?? { apps: [], domains: [] },
+              },
+              true
+            )
+          }
+          onBrowse={(list) => setPicker(list)}
+        />
       </div>
 
       <RemoteSupportLogsCard />
@@ -1869,11 +1685,12 @@ export function PrivacySection() {
               <div className="flex items-center space-x-2.5">
                 <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
-                  <h3 className="text-sm font-medium text-foreground">
+                  <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
                     Analytics
+                    <HelpTooltip text="Product usage events only — features used, errors, performance. Never your screen recordings, audio, transcripts, or OCR text. Signed out, events carry only a random device ID. Signed in, they are linked to your account, including your email." />
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    Anonymous usage data
+                    Usage data, linked to your account when signed in
                   </p>
                 </div>
               </div>
@@ -1968,7 +1785,7 @@ function AdminTeamTokenCard() {
     }
     setSaving(true);
     try {
-      const res = await commands.saveEnterpriseTeamConfig(null, null, trimmed);
+      const res = await commands.saveEnterpriseTeamConfig(null, null, trimmed, null);
       if (res.status === "error") throw new Error(res.error);
       setLiveToken(trimmed);
       setPendingToken(null);
@@ -1990,7 +1807,7 @@ function AdminTeamTokenCard() {
   const handleClear = useCallback(async () => {
     setSaving(true);
     try {
-      const res = await commands.saveEnterpriseTeamConfig(null, null, "");
+      const res = await commands.saveEnterpriseTeamConfig(null, null, "", null);
       if (res.status === "error") throw new Error(res.error);
       setLiveToken(null);
       setPendingToken(null);
@@ -2033,7 +1850,7 @@ function AdminTeamTokenCard() {
                 <button
                   className="underline text-foreground hover:text-foreground/80"
                   onClick={() =>
-                    openUrl("https://screenpipe.com/enterprise?tab=tokens")
+                    openUrl(screenpipeWebUrl("/enterprise?tab=tokens", "https://screenpipe.com"))
                   }
                 >
                   screenpipe.com/enterprise → api tokens

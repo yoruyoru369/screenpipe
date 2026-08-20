@@ -19,7 +19,7 @@
  *
  * Strategy (matches chat-streaming-performance / chat-switch-context-loss):
  * drive a deterministic synthetic stream from the Rust side
- * (`e2e_emit_agent_stream`). Because that stream is emitted by the backend, it
+ * (`plugin:e2e|emit_agent_stream`). Because that stream is emitted by the backend, it
  * keeps producing `agent_event` envelopes even while the panel is unmounted —
  * exactly the real "kept running in the background" case. We start a LONG stream
  * fire-and-forget, hop to Settings mid-stream, come back, assert the running
@@ -105,8 +105,8 @@ async function startAgentStreamNoWait(sessionId: string, deltaCount: number): Pr
       const inv = g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke;
       if (!inv) { done(); return; }
       // Fire-and-forget: do NOT await the stream — the backend keeps emitting.
-      void inv("e2e_emit_agent_stream", { sessionId: sid, deltaCount: count }).catch(() =>
-        inv("e2e_emit_agent_stream", { session_id: sid, delta_count: count }),
+      void inv("plugin:e2e|emit_agent_stream", { sessionId: sid, deltaCount: count }).catch(() =>
+        inv("plugin:e2e|emit_agent_stream", { session_id: sid, delta_count: count }),
       );
       done();
     },
@@ -200,7 +200,10 @@ describe("Chat keeps streaming when opening Settings", function () {
     await navSettings.waitForExist({ timeout: t(10_000) });
     await navSettings.click();
     // Settings page mounted ⇒ the home page (and chat panel) unmounted.
-    await waitForTestId("section-settings-general", 15_000);
+    // Assert on a section-independent marker: nav-settings opens whichever
+    // section was last visited (readLastSettingsSection), so waiting on the
+    // General panel specifically makes this depend on spec ordering.
+    await waitForTestId("settings-back-to-app", 15_000);
     // Sit in Settings briefly so the response keeps streaming in the background.
     await browser.pause(t(2_000));
 

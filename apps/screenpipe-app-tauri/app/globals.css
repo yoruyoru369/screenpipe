@@ -2,6 +2,34 @@
 @tailwind components;
 @tailwind utilities;
 
+.live-view-process-canvas .react-flow__node {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.live-view-process-canvas .react-flow__node:focus,
+.live-view-process-canvas .react-flow__edge:focus {
+  outline: none;
+}
+
+.live-view-process-canvas .react-flow__selection,
+.live-view-process-canvas .react-flow__nodesselection-rect {
+  border: 1px solid hsl(var(--foreground));
+  border-radius: 0;
+  background: hsl(var(--foreground) / 0.04);
+}
+
+.live-view-process-canvas .react-flow__edge-textbg {
+  fill: hsl(var(--background));
+}
+
+.live-view-process-canvas .react-flow__edge-text {
+  fill: hsl(var(--foreground));
+  font-size: 11px;
+}
+
 @layer base {
   :root {
     /* Tell the engine the UI is light by default so native scrollbars and form
@@ -105,6 +133,15 @@
     --sidebar-border: 0 0% 80%;
     --sidebar-ring: 0 0% 0%;
 
+    /* Brand: phosphor intelligence (DESIGN.md).
+       Phosphor marks the boundary where captured work becomes model context or
+       an agent acts. It is not a generic accent — see the phosphor rules in
+       DESIGN.md before using these anywhere new. */
+    --phosphor: 77 100% 62%;          /* #C7FF3E */
+    --phosphor-strong: 79 100% 21%;   /* #4A6B00 — small text/borders on bone */
+    --phosphor-ink: 0 0% 2%;          /* foreground on a phosphor fill */
+    --trace: 60 4% 45%;               /* #78786F — captured evidence, inactive */
+
     /* Sharp corners - no radius */
     --radius: 0;
 
@@ -128,6 +165,13 @@
     color-scheme: dark;
 
     /* Base colors - Slightly lifted black */
+    /* Brand: phosphor reads brighter on ink, so the strong variant is only
+       needed on bone. On ink, phosphor itself is the small-text colour. */
+    --phosphor: 77 100% 62%;
+    --phosphor-strong: 77 100% 62%;
+    --phosphor-ink: 0 0% 2%;
+    --trace: 60 4% 56%;
+
     --background: 0 0% 7%; /* #121212 */
     --foreground: 0 0% 100%; /* #FFFFFF */
 
@@ -424,7 +468,13 @@
       color: hsl(0 0% 0%) !important;
     }
     html:not(.dark) .vibrant-sidebar-fg-muted {
-      color: hsl(0 0% 40%) !important;
+      color: hsl(0 0% 0% / 0.65) !important;
+    }
+    html:not(.dark) .sidebar-text-secondary {
+      color: hsl(0 0% 0% / 0.65) !important;
+    }
+    html:not(.dark) .sidebar-text-tertiary {
+      color: hsl(0 0% 0% / 0.55) !important;
     }
     html:not(.dark) .vibrant-nav-active {
       color: hsl(0 0% 0%) !important;
@@ -433,7 +483,7 @@
       color: hsl(0 0% 0%) !important;
     }
     html:not(.dark) .vibrant-nav-item {
-      color: hsl(0 0% 40%) !important;
+      color: hsl(0 0% 0% / 0.65) !important;
     }
     html:not(.dark) .vibrant-nav-item:hover {
       color: hsl(0 0% 0%) !important;
@@ -471,7 +521,13 @@
       color: hsl(0 0% 100%) !important;
     }
     html:not(.light) .vibrant-sidebar-fg-muted {
-      color: hsl(0 0% 75%) !important;
+      color: hsl(0 0% 100% / 0.65) !important;
+    }
+    html:not(.light) .sidebar-text-secondary {
+      color: hsl(0 0% 100% / 0.65) !important;
+    }
+    html:not(.light) .sidebar-text-tertiary {
+      color: hsl(0 0% 100% / 0.55) !important;
     }
     html:not(.light) .vibrant-nav-active {
       color: hsl(0 0% 100%) !important;
@@ -480,7 +536,7 @@
       color: hsl(0 0% 100%) !important;
     }
     html:not(.light) .vibrant-nav-item {
-      color: hsl(0 0% 80%) !important;
+      color: hsl(0 0% 100% / 0.65) !important;
     }
     html:not(.light) .vibrant-nav-item:hover {
       color: hsl(0 0% 100%) !important;
@@ -512,8 +568,16 @@
   .vibrant-sidebar-fg {
     color: hsl(var(--foreground));
   }
+  /* Derive sidebar hierarchy directly from foreground. Starting with the
+     already-muted global token and then adding alpha double-mutes small text. */
   .vibrant-sidebar-fg-muted {
-    color: hsl(var(--muted-foreground));
+    color: hsl(var(--foreground) / 0.65);
+  }
+  .sidebar-text-secondary {
+    color: hsl(var(--foreground) / 0.65);
+  }
+  .sidebar-text-tertiary {
+    color: hsl(var(--foreground) / 0.55);
   }
   .vibrant-nav-active {
     color: hsl(var(--foreground));
@@ -523,7 +587,7 @@
     color: hsl(var(--foreground));
   }
   .vibrant-nav-item {
-    color: hsl(var(--muted-foreground));
+    color: hsl(var(--foreground) / 0.65);
   }
   .vibrant-nav-item:hover {
     color: hsl(var(--foreground));
@@ -617,6 +681,93 @@
       animation: none;
       left: 50%;
       opacity: 1;
+    }
+  }
+
+  /* Onboarding: captured context travels through screenpipe and assembles
+     into a Live View. Discrete motion keeps the monochrome geometry crisp. */
+  @keyframes sp-onboarding-packet {
+    0% {
+      left: 0;
+      opacity: 0;
+    }
+    12% {
+      opacity: 1;
+    }
+    88% {
+      opacity: 1;
+    }
+    100% {
+      left: calc(100% - 7px);
+      opacity: 0;
+    }
+  }
+
+  @keyframes sp-onboarding-scan {
+    0% {
+      transform: translateY(0);
+      opacity: 0;
+    }
+    20% {
+      opacity: 1;
+    }
+    80% {
+      opacity: 1;
+    }
+    100% {
+      transform: translateY(25px);
+      opacity: 0;
+    }
+  }
+
+  @keyframes sp-onboarding-core {
+    0%,
+    100% {
+      opacity: 0.18;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @keyframes sp-onboarding-cursor {
+    0%,
+    45% {
+      opacity: 1;
+    }
+    46%,
+    100% {
+      opacity: 0;
+    }
+  }
+
+  .sp-onboarding-packet {
+    animation: sp-onboarding-packet 1.2s steps(8, end) infinite;
+  }
+
+  .sp-onboarding-scan {
+    animation: sp-onboarding-scan 1.5s steps(6, end) infinite;
+  }
+
+  .sp-onboarding-core-cell {
+    animation: sp-onboarding-core 600ms steps(2, end) infinite;
+  }
+
+  .sp-onboarding-cursor {
+    animation: sp-onboarding-cursor 800ms steps(1, end) infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sp-onboarding-packet,
+    .sp-onboarding-scan,
+    .sp-onboarding-core-cell,
+    .sp-onboarding-cursor {
+      animation: none;
+      opacity: 1;
+    }
+
+    .sp-onboarding-packet {
+      left: 50%;
     }
   }
 
@@ -810,4 +961,31 @@
   float: left;
   height: 0;
   pointer-events: none;
+}
+
+/* Reduced motion — global safety net.
+   Individual components opt in today (`.meeting-listening-stick`,
+   `.sp-flow-dot`, `.sp-onboarding-*`), which means every animation added
+   since has to remember to. This catches the rest.
+
+   Durations collapse to 0.01ms rather than `animation: none`, deliberately:
+   `none` never fires `animationend`/`transitionend`, so anything awaiting
+   those events to advance a state machine would hang instead of finishing
+   instantly. Iteration count is left alone for the same reason — an
+   infinite liveness indicator keeps ticking, just imperceptibly, rather
+   than freezing on a frame and reading as "stuck".
+
+   Components needing a *meaningful* static fallback (a recording dot that
+   must still look live) keep their own rule; those still win on the
+   properties they set. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
 }

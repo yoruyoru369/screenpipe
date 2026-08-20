@@ -5,12 +5,19 @@ description: Manage screenpipe pipes (scheduled AI automations) and connections 
 
 # Screenpipe CLI
 
-Use `bun x screenpipe@latest` to run CLI commands. No separate install needed.
+Run every CLI command exactly like this, from a clean temp directory so `bun x` cannot collide with a project's `node_modules`:
 
-**IMPORTANT**: Always run `bun x` commands from a clean temp directory to avoid node_modules conflicts:
 ```bash
-cd "$(mktemp -d)" && bun x screenpipe@latest <command>
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} <command>
 ```
+
+`$SCREENPIPE_CLI` is an already-resolved native binary that screenpipe publishes and refreshes for you. When it is set, a call costs **~0.15s**. The `bun x screenpipe@latest` fallback runs when it is not (a plain terminal, a fresh install, an offline machine) and costs **~4s**, because `@latest` re-resolves the npm registry every single time. Never replace the whole expression with just `bun x screenpipe@latest` — you would give up the fast path for no reason.
+
+**Rules:** every invocation is `cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} …` · keep the `${SCREENPIPE_CLI:-…}` form intact · never drop the `cd` prefix · copy the examples below verbatim rather than shortening them · because the `cd` changes your working directory, **any path you pass must be absolute** (`~/...` or `/...`), never relative (`./my-pipe`).
+
+Works on macOS, Linux, and Windows: the CLI always runs under bash, and `mktemp` is present on all three (on Windows via the bundled git-portable `usr/bin`).
+
+**The CLI is the slow path.** Even at 0.15s it is a process spawn; the local REST API answers the same read in ~0.02s (see the `screenpipe-api` skill). Use the CLI for state changes it uniquely owns — `pipe enable`, `connection set` — and read through the API or MCP tools.
 
 > **Sandboxed shells:** some agents (e.g. Codex) block all shell network access, so `bun x` cannot fetch the package and CLI calls to `localhost:3030` fail instantly. If that happens, use the screenpipe MCP tools instead of the CLI.
 
@@ -18,7 +25,7 @@ cd "$(mktemp -d)" && bun x screenpipe@latest <command>
 
 - **All platforms** → `bash` (on Windows, the bundled git-portable bash is used automatically)
 
-> **Note:** the bash tool truncates output around ~50 KB. Long listings (`connection list`, `pipe list`, etc.) are sorted with connected/enabled rows first, but if you need a specific row, pipe through `grep` or `head` rather than scanning the full output — e.g. `bun x screenpipe@latest connection list | grep -E 'browser|connected'`.
+> **Note:** the bash tool truncates output around ~50 KB. Long listings (`connection list`, `pipe list`, etc.) are sorted with connected/enabled rows first, but if you need a specific row, pipe through `grep` or `head` rather than scanning the full output — e.g. `cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection list | grep -E 'browser|connected'`.
 
 ---
 
@@ -29,14 +36,14 @@ Pipes are markdown-based AI automations that run on schedule. Each pipe lives at
 ### Commands
 
 ```bash
-bun x screenpipe@latest pipe list                    # List all pipes (compact table)
-bun x screenpipe@latest pipe enable <name>           # Enable a pipe
-bun x screenpipe@latest pipe disable <name>          # Disable a pipe
-bun x screenpipe@latest pipe run <name>              # Run once immediately (for testing)
-bun x screenpipe@latest pipe logs <name>             # View execution logs
-bun x screenpipe@latest pipe install <url-or-path>   # Install from GitHub or local path
-bun x screenpipe@latest pipe delete <name>           # Delete a pipe
-bun x screenpipe@latest pipe models list             # View AI model presets
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe list                    # List all pipes (compact table)
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe enable <name>           # Enable a pipe
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe disable <name>          # Disable a pipe
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe run <name>              # Run once immediately (for testing)
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe logs <name>             # View execution logs
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe install <url-or-abs-path>  # Install from GitHub or an absolute local path
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe delete <name>           # Delete a pipe
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe models list             # View AI model presets
 ```
 
 ### Creating a Pipe
@@ -87,10 +94,23 @@ Screenpipe prepends a context header with time range, timezone, OS, and API URL 
 
 After creating:
 ```bash
-bun x screenpipe@latest pipe install ~/.screenpipe/pipes/my-pipe
-bun x screenpipe@latest pipe enable my-pipe
-bun x screenpipe@latest pipe run my-pipe   # test immediately
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe install ~/.screenpipe/pipes/my-pipe
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe enable my-pipe
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} pipe run my-pipe   # terminal-only; in-app chat uses the workflow below
 ```
+
+### Testing from in-app chat
+
+The cloud JWT is intentionally absent from Bash. Do not expose or recover it, and do not use standalone `pipe run`. Test through the authenticated desktop runtime:
+
+```bash
+api="${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}"
+auth="Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY"
+curl -sS -X POST -H "$auth" "$api/pipes/my-pipe/run"
+curl -sS -H "$auth" "$api/pipes/my-pipe/logs"
+```
+
+`{"success":true}` means the run started, not that it passed. Poll for a new terminal log. Bind only after `success: true`; otherwise report its `stderr` and leave the Live View unchanged.
 
 ### Editing Config
 
@@ -129,7 +149,7 @@ Pipes can produce user-facing output files that appear in the Artifacts library.
 1. Use `pipe list` (not `--json`) — table output is compact
 2. Never dump full pipe JSON — can be 15MB+
 3. Check logs first when debugging: `pipe logs <name>`
-4. Use `pipe run <name>` to test before waiting for schedule
+4. Outside in-app chat, use `pipe run <name>` before waiting for a schedule; in-app chat uses the authenticated runtime above
 
 ---
 
@@ -140,36 +160,36 @@ Manage integrations (Telegram, Slack, Discord, Email, Todoist, Teams) from the C
 ### Commands
 
 ```bash
-bun x screenpipe@latest connection list              # List all connections + status
-bun x screenpipe@latest connection list --json       # JSON output
-bun x screenpipe@latest connection get <id>          # Show saved credentials
-bun x screenpipe@latest connection get <id> --json   # JSON output
-bun x screenpipe@latest connection set <id> key=val  # Save credentials
-bun x screenpipe@latest connection test <id>         # Test a connection
-bun x screenpipe@latest connection remove <id>       # Remove credentials
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection list              # List all connections + status
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection list --json       # JSON output
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection get <id>          # Show status + non-secret settings
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection get <id> --json   # JSON output
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection set <id> key=val  # Save credentials
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection test <id>         # Test a connection
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection remove <id>       # Remove credentials
 ```
 
 ### Examples
 
 ```bash
 # Set up Telegram
-bun x screenpipe@latest connection set telegram bot_token=123456:ABC-DEF chat_id=5776185278
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection set telegram bot_token=123456:ABC-DEF chat_id=5776185278
 
 # Set up Slack webhook
-bun x screenpipe@latest connection set slack webhook_url=https://hooks.slack.com/services/...
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection set slack webhook_url=https://hooks.slack.com/services/...
 
 # Verify it works
-bun x screenpipe@latest connection test telegram
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection test telegram
 
 # Check what's connected
-bun x screenpipe@latest connection list
+cd "$(mktemp -d)" && ${SCREENPIPE_CLI:-bun x screenpipe@latest} connection list
 ```
 
 Connection IDs: `telegram`, `slack`, `discord`, `email`, `todoist`, `teams`, `google-calendar`, `openclaw`
 
-Credentials are stored locally at `~/.screenpipe/connections.json`.
+Credentials are stored locally and are not printed by `connection get`.
 
-**Per-integration details**: don't guess API shapes from this skill. Run `connection list` or `connection get <id>` — each entry includes a self-describing `description` with credential fields, endpoints, and example bodies. Only fetch the integration you need.
+**Per-integration details**: don't guess API shapes from this skill. Run `connection list` for self-describing local endpoints. `connection get <id>` returns only status and non-secret settings.
 
 ## Publishing pipes to the store
 

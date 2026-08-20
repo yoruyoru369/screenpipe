@@ -290,8 +290,7 @@ impl DatabaseManager {
         const BATCH: usize = 500;
         let mut tx = self.begin_immediate_with_retry().await?;
         for group in chunk_ids.chunks(BATCH) {
-            let placeholders: String = std::iter::repeat("?")
-                .take(group.len())
+            let placeholders: String = std::iter::repeat_n("?", group.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let del_transcriptions = format!(
@@ -416,13 +415,62 @@ impl DatabaseManager {
 
         let trimmed = transcription.trim();
 
-        // Pre-read phase: runs on read pool, no write lock held
-        let existing_chunk_id = self.get_audio_chunk_id(file_path).await?;
-        let is_duplicate = if !trimmed.is_empty() {
-            self.has_similar_recent_transcription(trimmed, DEDUP_TIME_WINDOW_SECS)
-                .await?
-        } else {
+        // Pre-read phase: runs on read pool, no write lock held.
+        //
+        // The read pool is shared with search, the timeline, the local API and
+        // pipes, so a burst there used to fail this insert outright — before the
+        // write was ever attempted, and with a perfectly healthy write path.
+        // That is a transcription lost to someone else's query load.
+        //
+        // The chunk-id lookup cannot simply fail open: `audio_chunks.file_path`
+        // has no unique index, so guessing "no row" would insert a second chunk
+        // for the same file. Retry it instead — read-pool pressure is bursty, so
+        // a bounded retry clears the common case.
+        let mut existing_chunk_id = None;
+        for attempt in 0..PRE_READ_ATTEMPTS {
+            match self.get_audio_chunk_id(file_path).await {
+                Ok(id) => {
+                    existing_chunk_id = Some(id);
+                    break;
+                }
+                Err(e) if attempt + 1 < PRE_READ_ATTEMPTS => {
+                    warn!(
+                        "audio chunk lookup stalled on the read pool (attempt {}/{}): {}",
+                        attempt + 1,
+                        PRE_READ_ATTEMPTS,
+                        e
+                    );
+                    tokio::time::sleep(Duration::from_millis(250 * (attempt as u64 + 1))).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let existing_chunk_id = existing_chunk_id.expect("loop returns on final failure");
+        // Cross-device dedup is an optimization, not a correctness requirement,
+        // and it scans up to 50 recent rows on the *read* pool for every single
+        // transcription insert. Propagating its failure meant a saturated read
+        // pool — search, timeline, the API, pipes all share it — threw away a
+        // transcription that the write path was perfectly able to store.
+        //
+        // Failing open keeps the audio. The cost of guessing wrong is one
+        // duplicate transcription from a second device; the cost of the old
+        // behaviour was losing the recording. Not close.
+        let is_duplicate = if trimmed.is_empty() {
             false
+        } else {
+            match self
+                .has_similar_recent_transcription(trimmed, DEDUP_TIME_WINDOW_SECS)
+                .await
+            {
+                Ok(is_duplicate) => is_duplicate,
+                Err(e) => {
+                    warn!(
+                        "cross-device dedup check unavailable ({}); keeping the transcription",
+                        e
+                    );
+                    false
+                }
+            }
         };
 
         if is_duplicate {
@@ -709,6 +757,7 @@ impl DatabaseManager {
                     ChunkOutcome::Duplicate => "transcribed",
                     _ => unreachable!(),
                 };
+                let mut tx = self.begin_immediate_with_retry().await?;
                 sqlx::query(
                     "UPDATE audio_chunks \
                      SET transcription_status = ?1, \
@@ -720,8 +769,9 @@ impl DatabaseManager {
                 .bind(status)
                 .bind(now)
                 .bind(audio_chunk_id)
-                .execute(&self.pool)
+                .execute(&mut **tx.conn())
                 .await?;
+                tx.commit().await?;
                 Ok(())
             }
 
@@ -729,6 +779,7 @@ impl DatabaseManager {
                 // Transient failure: bump attempts. If we'd hit the cap, flip
                 // to `failed` so the sweep stops re-trying. We do this in one
                 // UPDATE statement so a concurrent attempt can't double-flip.
+                let mut tx = self.begin_immediate_with_retry().await?;
                 sqlx::query(
                     "UPDATE audio_chunks \
                      SET transcription_attempts = transcription_attempts + 1, \
@@ -744,12 +795,14 @@ impl DatabaseManager {
                 .bind(&reason)
                 .bind(MAX_TRANSCRIPTION_ATTEMPTS)
                 .bind(audio_chunk_id)
-                .execute(&self.pool)
+                .execute(&mut **tx.conn())
                 .await?;
+                tx.commit().await?;
                 Ok(())
             }
 
             ChunkOutcome::FailedPermanent { reason } => {
+                let mut tx = self.begin_immediate_with_retry().await?;
                 sqlx::query(
                     "UPDATE audio_chunks \
                      SET transcription_status = 'failed', \
@@ -761,8 +814,9 @@ impl DatabaseManager {
                 .bind(now)
                 .bind(&reason)
                 .bind(audio_chunk_id)
-                .execute(&self.pool)
+                .execute(&mut **tx.conn())
                 .await?;
+                tx.commit().await?;
                 Ok(())
             }
         }
@@ -777,6 +831,7 @@ impl DatabaseManager {
         &self,
         audio_chunk_id: i64,
     ) -> Result<(), sqlx::Error> {
+        let mut tx = self.begin_immediate_with_retry().await?;
         sqlx::query(
             "UPDATE audio_chunks \
              SET transcription_status = 'pending', \
@@ -786,8 +841,9 @@ impl DatabaseManager {
              WHERE id = ?1",
         )
         .bind(audio_chunk_id)
-        .execute(&self.pool)
+        .execute(&mut **tx.conn())
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 

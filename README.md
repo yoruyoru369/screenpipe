@@ -1,3 +1,4 @@
+<h1 align="center"><a href="https://screenpipe.com/how-to-install?download=1">DOWNLOAD SCREENPIPE</a></h1>
 
 <img width="1500" height="500" alt="image" src="https://github.com/user-attachments/assets/058a44b8-fcad-4a37-92d8-830167dbd400" />
 
@@ -21,12 +22,6 @@
 
 <p align="center">
 <a align="center" href="https://trendshift.io/repositories/20386" target="_blank"><img align="center" src="https://trendshift.io/api/badge/repositories/20386" alt="screenpipe%2Fscreenpipe | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</p>
-
-<p align="center">
-  <a href="https://screenpi.pe/onboarding" target="_blank">
-    <img src="https://img.shields.io/badge/download-desktop%20app-black?style=for-the-badge" alt="download">
-  </a>
 </p>
 
 <p align="center">
@@ -79,7 +74,7 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 <img width="360" height="311" alt="image" src="https://github.com/user-attachments/assets/cfbf0fd3-84ef-4feb-8c6d-2779d67058a7" />
 
 - **search with ai** - find anything using natural language
-- **100% local** - your data never leaves your machine
+- **100% local** - your data lives on your machine only
 - **source-available** - inspect, modify, audit ([LICENSE.md](LICENSE.md))
 
 <p align="center">
@@ -91,7 +86,7 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 
 ## install
 
-[download the desktop app](https://screenpi.pe/onboarding) — all features, auto-updates
+[download the desktop app](https://screenpipe.com/how-to-install?download=1) — all features, auto-updates
 
 or run the CLI:
 
@@ -102,6 +97,8 @@ npx screenpipe record
 then 
 
 ```bash
+npx screenpipe setup
+# or
 claude mcp add screenpipe -- npx -y screenpipe-mcp@latest
 ```
 
@@ -122,8 +119,7 @@ then ask claude `what did i see in the last 5 mins?` or `summarize today convers
 
 <p align="center">
     <a href="https://docs.screenpi.pe">docs</a> ·
-    <a href="https://screenpi.pe/sdk">sdk</a> ·
-    <a href="https://screenpi.pe/team">team</a> ·
+    <a href="https://screenpi.pe/team">enterprise</a> ·
     <a href="https://discord.gg/screenpipe">discord</a> ·
     <a href="https://twitter.com/screenpipe">x</a> ·
     <a href="https://www.youtube.com/@screen_pipe">youtube</a> ·
@@ -132,7 +128,7 @@ then ask claude `what did i see in the last 5 mins?` or `summarize today convers
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, maintainers, and how to submit PRs. AI/vibe-coded PRs welcome!
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, maintainers, and how to submit PRs.
 
 Thanks to all contributors:
 
@@ -149,6 +145,7 @@ Thanks to all contributors:
 - [Português BR (Brazilian Portuguese)](docs/translations/README-pt_BR.md)
 - [Deutsch (German)](docs/translations/README-de.md)
 - [Українська (Ukrainian)](docs/translations/README-uk.md)
+- [한국어 (Korean)](docs/translations/README-ko.md)
 
 Want to translate screenpipe into another language? See [`docs/translations/`](docs/translations/README.md).
 
@@ -340,7 +337,7 @@ Screen frames, audio, transcripts, and the search index are stored locally by de
 
 - Product analytics is enabled by default through PostHog. It uses a stable installation identifier and, when you sign in, may associate account details such as your email with app, hostname, operating-system, hardware, and other device or feature metadata.
 - Sentry receives crash and error diagnostics while telemetry is enabled.
-- If you choose cloud transcription, hosted AI, or cloud sync, the audio, prompts and selected context, or synced data needed for that feature is processed remotely by the configured service.
+- If you choose cloud transcription, screenpipe cloud AI, or cloud sync, the audio, prompts and selected context, or synced data needed for that feature is processed remotely by the configured service.
 
 You can disable telemetry in **Settings → Privacy → Analytics**, then apply the settings change. To keep capture and AI processing local, leave cloud sync off and select local transcription and a local AI provider such as Ollama.
 

@@ -76,7 +76,7 @@ function ensureSigning(): void {
   if (!existsSync(PRIVATE_KEY)) {
     console.info('[updater-local] generating dev minisign keypair…');
     const gen = Bun.spawnSync(
-      ['bunx', 'tauri', 'signer', 'generate', '-w', PRIVATE_KEY, '--ci', '--password', SIGNING_PASSWORD],
+      ['bun', 'x', 'tauri', 'signer', 'generate', '-w', PRIVATE_KEY, '--ci', '--password', SIGNING_PASSWORD],
       { cwd: APP_ROOT, stdin: 'ignore', stderr: 'inherit', stdout: 'inherit' },
     );
     if (gen.exitCode !== 0) throw new Error('tauri signer generate failed (exit ' + gen.exitCode + ')');
@@ -103,14 +103,42 @@ function cmdSetupKeys(): void {
   console.info('[updater-local] merge:  ', PUBKEY_MERGE);
 }
 
-function cmdBuild(): void {
+function cmdBuild(argv: string[]): void {
+  // Optional overrides for the packaged updater e2e:
+  //   --app-version 9.9.9      bake a different version into the binary via a
+  //                            config merge (old app vs. served update)
+  //   --features a,b           extra cargo features on top of official-build
+  //                            (the packaged test adds `e2e` for its driver)
+  let appVersion: string | undefined;
+  let extraFeatures: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--app-version') appVersion = argv[++i];
+    else if (argv[i] === '--features') extraFeatures = (argv[++i] ?? '').split(',').filter(Boolean);
+  }
+
   const cfgE2e = path.join(APP_ROOT, 'src-tauri', 'tauri.e2e.json');
   const customSigning =
     Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY?.trim()) ||
     Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY_PATH?.trim());
 
+  const features = ['official-build', ...extraFeatures].join(',');
   let env: Record<string, string | undefined> = { ...process.env };
-  let tauriArgs = ['bunx', 'tauri', 'build', '--features', 'official-build', '--config', cfgE2e];
+  let tauriArgs = ['bun', 'x', 'tauri', 'build', '--features', features, '--config', cfgE2e];
+
+  if (appVersion) {
+    if (!/^\d+\.\d+\.\d+$/.test(appVersion)) {
+      console.error(`--app-version must be plain semver, got: ${appVersion}`);
+      process.exit(1);
+    }
+    const versionMerge = path.join(SIGNING, `version-merge-${appVersion}.json`);
+    mkdirSync(path.dirname(versionMerge), { recursive: true });
+    writeFileSync(
+      versionMerge,
+      `${JSON.stringify({ $schema: 'https://schema.tauri.app/config/2', version: appVersion }, null, 2)}\n`,
+      'utf8',
+    );
+    tauriArgs = [...tauriArgs, '--config', versionMerge];
+  }
 
   if (!customSigning) {
     ensureSigning();
@@ -151,7 +179,7 @@ async function discoverBundle(): Promise<string> {
   const root = bundleRoot();
   if (process.platform === 'darwin') return newest(path.join(root, 'macos'),    n => n.endsWith('.app.tar.gz'));
   if (process.platform === 'linux')  return newest(path.join(root, 'appimage'), n => n.endsWith('.AppImage.tar.gz'));
-  if (process.platform === 'win32')  return newest(path.join(root, 'nsis'),     n => n.endsWith('.nsis.zip') || n.endsWith('.exe.zip'));
+  if (process.platform === 'win32')  return newest(path.join(root, 'nsis'),     n => n.endsWith('.nsis.zip') || n.endsWith('.exe.zip') || n.endsWith('-setup.exe'));
   throw new Error(`unsupported platform: ${process.platform}`);
 }
 
@@ -265,7 +293,7 @@ async function cmdServe(): Promise<void> {
 const [cmd, ...rest] = process.argv.slice(2);
 
 switch (cmd) {
-  case 'build':            cmdBuild(); break;
+  case 'build':            cmdBuild(rest); break;
   case 'setup-keys':       cmdSetupKeys(); break;
   case 'stage-last':       await cmdStageLast(rest); break;
   case 'prepare-manifest': await cmdPrepareManifest(rest); break;

@@ -30,10 +30,18 @@
     {
       "identifier": "shell:allow-open",
       "allow": [
-        { "url": "^https?://.*" },
-        { "url": "^mailto:.*" },
-        { "url": "^tel:.*" },
-        { "url": "^x-apple-reminderkit://.*" }
+        {
+          "url": "^https?://.*"
+        },
+        {
+          "url": "^mailto:.*"
+        },
+        {
+          "url": "^tel:.*"
+        },
+        {
+          "url": "^x-apple-reminderkit://.*"
+        }
       ]
     },
     "store:default",
@@ -61,11 +69,21 @@
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "^https?://.*" },
-        { "url": "^mailto:.*" },
-        { "url": "^tel:.*" },
-        { "url": "^x-apple-reminderkit://.*" },
-        { "url": "^obsidian://.*" }
+        {
+          "url": "^https?://.*"
+        },
+        {
+          "url": "^mailto:.*"
+        },
+        {
+          "url": "^tel:.*"
+        },
+        {
+          "url": "^x-apple-reminderkit://.*"
+        },
+        {
+          "url": "^obsidian://.*"
+        }
       ]
     },
     "core:window:default",
@@ -74,6 +92,8 @@
     "core:window:allow-destroy",
     "core:window:allow-start-dragging",
     "core:window:allow-show",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
     "core:window:allow-unminimize",
     "core:window:allow-set-focus",
     {
@@ -286,7 +306,7 @@
           "args": [
             "-c",
             {
-              "validator": "\\S+"
+              "validator": "\\S[\\s\\S]*"
             }
           ],
           "sidecar": false
@@ -484,6 +504,30 @@
         },
         {
           "url": "https://**/*",
+          "methods": [
+            "GET",
+            "POST",
+            "PUT",
+            "DELETE",
+            "PATCH",
+            "HEAD",
+            "OPTIONS"
+          ]
+        },
+        {
+          "url": "http://**:*/*",
+          "methods": [
+            "GET",
+            "POST",
+            "PUT",
+            "DELETE",
+            "PATCH",
+            "HEAD",
+            "OPTIONS"
+          ]
+        },
+        {
+          "url": "https://**:*/*",
           "methods": [
             "GET",
             "POST",

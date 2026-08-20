@@ -38,7 +38,7 @@ fn build_livetext_bridge() {
     }
 
     let has_vk = has_visionkit_sdk();
-    println!("cargo:warning=VisionKit SDK check: {}", has_vk);
+    eprintln!("VisionKit SDK check: {}", has_vk);
     if !has_vk {
         println!("cargo:warning=VisionKit.framework not found in SDK, building Live Text stub");
         build_livetext_stub(&out_dir, &lib_path);
@@ -298,8 +298,137 @@ void inbox_hide(void) {}
     println!("cargo:rustc-link-lib=static=notification_panel");
 }
 
+/// `tauri::generate_context!` resolves `frontendDist` (`../out`) at compile
+/// time, but cargo-only builds (`cargo test`, bindings) never run the Next.js
+/// build. Materialize a placeholder so a fresh clone compiles; a real
+/// `bun run build` replaces the directory wholesale.
+fn ensure_frontend_dist() {
+    let dist = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .parent()
+        .unwrap()
+        .join("out");
+    if dist.join("index.html").exists() {
+        return;
+    }
+    std::fs::create_dir_all(&dist).expect("create frontendDist placeholder");
+    std::fs::write(dist.join("index.html"), b"<!doctype html>\n")
+        .expect("write frontendDist placeholder");
+}
+
+fn generate_and_validate_tauri_commands() {
+    // This Cargo.toml is both the app package and a workspace containing the
+    // Windows WER helper. The helper defaults to scanning workspace members;
+    // once `wer-dump-helper` was added, that excluded the root app package and
+    // silently produced `tauri::generate_handler![]` in release builds.
+    let options = tauri_helper::TauriHelperOptions {
+        members: Some(vec![".".to_string()]),
+    };
+    tauri_helper::generate_command_file(options);
+
+    // Never publish another native binary with an empty or partial command
+    // registry. These sentinels cover startup, authentication, and build-policy
+    // checks that the frontend needs before it can render the normal app.
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let commands_path = manifest_dir
+        .join("target")
+        .join("tauri_commands_list")
+        .join("screenpipe_app.txt");
+    let commands = std::fs::read_to_string(&commands_path).unwrap_or_else(|error| {
+        panic!(
+            "missing generated Tauri command registry at {}: {error}",
+            commands_path.display()
+        )
+    });
+    for required in [
+        "screenpipe_app::config::get_screenpipe_base_dir",
+        "screenpipe_app::commands::get_cloud_token",
+        "screenpipe_app::commands::is_enterprise_build_cmd",
+    ] {
+        assert!(
+            commands.lines().any(|command| command == required),
+            "generated Tauri command registry is missing required command {required}"
+        );
+    }
+    if let Some(command) = commands.lines().find(|command| {
+        command
+            .rsplit("::")
+            .next()
+            .is_some_and(|name| name.starts_with("e2e_") || name.starts_with("get_e2e_"))
+    }) {
+        panic!("generated production Tauri command registry contains E2E-only command {command}");
+    }
+}
+
+const E2E_COMMANDS: &[&str] = &[
+    "main_overlay_visible",
+    "mark_capture_intended",
+    "emit_disk_space_low",
+    "emit_disk_space_recovered",
+    "reset_disk_pressure_notification_latch",
+    "disk_pressure_notification_armed",
+    "handle_disk_space_low",
+    "capture_session_running",
+    "set_low_disk_guard_enabled",
+    "set_notification_master_enabled",
+    "low_disk_guard_enabled",
+    "set_tray_recording_status",
+    "installed_tray_recording_status",
+    "shortcut_reminder_visible",
+    "open_auto_meeting",
+    "active_meeting_id",
+    "native_meeting_overlay_state",
+    "native_shortcut_set_hovering",
+    "native_toggle_meeting_pin",
+    "emit_meeting_overlay_transcript",
+    "emit_agent_stream",
+    "emit_settled_agent_follow_up",
+    "emit_pipe_stream",
+    "arm_capture_loop_silent_fault",
+    "arm_sck_lookup_hang_fault",
+    "screen_is_locked",
+    "set_screen_recording_restart_required",
+    "screen_recording_restart_requested",
+    "recording_health_return_race",
+    "owned_browser_visible",
+    "owned_browser_detach",
+    "inject_db_hard_fault",
+    "db_hard_fault_state",
+    "seed_flags",
+    "capture_pi_start_error",
+    "set_onboarding_completed_ago",
+    "e2e_set_activation_allowed",
+];
+
+fn validate_e2e_command_inventory() {
+    let source_path = std::path::Path::new("src/e2e/commands.rs");
+    println!("cargo:rerun-if-changed={}", source_path.display());
+    let source = std::fs::read_to_string(source_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read E2E command inventory at {}: {error}",
+            source_path.display()
+        )
+    });
+    let handler = source
+        .split_once("tauri::generate_handler![")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(handler, _)| handler)
+        .unwrap_or_else(|| panic!("missing E2E generate_handler inventory"));
+    let runtime_commands = handler
+        .split(',')
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        runtime_commands, E2E_COMMANDS,
+        "E2E runtime handler and feature-only ACL command inventories diverged"
+    );
+}
+
 fn main() {
-    tauri_helper::generate_command_file(tauri_helper::TauriHelperOptions::default());
+    generate_and_validate_tauri_commands();
+
+    ensure_frontend_dist();
 
     // Stamp the build time so `main.rs` can self-quiesce Sentry reports
     // for ancient builds. This makes the Sentry inbox reflect what's
@@ -427,6 +556,19 @@ fn main() {
         }
     }
 
+    // Windows: build the WER runtime exception helper DLL (fail-fast crash
+    // dump recovery, see src/windows_crash_dump.rs) and stage it under
+    // src-tauri/wer/ so the `wer\*.dll` resource glob in
+    // tauri.windows.conf.json always resolves — tauri-build hard-fails on a
+    // glob that matches nothing, which broke every build without a staged
+    // DLL. Built here rather than in pre_build.js or a workflow step so it
+    // runs in the exact toolchain environment of the app build itself
+    // (cargo-under-bun in pre_build.js resolved Git's GNU link.exe instead
+    // of MSVC's and failed to link, PR #5568).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        build_wer_dump_helper();
+    }
+
     // Windows: raise the main-thread stack reserve from the 1 MiB PE default to
     // 8 MiB, matching the Linux/macOS main-thread defaults. Debug builds place
     // large unoptimized futures/frames on the main thread's stack (the CLI's
@@ -442,7 +584,67 @@ fn main() {
         }
     }
 
-    tauri_build::build()
+    let mut attributes = tauri_build::Attributes::new();
+    if std::env::var_os("CARGO_FEATURE_E2E").is_some() {
+        validate_e2e_command_inventory();
+        attributes = attributes
+            .plugin(
+                "e2e",
+                tauri_build::InlinedPlugin::new()
+                    .commands(E2E_COMMANDS)
+                    .default_permission(tauri_build::DefaultPermissionRule::AllowAllCommands),
+            )
+            .capabilities_path_pattern("capabilities/*.json");
+    } else {
+        attributes = attributes.capabilities_path_pattern("capabilities/main.json");
+    }
+
+    tauri_build::try_build(attributes)
+        .unwrap_or_else(|error| panic!("failed to build Tauri configuration: {error:#}"));
+}
+
+/// Build the `screenpipe-wer-dump-helper` cdylib with a nested cargo
+/// invocation and stage the DLL into `src-tauri/wer/` for bundling.
+///
+/// A separate `--target-dir` under OUT_DIR avoids deadlocking on the outer
+/// build's target-dir lock; `CARGO` and `TARGET` come from the outer build so
+/// toolchain and architecture (x64/arm64) always match the app.
+fn build_wer_dump_helper() {
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-changed=wer-dump-helper/src/lib.rs");
+    println!("cargo:rerun-if-changed=wer-dump-helper/Cargo.toml");
+
+    let target = std::env::var("TARGET").unwrap();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let helper_target_dir =
+        std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("wer-dump-helper-target");
+
+    let status = std::process::Command::new(&cargo)
+        .current_dir(manifest_dir.join("wer-dump-helper"))
+        .args([
+            "build",
+            "--release",
+            "--package",
+            "screenpipe-wer-dump-helper",
+        ])
+        .args(["--target", &target])
+        .arg("--target-dir")
+        .arg(&helper_target_dir)
+        .status();
+    match status {
+        Ok(status) if status.success() => {}
+        other => panic!("failed to build screenpipe-wer-dump-helper: {other:?}"),
+    }
+
+    let dll_name = "screenpipe_wer_dump_helper.dll";
+    let built = helper_target_dir
+        .join(&target)
+        .join("release")
+        .join(dll_name);
+    let stage_dir = manifest_dir.join("wer");
+    std::fs::create_dir_all(&stage_dir).expect("create src-tauri/wer staging dir");
+    std::fs::copy(&built, stage_dir.join(dll_name))
+        .unwrap_or_else(|error| panic!("stage {dll_name} from {}: {error}", built.display()));
 }
 
 /// Compile shortcut_reminder.swift into a static library.
@@ -529,7 +731,7 @@ int shortcut_show(const char* json) { (void)json; return -2; }
 int shortcut_hide(void) { return -2; }
 int shortcut_is_available(void) { return 0; }
 void shortcut_set_meeting_active(int active) { (void)active; }
-void shortcut_set_inbox_unread(int count) { (void)count; }
+void shortcut_set_meeting_stop_result(int succeeded) { (void)succeeded; }
 int shortcut_set_health_state(const char* state) { (void)state; return -2; }
 int shortcut_get_frame(double* x, double* y, double* w, double* h) {
     (void)x; (void)y; (void)w; (void)h; return -2;
@@ -601,7 +803,7 @@ fn stage_mlx_metallib() {
         // Download mlx.metallib (pre-compiled MLX Metal shaders) for parakeet-mlx.
         // MLX needs this file next to the binary at runtime. The release
         // workflow exposes the target-suffixed externalBin copy to Tauri.
-        println!("cargo:warning=mlx-metallib: downloading from GitHub releases...");
+        eprintln!("mlx-metallib: downloading from GitHub releases...");
         let url =
             "https://github.com/screenpipe/screenpipe/releases/download/mlx-metallib-v0.2.0/mlx.metallib";
         let status = std::process::Command::new("curl")
@@ -610,10 +812,7 @@ fn stage_mlx_metallib() {
         match status {
             Ok(s) if s.success() => {
                 let size = std::fs::metadata(&metallib).map(|m| m.len()).unwrap_or(0);
-                println!(
-                    "cargo:warning=mlx-metallib: downloaded ({} MB)",
-                    size / 1_000_000
-                );
+                eprintln!("mlx-metallib: downloaded ({} MB)", size / 1_000_000);
             }
             _ => println!(
                 "cargo:warning=mlx-metallib: download failed — parakeet-mlx will crash at runtime"
@@ -621,13 +820,15 @@ fn stage_mlx_metallib() {
         }
     } else {
         let size = std::fs::metadata(&metallib).map(|m| m.len()).unwrap_or(0);
-        println!(
-            "cargo:warning=mlx-metallib: already present ({} MB)",
-            size / 1_000_000
-        );
+        eprintln!("mlx-metallib: already present ({} MB)", size / 1_000_000);
     }
 
     sign_macos_sidecar_if_needed(&metallib);
+    // Tauri's `externalBin` entry copies the target-suffixed sidecar, not the
+    // unsuffixed staging copy. Sign that exact input as well so the bundler
+    // never receives an unsigned Metal library.
+    let sidecar = std::path::Path::new(&manifest_dir).join("mlx.metallib-aarch64-apple-darwin");
+    sign_macos_sidecar_if_needed(&sidecar);
 }
 
 /// Stage libonnxruntime.dylib for x86_64 Intel builds. ort `load-dynamic` resolves
@@ -651,8 +852,8 @@ fn stage_libonnxruntime_dylib() {
                     if let Err(e) = std::fs::copy(&src, &dylib) {
                         println!("cargo:warning=libonnxruntime: ORT_DYLIB_PATH copy failed: {e}");
                     } else {
-                        println!(
-                            "cargo:warning=libonnxruntime: copied from ORT_DYLIB_PATH ({})",
+                        eprintln!(
+                            "libonnxruntime: copied from ORT_DYLIB_PATH ({})",
                             src.display()
                         );
                     }
@@ -664,14 +865,9 @@ fn stage_libonnxruntime_dylib() {
             !dylib.exists() || std::fs::metadata(&dylib).map(|m| m.len()).unwrap_or(0) < min_size;
 
         if still_needs_fetch {
-            println!(
-                "cargo:warning=libonnxruntime: downloading x86_64 dylib from Homebrew bottle..."
-            );
+            eprintln!("libonnxruntime: downloading x86_64 dylib from Homebrew bottle...");
             match download_homebrew_onnxruntime_dylib(&dylib) {
-                Ok(size) => println!(
-                    "cargo:warning=libonnxruntime: downloaded ({} MB)",
-                    size / 1_000_000
-                ),
+                Ok(size) => eprintln!("libonnxruntime: downloaded ({} MB)", size / 1_000_000),
                 Err(e) => {
                     let msg = format!("libonnxruntime dylib fetch failed: {e}");
                     if is_release {
@@ -683,10 +879,72 @@ fn stage_libonnxruntime_dylib() {
             }
         }
         sign_macos_sidecar_if_needed(&dylib);
-    } else if !dylib.exists() {
+    } else {
         // aarch64 doesn't load this dylib at runtime, but the bundler's
-        // macOS.files mapping references it unconditionally, so it must exist.
-        let _ = std::fs::write(&dylib, b"");
+        // macOS.files mapping references it unconditionally. An empty
+        // placeholder is not a code object, so Tauri's standard signer rejects
+        // the whole bundle before it can be verified. Keep a tiny valid Mach-O
+        // dylib in the bundle; it is never loaded on arm64.
+        let needs_stub = std::fs::metadata(&dylib)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true);
+        if needs_stub {
+            if let Err(error) = create_arm64_onnxruntime_stub(&dylib) {
+                if is_release {
+                    panic!("failed to create arm64 libonnxruntime stub: {error}");
+                }
+                println!("cargo:warning=arm64 libonnxruntime stub unavailable: {error}");
+            }
+        }
+        sign_macos_sidecar_if_needed(&dylib);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn create_arm64_onnxruntime_stub(path: &std::path::Path) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("xcrun")
+        .args([
+            "--sdk",
+            "macosx",
+            "clang",
+            "-arch",
+            "arm64",
+            "-dynamiclib",
+            "-install_name",
+            "@rpath/libonnxruntime.dylib",
+            "-x",
+            "c",
+            "-",
+            "-o",
+        ])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to start xcrun clang: {error}"))?;
+
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "xcrun clang stdin unavailable".to_string())?
+        .write_all(b"void screenpipe_onnxruntime_stub(void) {}\n")
+        .map_err(|error| format!("failed to write xcrun clang input: {error}"))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for xcrun clang: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "xcrun clang exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
@@ -726,8 +984,8 @@ fn sign_macos_sidecar_if_needed(path: &std::path::Path) {
 
     match status {
         Ok(status) if status.success() => {
-            println!(
-                "cargo:warning=macos-sidecar-sign: signed {}",
+            eprintln!(
+                "macos-sidecar-sign: signed {}",
                 path.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("sidecar")
@@ -748,8 +1006,6 @@ fn sign_macos_sidecar_if_needed(path: &std::path::Path) {
 
 #[cfg(target_os = "macos")]
 fn download_homebrew_onnxruntime_dylib(dst: &std::path::Path) -> Result<u64, String> {
-    use std::path::PathBuf;
-
     let tmp = std::env::temp_dir().join(format!("ort-app-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let tarball = tmp.join("bottle.tar.gz");
@@ -830,34 +1086,27 @@ fn copy_permission_flow_bundle() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| panic!("DEP_TAURI_PLUGIN_PERMISSION_FLOW_BUNDLE_DIR not set"));
 
-    // permission-flow's build.rs predicts the SwiftPM output dir from the
-    // TARGET arch, but swift-rs 1.0.7 always passes `--arch <host>` (codegen
-    // is overridden via `-Xswiftc -target`), so products land in the
-    // HOST-arch-named dir. On cross-compiles (x86_64 app build on arm64 CI)
-    // the predicted path is wrong; probe the host-arch sibling before
-    // concluding the bundle wasn't emitted.
+    // permission-flow predicts `<target arch>-apple-macosx/<PROFILE>/`, but
+    // swift-rs 1.0.7 builds for the HOST arch and picks its configuration from
+    // cargo's DEBUG flag (`[profile.dev] debug = false` here ⇒ `release/`), so
+    // the predicted leaf is wrong for both segments. Search the actual
+    // SwiftPM package root instead of guessing.
     let bundle_src = if bundle_src.exists() {
         bundle_src
     } else {
-        let host_arch = match std::env::consts::ARCH {
-            "aarch64" => "arm64",
-            a => a,
-        };
         bundle_src
-            .parent() // <config>/
-            .and_then(|c| c.parent()) // <arch>-apple-macosx/
-            .and_then(|a| a.parent()) // PermissionFlowShimFFI/
-            .map(|ffi| {
-                ffi.join(format!("{host_arch}-apple-macosx"))
-                    .join(
-                        bundle_src
-                            .parent()
-                            .and_then(|c| c.file_name())
-                            .unwrap_or_default(),
-                    )
-                    .join(bundle_name)
+            .ancestors()
+            .nth(3) // PermissionFlowShimFFI/
+            .and_then(|ffi| {
+                std::fs::read_dir(ffi).ok().and_then(|archs| {
+                    archs
+                        .flatten()
+                        .filter(|a| a.file_name().to_string_lossy().ends_with("-apple-macosx"))
+                        .flat_map(|a| std::fs::read_dir(a.path()).into_iter().flatten().flatten())
+                        .map(|cfg| cfg.path().join(bundle_name))
+                        .find(|p| p.exists())
+                })
             })
-            .filter(|p| p.exists())
             .unwrap_or(bundle_src)
     };
 

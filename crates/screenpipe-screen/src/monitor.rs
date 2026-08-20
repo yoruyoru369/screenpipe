@@ -4,12 +4,16 @@
 
 use once_cell::sync::Lazy;
 use std::fmt;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, RwLock};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_portal;
 #[cfg(any(target_os = "linux", test))]
 mod linux_wayland;
 #[cfg(target_os = "macos")]
@@ -24,9 +28,20 @@ pub use linux::{
 };
 #[cfg(target_os = "macos")]
 pub use macos::{
-    get_capture_backend, get_default_monitor, get_monitor_by_id, is_screen_capture_supported,
-    list_monitors, list_monitors_detailed, macos_version, set_sck_capture_max_width, HdCapture,
+    e2e_arm_sck_lookup_hang_fault, get_capture_backend, get_default_monitor, get_monitor_by_id,
+    invalidate_monitor_lookup_cache, is_screen_capture_supported, list_monitors,
+    list_monitors_cached, list_monitors_detailed, macos_version,
+    secs_since_capture_backend_fallback, set_sck_capture_max_width, HdCapture,
 };
+
+/// Seconds since capture last fell back off its primary backend, if ever.
+///
+/// Only macOS has a degraded fallback path (ScreenCaptureKit to CoreGraphics);
+/// everywhere else there is nothing to fall back from.
+#[cfg(not(target_os = "macos"))]
+pub fn secs_since_capture_backend_fallback() -> Option<u64> {
+    None
+}
 #[cfg(target_os = "windows")]
 pub use windows::{
     get_capture_backend, get_default_monitor, get_monitor_by_id, is_screen_capture_supported,
@@ -96,10 +111,20 @@ pub struct SafeMonitor {
     cached_sck: Option<SckMonitor>,
     #[cfg(target_os = "macos")]
     cached_xcap: Option<XcapMonitor>,
+    /// Once the bounded SCK screenshot path fails, an unfiltered capture can
+    /// use the independent CoreGraphics path for the rest of this monitor
+    /// generation. Shared across clones so one timeout cannot make every
+    /// capture caller pay the SCK deadline again.
+    #[cfg(target_os = "macos")]
+    prefer_xcap_fallback: Arc<AtomicBool>,
     /// Cached index position in XcapMonitor::all() to avoid linear search on every capture.
     /// Monitor IDs are stable during a session, so we try the cached index first (O(1)).
     #[cfg(not(target_os = "macos"))]
     cached_monitor_index: Arc<std::sync::Mutex<Option<usize>>>,
+    /// Process-shared xdg-desktop-portal/PipeWire session used by Wayland
+    /// desktops that do not implement the wlroots screencopy protocol.
+    #[cfg(target_os = "linux")]
+    portal_capture: Arc<linux_portal::PortalCaptureSession>,
     /// Persistent WGC capture session to avoid orange border flash from per-frame session lifecycle.
     /// Lazy-initialized on first capture_image() call.
     #[cfg(target_os = "windows")]
@@ -228,8 +253,12 @@ mod tests {
             cached_sck: None,
             #[cfg(target_os = "macos")]
             cached_xcap: None,
+            #[cfg(target_os = "macos")]
+            prefer_xcap_fallback: Arc::new(AtomicBool::new(false)),
             #[cfg(not(target_os = "macos"))]
             cached_monitor_index: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(target_os = "linux")]
+            portal_capture: linux_portal::shared_portal_capture(),
             #[cfg(target_os = "windows")]
             persistent_capture: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(target_os = "windows")]

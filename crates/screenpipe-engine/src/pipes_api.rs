@@ -58,6 +58,13 @@ pub struct ConfigUpdateRequest {
 pub struct ExecutionsQuery {
     pub limit: Option<i32>,
     pub before_id: Option<i64>,
+    pub include_output: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct PipeActivityQuery {
+    pub limit: Option<i32>,
+    pub before_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -256,6 +263,41 @@ pub async fn list_pipes(
     }
 }
 
+/// GET /pipes/activity — compact, cursor-paginated execution-backed inventory.
+///
+/// This intentionally excludes pipes without terminal run history and uses
+/// execution timestamps rather than scheduler watermarks.
+pub async fn get_pipe_activity(
+    State(pm): State<SharedPipeManager>,
+    Query(query): Query<PipeActivityQuery>,
+) -> Json<Value> {
+    let mgr = pm.lock().await;
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let fetch_limit = limit.saturating_add(1);
+    match mgr
+        .get_execution_activity(fetch_limit, query.before_id)
+        .await
+    {
+        Ok(mut activity) => {
+            let has_more = activity.len() > limit as usize;
+            if has_more {
+                activity.truncate(limit as usize);
+            }
+            let next_before_id = if has_more {
+                activity.last().map(|row| row.latest_execution_id)
+            } else {
+                None
+            };
+            Json(json!({
+                "data": activity,
+                "has_more": has_more,
+                "next_before_id": next_before_id,
+            }))
+        }
+        Err(error) => Json(json!({ "error": error.to_string() })),
+    }
+}
+
 /// GET /pipes/:id — single pipe detail.
 /// Re-scans disk so pipes installed externally are picked up.
 pub async fn get_pipe(State(pm): State<SharedPipeManager>, Path(id): Path<String>) -> Json<Value> {
@@ -315,15 +357,56 @@ pub async fn enable_pipe(
 /// Optional body for `POST /pipes/:id/run`.
 #[derive(Deserialize, Default)]
 pub struct RunPipeBody {
-    /// Context from a notification action — injected into the pipe prompt.
+    /// Canonical request-scoped context injected only into this Pipe run.
+    #[serde(default)]
+    pub run_context: Option<Value>,
+    /// Backward-compatible field used by existing notification actions.
     #[serde(default)]
     pub notification_context: Option<Value>,
+    /// Low-cardinality product surface that initiated the run.
+    /// Only the onboarding surface is accepted; all other API calls are manual.
+    #[serde(default)]
+    pub trigger_type: Option<String>,
+    /// When present, run the selected Pipe as the summary for this exact
+    /// meeting instead of as an unrelated foreground/manual task.
+    #[serde(default)]
+    pub meeting_summary: Option<MeetingSummaryRunRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct MeetingSummaryRunRequest {
+    pub meeting_id: i64,
+    pub meeting_end: String,
+}
+
+fn run_trigger_type(body: Option<&RunPipeBody>) -> &'static str {
+    match body.and_then(|b| b.trigger_type.as_deref()) {
+        Some("onboarding") => "onboarding",
+        _ => "manual",
+    }
+}
+
+/// Render a request-scoped context block for a Pipe prompt.
+///
+/// Shared with the scheduler so a scheduled Live View refresh reaches the model
+/// in exactly the same framing as the foreground refresh button.
+pub fn format_run_context(context: &Value) -> String {
+    let serialized = serde_json::to_string_pretty(context).unwrap_or_default();
+    if context.get("source").and_then(Value::as_str) == Some("live-view") {
+        format!(
+            "\n---\nLIVE VIEW RUN CONTEXT\nThis request is authoritative for the named Live View targets. Its exact time_range overrides generic lookback wording in the Pipe body, and target_ids limits which structured targets should be updated.\n\nContext:\n{serialized}\n---\n"
+        )
+    } else {
+        format!(
+            "\n---\nRUN CONTEXT\nRespond to this request-scoped context.\n\nContext:\n{serialized}\n---\n"
+        )
+    }
 }
 
 /// POST /pipes/:id/run — trigger a manual pipe run.
 /// Uses start_pipe_background to avoid holding the PipeManager mutex for the
 /// entire execution duration, which would block stop/list/other API calls.
-/// Accepts an optional JSON body with `notification_context` to inject into the pipe prompt.
+/// Accepts optional `run_context`. Legacy `notification_context` remains supported.
 pub async fn run_pipe_now(
     State(pm): State<SharedPipeManager>,
     secret_store: Option<axum::Extension<Arc<SecretStore>>>,
@@ -340,30 +423,43 @@ pub async fn run_pipe_now(
         })
         .filter(|details| details.confirmation);
 
+    if !mgr.has_execution_store() {
+        return Json(json!({
+            "error": "pipe execution history is unavailable; refusing to start an untrackable run"
+        }));
+    }
+
     // Re-scan disk so newly installed pipes are discovered before lookup
     if let Err(e) = mgr.reload_pipes().await {
         tracing::warn!("failed to reload pipes from disk: {}", e);
     }
 
-    // If notification_context is provided, temporarily set it as extra context
-    let prev_context = if let Some(Json(ref b)) = body {
-        if let Some(ref ctx) = b.notification_context {
-            let formatted = format!(
-                "\n---\nNOTIFICATION ACTION\nThe user clicked a notification button. Respond to this action.\n\nContext:\n{}\n---\n",
-                serde_json::to_string_pretty(ctx).unwrap_or_default()
-            );
-            let prev = mgr.take_extra_context();
-            let combined = match prev.as_ref() {
-                Some(existing) => format!("{}\n{}", existing, formatted),
-                None => formatted,
-            };
-            mgr.set_extra_context(combined);
-            prev
-        } else {
-            None
+    let meeting_summary = body
+        .as_ref()
+        .and_then(|Json(body)| body.meeting_summary.as_ref());
+    if let Some(summary) = meeting_summary {
+        if summary.meeting_id <= 0 || summary.meeting_end.trim().is_empty() {
+            return Json(json!({
+                "error": "meeting_summary requires a positive meeting_id and meeting_end"
+            }));
         }
+    }
+
+    let run_context = if let Some(summary) = meeting_summary {
+        Some(format_run_context(&json!({
+            "source": "meeting-note",
+            "meeting_id": summary.meeting_id,
+            "meeting_end": summary.meeting_end,
+            "instruction": "Summarize this exact meeting, stream the Summary section, and save it back to this meeting note."
+        })))
     } else {
-        None
+        body.as_ref()
+            .and_then(|Json(body)| {
+                body.run_context
+                    .as_ref()
+                    .or(body.notification_context.as_ref())
+            })
+            .map(format_run_context)
     };
 
     // Validate required connections are configured before running the pipe
@@ -411,21 +507,39 @@ pub async fn run_pipe_now(
     ]);
     mgr.set_connections_context(conn_ctx);
 
-    let result = if let Some(details) = confirmed_trigger_details {
-        mgr.start_pipe_background_with_trigger(&id, "confirmed_event", Some(details))
-            .await
+    let result = if let Some(summary) = meeting_summary {
+        mgr.start_pipe_background_for_event(
+            &id,
+            "meeting_ended",
+            &summary.meeting_id.to_string(),
+            json!({
+                "meeting_id": summary.meeting_id,
+                "meeting_end": summary.meeting_end,
+                "summary_generation": chrono::Utc::now().to_rfc3339(),
+                "reason": "manual_summary",
+            }),
+            run_context.as_deref(),
+        )
+        .await
     } else {
-        mgr.start_pipe_background(&id).await
+        let trigger_type = run_trigger_type(body.as_ref().map(|Json(b)| b));
+        mgr.start_pipe_background_with_trigger_details_and_context(
+            &id,
+            trigger_type,
+            confirmed_trigger_details,
+            run_context.as_deref(),
+        )
+        .await
     };
 
-    // Restore previous extra context
-    match prev_context {
-        Some(ctx) => mgr.set_extra_context(ctx),
-        None => mgr.clear_extra_context(),
-    }
-
     match result {
-        Ok(()) => Json(json!({ "success": true })),
+        Ok(Some(execution_id)) => Json(json!({
+            "success": true,
+            "execution_id": execution_id,
+        })),
+        Ok(None) => Json(json!({
+            "error": "pipe run started without a persisted execution id"
+        })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
 }
@@ -466,6 +580,7 @@ pub async fn get_pipe_logs(
 }
 
 /// GET /pipes/:id/executions — execution history from DB.
+/// Pass `include_output=false` for bounded list rows without stdout/stderr.
 pub async fn get_pipe_executions(
     State(pm): State<SharedPipeManager>,
     Path(id): Path<String>,
@@ -473,9 +588,34 @@ pub async fn get_pipe_executions(
 ) -> Json<Value> {
     let mgr = pm.lock().await;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    match mgr.get_executions(&id, limit, query.before_id).await {
+    let result = if query.include_output == Some(false) {
+        mgr.get_execution_metadata(&id, limit, query.before_id)
+            .await
+    } else {
+        mgr.get_executions(&id, limit, query.before_id).await
+    };
+    match result {
         Ok(executions) => Json(json!({ "data": executions })),
         Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+/// GET /pipes/:id/executions/:exec_id — one exact persisted execution.
+pub async fn get_pipe_execution(
+    State(pm): State<SharedPipeManager>,
+    Path((id, exec_id)): Path<(String, i64)>,
+) -> (StatusCode, Json<Value>) {
+    let mgr = pm.lock().await;
+    match mgr.get_execution(&id, exec_id).await {
+        Ok(Some(execution)) => (StatusCode::OK, Json(json!({ "data": execution }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "execution not found" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -627,6 +767,7 @@ pub async fn set_pipe_favorite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipe_store::SqlitePipeStore;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use axum::routing::{get, post};
@@ -634,12 +775,33 @@ mod tests {
     use screenpipe_core::agents::{
         install_spawned_pid, AgentExecutor, AgentOutput, ExecutionHandle, SharedPid,
     };
+    use screenpipe_core::pipes::PipeStore;
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
     use tempfile::TempDir;
     use tokio::sync::Notify;
     use tower::ServiceExt;
+
+    #[test]
+    fn only_accepts_onboarding_as_a_non_manual_api_trigger() {
+        let onboarding = RunPipeBody {
+            run_context: None,
+            notification_context: None,
+            trigger_type: Some("onboarding".to_string()),
+            meeting_summary: None,
+        };
+        let untrusted = RunPipeBody {
+            run_context: None,
+            notification_context: None,
+            trigger_type: Some("scheduled".to_string()),
+            meeting_summary: None,
+        };
+
+        assert_eq!(run_trigger_type(Some(&onboarding)), "onboarding");
+        assert_eq!(run_trigger_type(Some(&untrusted)), "manual");
+        assert_eq!(run_trigger_type(None), "manual");
+    }
 
     #[test]
     fn joins_non_empty_connection_context_blocks() {
@@ -650,6 +812,48 @@ mod tests {
         ]);
 
         assert_eq!(out, "built-in connection context\n\nuser mcp context");
+    }
+
+    #[test]
+    fn live_view_run_context_is_explicitly_authoritative_and_scoped() {
+        let out = format_run_context(&json!({
+            "source": "live-view",
+            "target_ids": ["live-view:focus:gtm-share"],
+            "time_range": {
+                "preset": "7d",
+                "start": "2026-07-17T12:00:00Z",
+                "end": "2026-07-24T12:00:00Z"
+            }
+        }));
+
+        assert!(out.contains("This request is authoritative"));
+        assert!(out.contains("exact time_range overrides generic lookback"));
+        assert!(out.contains("target_ids limits which structured targets should be updated"));
+        assert!(out.contains("live-view:focus:gtm-share"));
+        assert!(out.contains("2026-07-17T12:00:00Z"));
+    }
+
+    #[test]
+    fn ordinary_run_context_does_not_claim_live_view_authority() {
+        let out = format_run_context(&json!({"source": "notification", "message": "retry"}));
+
+        assert!(out.contains("RUN CONTEXT"));
+        assert!(!out.contains("This request is authoritative"));
+    }
+
+    #[test]
+    fn run_body_accepts_canonical_and_legacy_context_fields() {
+        let canonical: RunPipeBody =
+            serde_json::from_value(json!({"run_context": {"source": "live-view"}})).unwrap();
+        let legacy: RunPipeBody =
+            serde_json::from_value(json!({"notification_context": {"source": "notification"}}))
+                .unwrap();
+
+        assert_eq!(canonical.run_context.unwrap()["source"], "live-view");
+        assert_eq!(
+            legacy.notification_context.unwrap()["source"],
+            "notification"
+        );
     }
 
     #[derive(Clone, Copy)]
@@ -803,6 +1007,13 @@ mod tests {
             .with_state(pm)
     }
 
+    fn tracked_run_router(pm: SharedPipeManager) -> Router {
+        Router::new()
+            .route("/pipes/:id/run", post(run_pipe_now))
+            .route("/pipes/:id/executions/:exec_id", get(get_pipe_execution))
+            .with_state(pm)
+    }
+
     #[tokio::test]
     async fn memory_api_returns_metadata_content_empty_state_and_not_found() {
         let dir = TempDir::new().unwrap();
@@ -896,6 +1107,168 @@ mod tests {
         mgr.start_pipe_background(name).await.unwrap();
         drop(mgr);
         executor.started.notified().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_api_returns_and_reads_the_exact_new_execution() {
+        let dir = TempDir::new().unwrap();
+        write_test_pipe(&dir, "demo");
+
+        let db_path = dir.path().join("test.db");
+        let db = Arc::new(
+            screenpipe_db::DatabaseManager::new(db_path.to_str().unwrap(), Default::default())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(SqlitePipeStore::new(db));
+        let stale_id = store
+            .create_execution("demo", "manual", "fake", None)
+            .await
+            .unwrap();
+
+        let executor = Arc::new(FakeExecutor::new(FakePublishMode::Immediate, 4242));
+        let mut executors: HashMap<String, Arc<dyn AgentExecutor>> = HashMap::new();
+        executors.insert("fake".to_string(), executor.clone());
+        let persisted_store: Arc<dyn PipeStore> = store;
+        let mgr = PipeManager::new(
+            dir.path().to_path_buf(),
+            executors,
+            Some(persisted_store),
+            3030,
+        );
+        mgr.reload_pipes().await.unwrap();
+        let pm = Arc::new(Mutex::new(mgr));
+        let app = tracked_run_router(pm);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/pipes/demo/run")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(payload["success"], true);
+        let execution_id = payload["execution_id"].as_i64().unwrap();
+        assert!(execution_id > stale_id);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pipes/demo/executions/{execution_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(payload["data"]["id"], execution_id);
+        assert_eq!(payload["data"]["pipe_name"], "demo");
+
+        let wrong_pipe = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pipes/other/executions/{execution_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_pipe.status(), StatusCode::NOT_FOUND);
+
+        executor.allow_finish.notify_one();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn meeting_summary_run_is_tracked_for_the_exact_meeting() {
+        let dir = TempDir::new().unwrap();
+        write_test_pipe(&dir, "meeting-summary");
+
+        let db_path = dir.path().join("test.db");
+        let db = Arc::new(
+            screenpipe_db::DatabaseManager::new(db_path.to_str().unwrap(), Default::default())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(SqlitePipeStore::new(db));
+        let executor = Arc::new(FakeExecutor::new(FakePublishMode::Immediate, 4243));
+        let mut executors: HashMap<String, Arc<dyn AgentExecutor>> = HashMap::new();
+        executors.insert("fake".to_string(), executor.clone());
+        let persisted_store: Arc<dyn PipeStore> = store.clone();
+        let mgr = PipeManager::new(
+            dir.path().to_path_buf(),
+            executors,
+            Some(persisted_store),
+            3030,
+        );
+        mgr.reload_pipes().await.unwrap();
+        let app = tracked_run_router(Arc::new(Mutex::new(mgr)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipes/meeting-summary/run")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "meeting_summary": {
+                                "meeting_id": 42,
+                                "meeting_end": "2026-08-06T16:09:06.000Z"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(payload["success"], true);
+
+        let executions = store
+            .get_executions("meeting-summary", 10, None)
+            .await
+            .unwrap();
+        assert_eq!(executions[0].id, payload["execution_id"]);
+        assert_eq!(executions[0].trigger_type, "event");
+        assert_eq!(
+            executions[0].trigger_event.as_deref(),
+            Some("meeting_ended")
+        );
+        assert_eq!(executions[0].trigger_key.as_deref(), Some("42"));
+
+        let trigger_context: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                dir.path()
+                    .join("meeting-summary")
+                    .join(".trigger-context.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(trigger_context["event"], "meeting_ended");
+        assert_eq!(trigger_context["key"], "42");
+        assert_eq!(trigger_context["data"]["meeting_id"], 42);
+        assert_eq!(
+            trigger_context["data"]["meeting_end"],
+            "2026-08-06T16:09:06.000Z"
+        );
+        assert_eq!(trigger_context["data"]["reason"], "manual_summary");
+
+        executor.allow_finish.notify_one();
     }
 
     #[tokio::test]
