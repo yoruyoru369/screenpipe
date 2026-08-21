@@ -31,11 +31,18 @@ console.log('cwd', cwd)
 // frontendDist rather than silently shipping an old UI).
 
 
+// gyan.dev keeps only the current release under /builds/packages/ and deletes
+// older archives (8.0.1 started returning 404 on 2026-08-20), so this pin has
+// to move whenever they roll the release. Single source of truth for the
+// archive name, download URL, and the README version check below.
+const WINDOWS_FFMPEG_VERSION = '9.0.1'
+const WINDOWS_FFMPEG_NAME = `ffmpeg-${WINDOWS_FFMPEG_VERSION}-full_build-shared`
+
 const config = {
 	ffmpegRealname: 'ffmpeg',
 	windows: {
-		ffmpegName: 'ffmpeg-8.0.1-full_build-shared',
-		ffmpegUrl: 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-full_build-shared.7z',
+		ffmpegName: WINDOWS_FFMPEG_NAME,
+		ffmpegUrl: `https://www.gyan.dev/ffmpeg/builds/packages/${WINDOWS_FFMPEG_NAME}.7z`,
 		// Windows ARM64 (aarch64-pc-windows-msvc) — tordona/ffmpeg-win-arm64
 		// Resolved dynamically at build time via GitHub API (daily autobuilds change filenames)
 		ffmpegArm64GithubRepo: 'tordona/ffmpeg-win-arm64',
@@ -824,7 +831,7 @@ async function validateWindowsFfmpeg(directory) {
 	}
 	if (winArch === 'arm64') return true
 	const readme = await fs.readFile(path.join(directory, 'README.txt'), 'utf8').catch(() => '')
-	return readme.includes('Version: 8.0.1-')
+	return readme.includes(`Version: ${WINDOWS_FFMPEG_VERSION}-`)
 }
 
 async function setupWindowsFfmpeg(sevenZ) {
