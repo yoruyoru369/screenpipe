@@ -385,14 +385,25 @@ async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_00
       ? '[data-testid="section-settings-screen"]'
       : `[data-testid="section-settings-${section}"]`;
   // Navigation commits the URL and the section component in separate React
-  // updates. Wait for the stable route contract first, then for the mounted
-  // section, so a slow WebView2 render cannot make an already-correct route
-  // look like a navigation failure.
+  // updates. On WebView2 the first click can also arrive while the Settings
+  // route is still hydrating; retry the same visible nav control until the
+  // route contract is observed, rather than treating that transient as a
+  // product navigation failure.
   await browser.waitUntil(
     async () => {
       try {
         const url = new URL(await browser.getUrl());
-        return url.pathname === "/settings" && url.searchParams.get("section") === section;
+        if (url.pathname === "/settings" && url.searchParams.get("section") === section) {
+          return true;
+        }
+
+        if (url.pathname !== "/settings") return false;
+        const nav = await $(`[data-testid="settings-nav-${section}"]`);
+        if (!(await nav.isDisplayed().catch(() => false))) return false;
+        await nav.scrollIntoView().catch(() => {});
+        await nav.waitForEnabled({ timeout: t(2_000) }).catch(() => {});
+        await nav.click().catch(() => {});
+        return false;
       } catch {
         // WebView2 can tear down the execution context for one poll while
         // Next.js commits the new settings route. Keep polling the same
@@ -493,6 +504,23 @@ describe("Windows user journey", function () {
     const settingsNav = await $('[data-testid="nav-settings"]');
     await settingsNav.waitForDisplayed({ timeout: t(15_000) });
     await settingsNav.click();
+    await browser.waitUntil(
+      async () => {
+        try {
+          if (new URL(await browser.getUrl()).pathname === "/settings") return true;
+          await settingsNav.click().catch(() => {});
+        } catch {
+          // The WebView2 execution context can be replaced during the route
+          // commit; the next poll retries the same user action.
+        }
+        return false;
+      },
+      {
+        timeout: t(20_000),
+        interval: 500,
+        timeoutMsg: "Settings page did not become ready after opening it",
+      },
+    );
 
     const recordingNav = await $('[data-testid="settings-nav-recording"]');
     await recordingNav.waitForDisplayed({ timeout: t(15_000) });

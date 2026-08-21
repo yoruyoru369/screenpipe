@@ -231,7 +231,14 @@ pub fn meeting_overlay_state() -> Option<MeetingOverlayPanelState> {
 /// non-activating window, so it drives the same state the pointer would.
 #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
 pub fn set_pill_hovering(hovering: bool) -> bool {
-    mutate(|s| s.force_expanded = hovering)
+    // Keep the observed state in sync with the pointer-driven path as well as
+    // the test-only expansion override. The E2E seam stands in for a real
+    // Win32 hover event, so callers inspecting `meeting_overlay_state` should
+    // see the same `hovering` bit they would get from the window thread.
+    mutate(|s| {
+        s.hovering = hovering;
+        s.force_expanded = hovering;
+    })
 }
 
 #[cfg_attr(not(feature = "e2e"), allow(dead_code))]

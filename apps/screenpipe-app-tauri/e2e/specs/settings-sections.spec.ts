@@ -616,6 +616,29 @@ describe('Settings sections', () => {
       );
       await action.waitForExist({ timeout: t(10_000) });
       await action.click();
+      await browser.waitUntil(
+        async () => {
+          try {
+            const url = new URL(await browser.getUrl());
+            if (
+              url.pathname === '/settings' &&
+              url.searchParams.get('section') === 'storage'
+            ) {
+              return true;
+            }
+            await action.click().catch(() => {});
+          } catch {
+            // The WebView2 context can be replaced while the deeplink commits;
+            // retry the same notification action on the next poll.
+          }
+          return false;
+        },
+        {
+          timeout: t(20_000),
+          interval: 500,
+          timeoutMsg: 'Storage settings URL did not become ready from the notification action',
+        },
+      );
       const storage = await $('[data-testid="section-settings-storage"]');
       await storage.waitForExist({ timeout: t(12_000) });
       expect(await browser.getUrl()).toContain('/settings?section=storage');

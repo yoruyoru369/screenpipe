@@ -213,6 +213,11 @@ async fn seed_search_fixture(db: &DatabaseManager) {
     for i in 0..12 {
         let ts = now - Duration::minutes(i64::from(i) + 1);
         let text = format!("vector search result number {i}");
+        // Grouped keyword search uses device name plus a short time gap as its
+        // episode key. Keep each deterministic fixture row in its own episode
+        // so the UI assertions exercise all seeded results rather than one
+        // collapsed representative.
+        let device_name = format!("e2e-search-vector-{i}");
         let (app, url) = if i % 2 == 0 {
             ("Arc", Some("https://example.com/vector"))
         } else {
@@ -221,7 +226,7 @@ async fn seed_search_fixture(db: &DatabaseManager) {
         let window = format!("vector window {i}");
         if let Err(e) = db
             .insert_snapshot_frame_with_ocr(
-                "e2e-search",
+                &device_name,
                 ts,
                 &fixture_path,
                 Some(app),
@@ -256,7 +261,7 @@ async fn seed_search_fixture(db: &DatabaseManager) {
     ]"#;
     if let Err(e) = db
         .insert_snapshot_frame_with_ocr(
-            "e2e-search",
+            "e2e-search-highlight",
             now,
             &fixture_path,
             Some("Code"),
@@ -295,6 +300,11 @@ async fn seed_search_fixture(db: &DatabaseManager) {
     for i in 0..5 {
         let visible = i == 1 || i == 4;
         let ts = now - Duration::minutes(i64::from(i) + 60);
+        // Grouped keyword search de-duplicates rows by capture device and a
+        // short episode gap. Give each candidate its own deterministic device
+        // so the client can verify the two screenshot-visible matches while
+        // still receiving the three hidden accessibility-only candidates.
+        let device_name = format!("e2e-search-visibility-{i}");
         let app = if i == 1 {
             "e2e-visible-a"
         } else if i == 4 {
@@ -310,7 +320,7 @@ async fn seed_search_fixture(db: &DatabaseManager) {
         let ocr_json = if visible { visible_json } else { hidden_json };
         if let Err(error) = db
             .insert_snapshot_frame_with_ocr(
-                "e2e-search",
+                &device_name,
                 ts,
                 &fixture_path,
                 Some(app),

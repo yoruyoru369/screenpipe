@@ -2243,7 +2243,8 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
             servers.push(McpServer::Http(McpServerHttp::new(name, url)));
         }
     } else {
-        let mut args = vec!["x".into(), resolved_screenpipe_mcp_package().into()];
+        let package = resolved_screenpipe_mcp_package();
+        let (command, mut args) = screenpipe_mcp_stdio_invocation(config, package);
         let mut env = Vec::new();
         if let Some(url) = engine_api_url() {
             args.extend(["--screenpipe-url".into(), url.clone()]);
@@ -2253,7 +2254,7 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
             env.push(EnvVariable::new("SCREENPIPE_LOCAL_API_KEY", key));
         }
         servers.push(McpServer::Stdio(
-            McpServerStdio::new("screenpipe", &config.bun_path)
+            McpServerStdio::new("screenpipe", command)
                 .args(args)
                 .env(env),
         ));
@@ -2341,6 +2342,44 @@ fn npm_executable() -> Option<&'static str> {
         }
     }
     command_on_path("npm").then_some("npm")
+}
+
+/// Build the ACP stdio command for the resolved screenpipe MCP package.
+///
+/// Bun remains the normal runner. When the published fallback is selected,
+/// prefer npm's package installer/runtime if it is available: on Windows Bun
+/// can report a successful package resolution while leaving optional Sentry
+/// files out of the extracted tree. This is intentionally scoped to the
+/// fallback package so the unreleased primary package is still resolved by the
+/// normal Bun path first.
+fn screenpipe_mcp_stdio_invocation(
+    config: &RuntimeConfig,
+    package: &'static str,
+) -> (PathBuf, Vec<String>) {
+    if package == SCREENPIPE_MCP_FALLBACK_PKG {
+        if let Some(npm) = npm_executable() {
+            eprintln!(
+                "[screenpipe-mcp] runner=npm version={} phase=acp-stdio",
+                package_version(package)
+            );
+            return (
+                PathBuf::from(npm),
+                vec![
+                    "exec".into(),
+                    "--yes".into(),
+                    "--package".into(),
+                    package.into(),
+                    "--".into(),
+                    "screenpipe-mcp".into(),
+                ],
+            );
+        }
+    }
+
+    (
+        PathBuf::from(&config.bun_path),
+        vec!["x".into(), package.into()],
+    )
 }
 
 fn spawn_core_mcp_http(config: &RuntimeConfig, port: u16) -> Option<std::process::Child> {

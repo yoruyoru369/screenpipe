@@ -139,7 +139,7 @@ export function NotificationsSettings() {
   })).filter((g) => g.categories.length > 0);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="section-settings-notifications">
       <div>
         <p className="text-sm text-muted-foreground">
           Control which notifications screenpipe sends you. Pause on a whim,
