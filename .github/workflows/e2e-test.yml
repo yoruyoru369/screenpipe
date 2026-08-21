@@ -936,7 +936,7 @@ jobs:
       # cancellation). Linux remains the hard E2E gate. Make-it-gate-again
       # (parallelize maxInstances, cache the build, cut retries) tracked in #4822.
       continue-on-error: true
-      timeout-minutes: 70
+      timeout-minutes: 110
       shell: bash
       working-directory: ./apps/screenpipe-app-tauri
       env:
