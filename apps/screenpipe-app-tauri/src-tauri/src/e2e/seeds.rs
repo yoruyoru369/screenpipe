@@ -182,10 +182,14 @@ const DB_HARD_FAULT_CHECKPOINT_ATTEMPTS: usize = 10;
 /// fall through to on-demand OCR.
 async fn seed_search_fixture(db: &DatabaseManager) {
     let now = Utc::now();
-    let fixture_dir = std::env::var_os("SCREENPIPE_DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("e2e-fixtures");
+    // Keep fixture media outside the recording data directory. The serial E2E
+    // suite can run for more than an hour; snapshot compaction is allowed to
+    // remove old stills under SCREENPIPE_DATA_DIR during that window, which
+    // would make later search assertions fail when the returned thumbnail no
+    // longer exists. A temp directory is still local to the runner and is
+    // cleaned up by the job, but is not owned by the retention/compaction
+    // workers.
+    let fixture_dir = std::env::temp_dir().join("screenpipe-e2e-fixtures");
     if let Err(error) = std::fs::create_dir_all(&fixture_dir) {
         warn!("e2e search-fixture: failed to create fixture directory: {error}");
     }
