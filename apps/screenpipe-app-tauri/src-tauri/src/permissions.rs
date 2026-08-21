@@ -20,6 +20,190 @@ pub enum OSPermission {
     Calendar,
 }
 
+/// Screen Recording TCC state. Only macOS reads TCC; the unit tests below
+/// exercise the pure mapping helpers on every platform.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenRecordingPermissionState {
+    Denied,
+    Granted,
+    GrantedNeedsRestart,
+    RevokedButCached,
+}
+
+#[cfg(feature = "e2e")]
+static E2E_SCREEN_RECORDING_RESTART_REQUIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "e2e")]
+static E2E_SCREEN_RECORDING_RESTART_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(any(target_os = "macos", test))]
+fn screen_recording_permission_state_from_checks(
+    cached_preflight: bool,
+    live_preflight: bool,
+) -> ScreenRecordingPermissionState {
+    match (cached_preflight, live_preflight) {
+        (false, false) => ScreenRecordingPermissionState::Denied,
+        (true, true) => ScreenRecordingPermissionState::Granted,
+        (false, true) => ScreenRecordingPermissionState::GrantedNeedsRestart,
+        (true, false) => ScreenRecordingPermissionState::RevokedButCached,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn should_request_screen_recording(state: ScreenRecordingPermissionState) -> bool {
+    matches!(
+        state,
+        ScreenRecordingPermissionState::Denied | ScreenRecordingPermissionState::RevokedButCached
+    )
+}
+
+/// Returns the current process's Screen Recording permission state.
+///
+/// `CGPreflightScreenCaptureAccess` can return the result cached by SkyLight
+/// when this process requested permission. Calling TCC's preflight function
+/// directly bypasses that SkyLight cache, so a disagreement identifies a grant
+/// or revocation that happened after the cached result was recorded.
+#[cfg(target_os = "macos")]
+pub fn screen_recording_permission_state() -> ScreenRecordingPermissionState {
+    use core_graphics_helmer_fork::access::ScreenCaptureAccess;
+
+    #[cfg(feature = "e2e")]
+    if E2E_SCREEN_RECORDING_RESTART_REQUIRED.load(Ordering::SeqCst) {
+        return ScreenRecordingPermissionState::GrantedNeedsRestart;
+    }
+
+    let cached_preflight = ScreenCaptureAccess.preflight();
+    let live_preflight = direct_tcc_screen_recording_preflight().unwrap_or_else(|error| {
+        warn!("direct Screen Recording TCC preflight failed ({error}); using cached preflight");
+        cached_preflight
+    });
+
+    screen_recording_permission_state_from_checks(cached_preflight, live_preflight)
+}
+
+#[cfg(target_os = "macos")]
+fn direct_tcc_screen_recording_preflight() -> Result<bool, String> {
+    use std::ffi::c_void;
+
+    type TccAccessPreflight = unsafe extern "C" fn(*const c_void) -> u32;
+
+    const TCC_FRAMEWORK: &[u8] = b"/System/Library/PrivateFrameworks/TCC.framework/TCC\0";
+    const PREFLIGHT_SYMBOL: &[u8] = b"TCCAccessPreflight\0";
+    const SCREEN_CAPTURE_SERVICE_SYMBOL: &[u8] = b"kTCCServiceScreenCapture\0";
+    const TCC_PREFLIGHT_GRANTED: u32 = 0;
+
+    unsafe {
+        let handle = libc::dlopen(
+            TCC_FRAMEWORK.as_ptr().cast(),
+            libc::RTLD_LAZY | libc::RTLD_LOCAL,
+        );
+        if handle.is_null() {
+            return Err("failed to load TCC.framework".to_string());
+        }
+
+        let preflight_symbol = libc::dlsym(handle, PREFLIGHT_SYMBOL.as_ptr().cast());
+        let service_symbol = libc::dlsym(handle, SCREEN_CAPTURE_SERVICE_SYMBOL.as_ptr().cast());
+        if preflight_symbol.is_null() || service_symbol.is_null() {
+            libc::dlclose(handle);
+            return Err("required TCC.framework symbols are unavailable".to_string());
+        }
+
+        let preflight: TccAccessPreflight = std::mem::transmute(preflight_symbol);
+        let service = *(service_symbol as *const *const c_void);
+        let result = preflight(service);
+        libc::dlclose(handle);
+        Ok(result == TCC_PREFLIGHT_GRANTED)
+    }
+}
+
+/// Restart only after the user explicitly clicks the in-app action. macOS's
+/// native Screen Recording sheet includes a "Later" choice; closing that sheet
+/// must never be treated as consent to relaunch screenpipe.
+#[tauri::command]
+#[specta::specta]
+pub async fn restart_after_screen_recording_permission(app: tauri::AppHandle) {
+    use crate::recording::{bounded_teardown, TeardownOutcome, PRE_EXIT_TEARDOWN_TIMEOUT};
+
+    #[cfg(feature = "e2e")]
+    if E2E_SCREEN_RECORDING_RESTART_REQUIRED.load(Ordering::SeqCst) {
+        E2E_SCREEN_RECORDING_RESTART_REQUESTED.store(true, Ordering::SeqCst);
+        return;
+    }
+
+    static RESTART_IN_FLIGHT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if RESTART_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        debug!("screen recording permission relaunch already in flight");
+        return;
+    }
+
+    info!("Screen Recording restart confirmed by user — relaunching to apply permission");
+    match bounded_teardown(PRE_EXIT_TEARDOWN_TIMEOUT, async {
+        crate::process_exit::run_pre_exit_teardown(&app).await;
+        Ok(())
+    })
+    .await
+    {
+        TeardownOutcome::Completed => {}
+        TeardownOutcome::Failed(error) => {
+            warn!("screen recording permission relaunch teardown failed: {error}")
+        }
+        TeardownOutcome::TimedOut => warn!(
+            "screen recording permission relaunch teardown exceeded {}s; relaunching anyway",
+            PRE_EXIT_TEARDOWN_TIMEOUT.as_secs()
+        ),
+    }
+
+    crate::process_exit::request_app_relaunch(
+        app,
+        "user-confirmed screen recording permission restart",
+        std::time::Duration::from_millis(250),
+    );
+}
+
+#[cfg(feature = "e2e")]
+pub(crate) fn e2e_set_screen_recording_restart_required(required: bool) {
+    E2E_SCREEN_RECORDING_RESTART_REQUIRED.store(required, Ordering::SeqCst);
+    E2E_SCREEN_RECORDING_RESTART_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+#[cfg(feature = "e2e")]
+pub(crate) fn e2e_screen_recording_restart_requested() -> bool {
+    E2E_SCREEN_RECORDING_RESTART_REQUESTED.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_OPEN_COMMAND: &str = "/usr/bin/open";
+
+#[cfg(target_os = "macos")]
+fn permission_settings_url(permission: &OSPermission) -> &'static str {
+    match permission {
+        OSPermission::ScreenRecording => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        OSPermission::Microphone => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        }
+        OSPermission::Accessibility => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
+        OSPermission::Automation => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+        }
+        OSPermission::InputMonitoring => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        }
+        OSPermission::Calendar => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars"
+        }
+    }
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 #[allow(unused_variables)] // permission used on macOS
@@ -28,36 +212,12 @@ pub fn open_permission_settings(permission: OSPermission) {
     {
         use std::process::Command;
 
-        match permission {
-            OSPermission::ScreenRecording => Command::new("open")
-                .arg(
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-                )
-                .spawn()
-                .expect("Failed to open Screen Recording settings"),
-            OSPermission::Microphone => Command::new("open")
-                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-                .spawn()
-                .expect("Failed to open Microphone settings"),
-            OSPermission::Accessibility => Command::new("open")
-                .arg(
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-                )
-                .spawn()
-                .expect("Failed to open Accessibility settings"),
-            OSPermission::Automation => Command::new("open")
-                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
-                .spawn()
-                .expect("Failed to open Automation settings"),
-            OSPermission::InputMonitoring => Command::new("open")
-                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
-                .spawn()
-                .expect("Failed to open Input Monitoring settings"),
-            OSPermission::Calendar => Command::new("open")
-                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
-                .spawn()
-                .expect("Failed to open Calendar settings"),
-        };
+        let settings_url = permission_settings_url(&permission);
+        if let Err(error) = Command::new(MACOS_OPEN_COMMAND).arg(settings_url).spawn() {
+            // Opening a settings pane is a recovery affordance. A missing or
+            // unavailable launcher must not crash onboarding or the app.
+            error!("failed to open macOS permission settings ({settings_url}): {error}");
+        }
     }
 }
 
@@ -71,7 +231,10 @@ pub async fn request_permission(app: tauri::AppHandle, permission: OSPermission)
         match permission {
             OSPermission::ScreenRecording => {
                 use core_graphics_helmer_fork::access::ScreenCaptureAccess;
-                if !ScreenCaptureAccess.preflight() {
+                // This branch is reached only after an explicit user action.
+                // Do not call request() again when live TCC already sees the
+                // grant but this process still has the old denied result.
+                if should_request_screen_recording(screen_recording_permission_state()) {
                     // Open System Settings first so it's in the background,
                     // then request() shows the native modal on top (macOS 15+).
                     // If the user dismisses the modal, Settings is already open.
@@ -137,6 +300,15 @@ fn request_av_permission(app: tauri::AppHandle, media_type: nokhwa_bindings_maco
 
         let callback = move |granted: BOOL| {
             if is_audio && granted != NO {
+                use tauri::Manager;
+                let capture_intended = app_for_callback
+                    .try_state::<crate::recording::RecordingState>()
+                    .map(|s| s.capture_intended())
+                    .unwrap_or(false);
+                if !capture_intended {
+                    debug!("Microphone permission granted via AV callback — capture not intended, skipping restart");
+                    return;
+                }
                 info!(
                     "Microphone permission granted via AV callback — restarting capture for audio reinit"
                 );
@@ -199,6 +371,15 @@ const BOOT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 pub(crate) async fn restart_capture_on_mic_grant(app: tauri::AppHandle) {
     use tauri::Manager;
 
+    let capture_intended = app
+        .try_state::<crate::recording::RecordingState>()
+        .map(|s| s.capture_intended())
+        .unwrap_or(false);
+    if !capture_intended {
+        debug!("start_capture after mic grant: capture not intended (user disabled recording), skipping restart");
+        return;
+    }
+
     if MIC_GRANT_RESTART_IN_FLIGHT
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -237,6 +418,16 @@ pub(crate) async fn restart_capture_on_mic_grant(app: tauri::AppHandle) {
                  giving up this attempt; a later focus event will retry",
                 BOOT_WAIT_TIMEOUT.as_secs(),
                 crate::health::get_boot_phase_snapshot().phase
+            );
+            return;
+        }
+        // Idle = no engine at all (signed-out / entitlement-gated install).
+        // Capture cannot start without an engine; the eventual sign-in path
+        // starts it and re-applies permissions itself.
+        crate::health::BootReadiness::Idle => {
+            warn!(
+                "start_capture after mic grant: engine is idle (never started) — \
+                 nothing to attach capture to; skipping"
             );
             return;
         }
@@ -326,7 +517,9 @@ pub enum OSPermissionStatus {
     Empty,
     // The user has explicitly granted permission
     Granted,
-    // The user has denied permission, or has granted it but not yet restarted
+    // The user granted Screen Recording, but this process still needs a restart
+    RestartRequired,
+    // The user has denied permission
     Denied,
 }
 
@@ -368,28 +561,27 @@ pub fn check_microphone_permission() -> OSPermissionStatus {
     core_to_os_status(screenpipe_core::permissions::check_microphone())
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn screen_recording_preflight_status(granted: bool) -> OSPermissionStatus {
-    if granted {
-        OSPermissionStatus::Granted
-    } else {
-        OSPermissionStatus::Denied
-    }
-}
-
 /// Check only screen recording permission without triggering a dialog.
 ///
 /// This command is polled as soon as onboarding renders, before the user has
-/// clicked anything. It must use preflight directly: the broader core Tauri
-/// check may perform a real capture probe in debug builds, which macOS treats
-/// as a permission request.
+/// clicked anything. Both checks used by `screen_recording_permission_state`
+/// are silent preflights: this must not perform a real capture probe or call
+/// the request API, either of which can surface the system prompt out of order.
+///
+/// It honors the engine's enumeration verdict for the same reason
+/// `do_permissions_check` does — otherwise onboarding renders screen recording
+/// green in the exact lapsed-grant state where the permission banner and the
+/// recovery window say denied.
 #[tauri::command(async)]
 #[specta::specta]
 pub fn check_screen_recording_permission() -> OSPermissionStatus {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics_helmer_fork::access::ScreenCaptureAccess;
-        screen_recording_preflight_status(ScreenCaptureAccess.preflight())
+        screen_recording_status(
+            screen_recording_permission_state(),
+            screenpipe_engine::permission_monitor::screen_enumeration_denied(),
+            false,
+        )
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -398,12 +590,27 @@ pub fn check_screen_recording_permission() -> OSPermissionStatus {
     }
 }
 
-/// Check only accessibility permission
-/// Use this for polling to check if user has granted accessibility permission
+/// Check only accessibility permission (silent, side-effect free).
+/// Use this for passive polling before the user has chosen to grant — it never
+/// enrolls the app in the Accessibility list or surfaces the system prompt.
+/// It will not see a grant made *after* the process started (AXIsProcessTrusted
+/// caches stale-denied); once the user actively requests the permission, switch
+/// to `check_accessibility_permission_live_cmd` to catch that transition.
 #[tauri::command(async)]
 #[specta::specta]
 pub fn check_accessibility_permission_cmd() -> OSPermissionStatus {
     core_to_os_status(screenpipe_core::permissions::check_accessibility())
+}
+
+/// Live accessibility check for polling *after* the user has actively started
+/// the grant flow. Probes tccd via an active event tap so a grant made while
+/// the app is running is seen without a relaunch. The probe enrolls the app in
+/// the Accessibility list (and can surface the system prompt), which is
+/// expected once the user is being asked — do NOT use it for passive polling.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn check_accessibility_permission_live_cmd() -> OSPermissionStatus {
+    core_to_os_status(screenpipe_core::permissions::check_accessibility_live())
 }
 
 /// Check Input Monitoring permission (macOS only).
@@ -659,6 +866,31 @@ pub fn get_missing_permissions() -> Vec<OSPermission> {
     }
 }
 
+/// Combine the process's cached/live TCC state with the engine's enumeration
+/// verdict.
+///
+/// Even when both TCC checks report a grant, ScreenCaptureKit enumeration can
+/// prove capture is broken in the macOS lapsed-grant state. That runtime
+/// verdict therefore outranks `Granted`; it clears only when enumeration
+/// actually succeeds again (`report_screen_enumeration(true)`).
+#[cfg(any(target_os = "macos", test))]
+fn screen_recording_status(
+    process_state: ScreenRecordingPermissionState,
+    enumeration_denied: bool,
+    initial_check: bool,
+) -> OSPermissionStatus {
+    if process_state == ScreenRecordingPermissionState::GrantedNeedsRestart {
+        return OSPermissionStatus::RestartRequired;
+    }
+
+    let granted = process_state == ScreenRecordingPermissionState::Granted && !enumeration_denied;
+    match (granted, initial_check) {
+        (true, _) => OSPermissionStatus::Granted,
+        (false, true) => OSPermissionStatus::Empty,
+        (false, false) => OSPermissionStatus::Denied,
+    }
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 #[allow(unused_variables)] // initial_check used on macOS
@@ -685,15 +917,11 @@ pub fn do_permissions_check(initial_check: bool) -> OSPermissionsCheck {
         }
 
         OSPermissionsCheck {
-            screen_recording: {
-                use core_graphics_helmer_fork::access::ScreenCaptureAccess;
-                let result = ScreenCaptureAccess.preflight();
-                match (result, initial_check) {
-                    (true, _) => OSPermissionStatus::Granted,
-                    (false, true) => OSPermissionStatus::Empty,
-                    (false, false) => OSPermissionStatus::Denied,
-                }
-            },
+            screen_recording: screen_recording_status(
+                screen_recording_permission_state(),
+                screenpipe_engine::permission_monitor::screen_enumeration_denied(),
+                initial_check,
+            ),
             microphone: check_av_permission(AVMediaType::Audio),
             accessibility: check_accessibility_permission(),
         }
@@ -709,62 +937,11 @@ pub fn do_permissions_check(initial_check: bool) -> OSPermissionsCheck {
     }
 }
 
-/// Known Chromium-based browsers that use AppleScript for incognito detection
-/// and (in Arc's case) URL capture. Each needs its own Automation permission.
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
-struct ChromiumBrowserInfo {
-    name: &'static str,
-    bundle_id: &'static str,
-    app_path: &'static str,
-    process_name: &'static str,
-}
-
-#[cfg(target_os = "macos")]
-const CHROMIUM_BROWSERS: &[ChromiumBrowserInfo] = &[
-    ChromiumBrowserInfo {
-        name: "Arc",
-        bundle_id: "company.thebrowser.Browser",
-        app_path: "/Applications/Arc.app",
-        process_name: "Arc",
-    },
-    ChromiumBrowserInfo {
-        name: "Google Chrome",
-        bundle_id: "com.google.Chrome",
-        app_path: "/Applications/Google Chrome.app",
-        process_name: "Google Chrome",
-    },
-    ChromiumBrowserInfo {
-        name: "Brave Browser",
-        bundle_id: "com.brave.Browser",
-        app_path: "/Applications/Brave Browser.app",
-        process_name: "Brave Browser",
-    },
-    ChromiumBrowserInfo {
-        name: "Microsoft Edge",
-        bundle_id: "com.microsoft.edgemac",
-        app_path: "/Applications/Microsoft Edge.app",
-        process_name: "Microsoft Edge",
-    },
-    ChromiumBrowserInfo {
-        name: "Vivaldi",
-        bundle_id: "com.vivaldi.Vivaldi",
-        app_path: "/Applications/Vivaldi.app",
-        process_name: "Vivaldi",
-    },
-    ChromiumBrowserInfo {
-        name: "Opera",
-        bundle_id: "com.operasoftware.Opera",
-        app_path: "/Applications/Opera.app",
-        process_name: "Opera",
-    },
-    ChromiumBrowserInfo {
-        name: "Chromium",
-        bundle_id: "org.chromium.Chromium",
-        app_path: "/Applications/Chromium.app",
-        process_name: "Chromium",
-    },
-];
+use screenpipe_a11y::incognito::{
+    MacOSBrowserAutomationTarget as ChromiumBrowserInfo,
+    MACOS_BROWSER_AUTOMATION_TARGETS as CHROMIUM_BROWSERS,
+};
 
 /// Returns true on platforms where Screenpipe's process-audio tap backend is
 /// available. On macOS that means CoreAudio Process Tap (14.4+); on Windows it
@@ -1269,19 +1446,149 @@ pub fn request_arc_automation_permission(_app: tauri::AppHandle) -> bool {
 // and the preflight startup check.
 
 #[cfg(test)]
-mod screen_recording_preflight_tests {
+mod screen_recording_state_tests {
     use super::*;
 
     #[test]
-    fn maps_silent_preflight_result_without_needing_a_capture_probe() {
+    fn maps_matching_live_and_cached_screen_recording_results() {
         assert_eq!(
-            screen_recording_preflight_status(true),
+            screen_recording_permission_state_from_checks(false, false),
+            ScreenRecordingPermissionState::Denied
+        );
+        assert_eq!(
+            screen_recording_permission_state_from_checks(true, true),
+            ScreenRecordingPermissionState::Granted
+        );
+    }
+
+    #[test]
+    fn maps_mismatched_live_and_cached_screen_recording_results() {
+        assert_eq!(
+            screen_recording_permission_state_from_checks(false, true),
+            ScreenRecordingPermissionState::GrantedNeedsRestart
+        );
+        assert_eq!(
+            screen_recording_permission_state_from_checks(true, false),
+            ScreenRecordingPermissionState::RevokedButCached
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_the_current_process_tcc_preflight() {
+        assert!(direct_tcc_screen_recording_preflight().is_ok());
+    }
+
+    #[test]
+    fn only_requests_when_live_tcc_is_not_granted() {
+        assert!(should_request_screen_recording(
+            ScreenRecordingPermissionState::Denied
+        ));
+        assert!(should_request_screen_recording(
+            ScreenRecordingPermissionState::RevokedButCached
+        ));
+        assert!(!should_request_screen_recording(
+            ScreenRecordingPermissionState::Granted
+        ));
+        assert!(!should_request_screen_recording(
+            ScreenRecordingPermissionState::GrantedNeedsRestart
+        ));
+    }
+
+    #[test]
+    fn passive_checks_surface_restart_required_without_accepting_it_as_granted() {
+        assert_eq!(
+            screen_recording_status(ScreenRecordingPermissionState::Granted, false, false),
             OSPermissionStatus::Granted
         );
         assert_eq!(
-            screen_recording_preflight_status(false),
+            screen_recording_status(
+                ScreenRecordingPermissionState::GrantedNeedsRestart,
+                false,
+                false,
+            ),
+            OSPermissionStatus::RestartRequired
+        );
+        assert_eq!(
+            screen_recording_status(
+                ScreenRecordingPermissionState::GrantedNeedsRestart,
+                false,
+                true,
+            ),
+            OSPermissionStatus::RestartRequired
+        );
+        for state in [
+            ScreenRecordingPermissionState::Denied,
+            ScreenRecordingPermissionState::RevokedButCached,
+        ] {
+            assert_eq!(
+                screen_recording_status(state, false, false),
+                OSPermissionStatus::Denied
+            );
+            assert_eq!(
+                screen_recording_status(state, false, true),
+                OSPermissionStatus::Empty
+            );
+        }
+    }
+
+    /// Regression for the lapsed-grant loop: preflight answers `true` (stale)
+    /// while display enumeration is failing. The recovery window polls
+    /// `do_permissions_check(false)`; if this read as Granted it would treat
+    /// the loss as restored, close, and restart capture straight back into
+    /// the silent failure (observed in the wild: recovery opened at
+    /// 21:05:49Z, "restored" + stop/spawn at 21:05:50Z while enumeration
+    /// stayed empty). The enumeration verdict must outrank a positive
+    /// preflight so the window stays open and no restart fires.
+    #[test]
+    fn stale_positive_preflight_does_not_read_as_granted_while_enumeration_denied() {
+        assert_eq!(
+            screen_recording_status(ScreenRecordingPermissionState::Granted, true, false),
             OSPermissionStatus::Denied
         );
+        // Onboarding variant (initial_check) reads as not-yet-determined.
+        assert_eq!(
+            screen_recording_status(ScreenRecordingPermissionState::Granted, true, true),
+            OSPermissionStatus::Empty
+        );
+        // Verdict cleared (enumeration succeeded) → preflight trusted again.
+        assert_eq!(
+            screen_recording_status(ScreenRecordingPermissionState::Granted, false, false),
+            OSPermissionStatus::Granted
+        );
+        // Real denial still maps as before.
+        assert_eq!(
+            screen_recording_status(ScreenRecordingPermissionState::Denied, false, false),
+            OSPermissionStatus::Denied
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod permission_settings_tests {
+    use super::*;
+
+    #[test]
+    fn uses_the_absolute_macos_launcher_path() {
+        assert_eq!(MACOS_OPEN_COMMAND, "/usr/bin/open");
+    }
+
+    #[test]
+    fn maps_each_permission_to_its_system_settings_pane() {
+        let cases = [
+            (OSPermission::ScreenRecording, "Privacy_ScreenCapture"),
+            (OSPermission::Microphone, "Privacy_Microphone"),
+            (OSPermission::Accessibility, "Privacy_Accessibility"),
+            (OSPermission::Automation, "Privacy_Automation"),
+            (OSPermission::InputMonitoring, "Privacy_ListenEvent"),
+            (OSPermission::Calendar, "Privacy_Calendars"),
+        ];
+
+        for (permission, expected_pane) in cases {
+            let url = permission_settings_url(&permission);
+            assert!(url.starts_with("x-apple.systempreferences:"));
+            assert!(url.ends_with(expected_pane));
+        }
     }
 }
 

@@ -8,22 +8,29 @@ import { History, Plus } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { ChatTitleMenu } from "@/components/chat/standalone/chat-title-menu";
-import { formatShortcutDisplay, isInjectedTitle, isInjectedTitleSourcePrompt } from "@/lib/chat-utils";
-import { isPlaceholderConversationTitle } from "@/lib/chat/message-rendering";
+import { formatShortcutDisplay } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/lib/chat/types";
 import { useChatStore } from "@/lib/stores/chat-store";
-import { deriveFallbackConversationTitle } from "@/lib/utils/chat-title";
+import { resolveVisibleChatTitle } from "@/lib/chat/conversation-title";
 
 interface StandaloneChatHeaderProps {
   className?: string;
   rightActions?: React.ReactNode;
   conversationId: string | null;
   messages: Message[];
+  /**
+   * Text of a send that is dispatched but whose durable row has not landed
+   * yet. The optimistic bubble is on screen during that window, so the title
+   * has to come from the same place or the chat shows a message with no title
+   * and the header collapses to nothing.
+   */
+  pendingUserText?: string | null;
   sidebarCollapsed?: boolean;
   isMac: boolean;
   isFullscreen: boolean;
   hideInlineHistory?: boolean;
+  hasRightActions?: boolean;
   showHistory: boolean;
   settings: {
     disabledShortcuts: string[];
@@ -46,6 +53,7 @@ export function StandaloneChatHeader({
   isMac,
   isFullscreen,
   hideInlineHistory,
+  hasRightActions,
   showHistory,
   settings,
   reloadStore,
@@ -54,6 +62,7 @@ export function StandaloneChatHeader({
   deleteConversation,
   startNewConversation,
   onNewChat,
+  pendingUserText,
 }: StandaloneChatHeaderProps) {
   const storeTitle = useChatStore((s) =>
     conversationId ? s.sessions[conversationId]?.title : undefined
@@ -61,24 +70,29 @@ export function StandaloneChatHeader({
   const streamingTitle = useChatStore((s) =>
     conversationId ? s.sessions[conversationId]?.streamingTitle : undefined
   );
-  const firstUserMsg = messages.find(
-    (m) => m.role === "user" && !isInjectedTitleSourcePrompt(m.content)
-  );
-  const derivedTitle = firstUserMsg
-    ? deriveFallbackConversationTitle(firstUserMsg)
-    : undefined;
+  const visibleTitle = resolveVisibleChatTitle({
+    storeTitle,
+    streamingTitle,
+    messages,
+    pendingUserText,
+  });
   const hasMessages = messages.length > 0;
-  const visibleTitle =
-    streamingTitle ||
-    (storeTitle &&
-      !isPlaceholderConversationTitle(storeTitle) &&
-      !isInjectedTitle(storeTitle)
-        ? storeTitle
-        : derivedTitle || (hasMessages ? "untitled" : ""));
   const useCompactHeaderPadding = !className || Boolean(conversationId && visibleTitle);
+  // With inline history hidden (main window) the row can end up with the title
+  // menu suppressed and no right actions — an empty strip. Nothing to show and
+  // nothing to drag (dragging is disabled whenever className is set), so drop
+  // the row entirely instead of leaving a bordered band of dead space.
+  const isEmpty =
+    Boolean(hideInlineHistory) &&
+    !(conversationId && visibleTitle) &&
+    !hasRightActions;
+
+  if (isEmpty) return null;
 
   return (
     <div
+      data-testid="chat-header"
+      data-chat-title={visibleTitle || ""}
       className={cn(
         "relative flex items-center gap-3 px-4 py-3.5 border-b border-border/50 bg-gradient-to-r from-background to-muted/30",
         !className && "cursor-grab active:cursor-grabbing",
@@ -122,6 +136,7 @@ export function StandaloneChatHeader({
       <ChatTitleMenu
         conversationId={conversationId}
         messages={messages}
+        pendingUserText={pendingUserText}
         renameConversation={renameConversation}
         deleteConversation={deleteConversation}
         startNewConversation={startNewConversation}

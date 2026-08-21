@@ -9,7 +9,7 @@ featured: true
 ---
 
 
-Find action items and to-dos from the last 3 days that I may have missed. Read the screenpipe skill first. Use limit=10 per search, max 5 searches over the last 3 days. Query the API only — do not write or run code.
+Find action items and to-dos from the last 3 days that I may have missed. Read the screenpipe skill first. Use limit=10 per search, max 5 searches over the last 3 days. Use only screenpipe's recorded data, not this project's files or other apps' source.
 
 Look across messages, meetings, docs, and issue trackers (e.g. Slack, Notion, Linear, GitHub) for commitments and tasks — phrases like "I'll", "can you", "TODO", "follow up", "by Friday", action items, and unchecked checkboxes.
 

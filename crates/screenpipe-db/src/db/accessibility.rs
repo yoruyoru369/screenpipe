@@ -69,6 +69,18 @@ impl DatabaseManager {
 
         let sql = format!(
             r#"
+            WITH candidates AS MATERIALIZED (
+                SELECT f.id, f.timestamp
+                FROM frames f
+                {fts_join}
+                WHERE 1=1
+                    {fts_condition}
+                    AND (?2 IS NULL OR f.timestamp >= ?2)
+                    AND (?3 IS NULL OR f.timestamp <= ?3)
+                    AND f.accessibility_text IS NOT NULL AND f.accessibility_text != ''
+                ORDER BY f.timestamp {order_dir}, f.id {order_dir}
+                LIMIT ?4 OFFSET ?5
+            )
             SELECT
                 f.id,
                 COALESCE(f.full_text, f.accessibility_text, '') AS text_output,
@@ -79,17 +91,12 @@ impl DatabaseManager {
                 COALESCE(vc.file_path, '') as file_path,
                 COALESCE(f.offset_index, 0) as offset_index,
                 f.name as frame_name,
-                f.browser_url
-            FROM frames f
+                f.browser_url,
+                f.capture_trigger
+            FROM candidates c
+            JOIN frames f ON f.id = c.id
             LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
-            {fts_join}
-            WHERE 1=1
-                {fts_condition}
-                AND (?2 IS NULL OR f.timestamp >= ?2)
-                AND (?3 IS NULL OR f.timestamp <= ?3)
-                AND f.accessibility_text IS NOT NULL AND f.accessibility_text != ''
-            ORDER BY f.timestamp {order_dir}, f.id {order_dir}
-            LIMIT ?4 OFFSET ?5
+            ORDER BY c.timestamp {order_dir}, c.id {order_dir}
             "#,
             fts_join = if has_fts {
                 "JOIN frames_fts ON f.id = frames_fts.rowid"
@@ -107,6 +114,7 @@ impl DatabaseManager {
             },
         );
 
+        let mut connection = self.acquire_search_read().await?;
         sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(if has_fts {
                 combined_query
@@ -117,7 +125,7 @@ impl DatabaseManager {
             .bind(end_time)
             .bind(limit)
             .bind(offset)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *connection)
             .await
     }
 
@@ -184,6 +192,22 @@ impl DatabaseManager {
         // because window titles aren't a stable enum.
         let sql = format!(
             r#"
+            WITH candidates AS MATERIALIZED (
+                SELECT f.id, f.timestamp
+                FROM elements e
+                {fts_join}
+                JOIN frames f ON f.id = e.frame_id
+                WHERE e.source = 'accessibility'
+                  AND e.on_screen = ?1
+                  {fts_match}
+                  AND (?2 IS NULL OR f.timestamp >= ?2)
+                  AND (?3 IS NULL OR f.timestamp <= ?3)
+                  AND (?4 IS NULL OR f.app_name = ?4)
+                  AND (?5 IS NULL OR f.window_name LIKE '%' || ?5 || '%')
+                GROUP BY f.id
+                ORDER BY f.timestamp {order_dir}, f.id {order_dir}
+                LIMIT ?6 OFFSET ?7
+            )
             SELECT
                 f.id,
                 COALESCE(f.full_text, f.accessibility_text, '') AS text_output,
@@ -194,21 +218,12 @@ impl DatabaseManager {
                 COALESCE(vc.file_path, '') as file_path,
                 COALESCE(f.offset_index, 0) as offset_index,
                 f.name as frame_name,
-                f.browser_url
-            FROM elements e
-            {fts_join}
-            JOIN frames f ON f.id = e.frame_id
+                f.browser_url,
+                f.capture_trigger
+            FROM candidates c
+            JOIN frames f ON f.id = c.id
             LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
-            WHERE e.source = 'accessibility'
-              AND e.on_screen = ?1
-              {fts_match}
-              AND (?2 IS NULL OR f.timestamp >= ?2)
-              AND (?3 IS NULL OR f.timestamp <= ?3)
-              AND (?4 IS NULL OR f.app_name = ?4)
-              AND (?5 IS NULL OR f.window_name LIKE '%' || ?5 || '%')
-            GROUP BY f.id
-            ORDER BY f.timestamp {order_dir}, f.id {order_dir}
-            LIMIT ?6 OFFSET ?7
+            ORDER BY c.timestamp {order_dir}, c.id {order_dir}
             "#,
             fts_join = if has_query {
                 "JOIN elements_fts ef ON ef.rowid = e.id"
@@ -238,7 +253,8 @@ impl DatabaseManager {
         if has_query {
             q = q.bind(crate::text_normalizer::sanitize_fts5_query(query));
         }
-        q.fetch_all(&self.pool).await
+        let mut connection = self.acquire_search_read().await?;
+        q.fetch_all(&mut *connection).await
     }
 
     /// Count of distinct frames returned by `search_accessibility_visible`,
@@ -289,7 +305,8 @@ impl DatabaseManager {
         if has_query {
             q = q.bind(crate::text_normalizer::sanitize_fts5_query(query));
         }
-        let n: i64 = q.fetch_one(&self.pool).await?;
+        let mut connection = self.acquire_search_read().await?;
+        let n: i64 = q.fetch_one(&mut *connection).await?;
         Ok(n.max(0) as usize)
     }
 
@@ -405,6 +422,7 @@ impl DatabaseManager {
         for val in &bind_values {
             query_builder = query_builder.bind(val);
         }
+        let mut connection = self.acquire_search_read().await?;
         let rows: Vec<UiEventRow> = query_builder
             .bind(start_time)
             .bind(start_time)
@@ -412,7 +430,7 @@ impl DatabaseManager {
             .bind(end_time)
             .bind(limit)
             .bind(offset)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *connection)
             .await?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())

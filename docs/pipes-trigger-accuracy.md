@@ -1,3 +1,6 @@
+<!-- doc-covers: crates/screenpipe-core/src/pipes/custom_triggers.rs, crates/screenpipe-core/src/pipes/mod.rs, crates/screenpipe-engine/src/pipes_api.rs -->
+<!-- doc-verified: 7493feff7 -->
+
 # Pipe trigger accuracy
 
 The optional hybrid matcher uses

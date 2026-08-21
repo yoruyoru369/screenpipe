@@ -8,8 +8,11 @@
 //! Captures happen only on meaningful user events: app switch, window focus,
 //! click, typing pause, scroll stop, clipboard, and periodic idle fallback.
 
+use crate::capture_exclusions::{probe_excluded_sck_window_ids, storage_excluded_sck_window_ids};
 use crate::hot_frame_cache::{HotFrame, HotFrameCache};
 use crate::power::PowerProfile;
+use crate::semantic_worker::{SemanticProjectionJob, SemanticProjectionSender};
+use crate::visual_probe::bounded_visual_probe;
 use anyhow::Result;
 use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
@@ -18,21 +21,200 @@ use screenpipe_capture::ocr_gate::OcrGate;
 use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
-use screenpipe_screen::capture_screenshot_by_window::{get_excluded_sck_window_ids, WindowFilters};
+use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
 use screenpipe_screen::frame_comparison::{FrameComparer, FrameComparisonConfig};
 use screenpipe_screen::monitor::{list_monitors, SafeMonitor};
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
 use screenpipe_screen::utils::capture_monitor_image;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info, warn};
 
+// macOS reserves a bounded 12s SCK attempt plus a 2s CoreGraphics escape
+// hatch. Give exclusion resolution and the fallback enough room to finish and
+// latch its backend preference before the whole capture/OCR/DB future is
+// cancelled. Other platforms preserve the existing 15s operation budget.
+#[cfg(target_os = "macos")]
+const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(target_os = "macos"))]
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const WARM_VISUAL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const WARM_FOCUS_BACKSTOP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Debug-only one-shot fault state for the exact production symptom where all
+/// monitor tasks remain alive but stop issuing capture heartbeats:
+/// 0 = armed, 1 = capture loops parked, 2 = watchdog observed and released it.
+#[cfg(debug_assertions)]
+static E2E_CAPTURE_LOOP_SILENT_PHASE: AtomicU8 = AtomicU8::new(0);
+#[cfg(debug_assertions)]
+static E2E_CAPTURE_LOOP_SILENT_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(debug_assertions)]
+static E2E_FOCUS_COLD_MARKED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(debug_assertions, test))]
+fn seed_list_has_capture_loop_silent(seeds: &str) -> bool {
+    seeds
+        .split(',')
+        .any(|seed| seed.trim() == "capture-loop-silent-once")
+}
+
+#[cfg(debug_assertions)]
+fn e2e_capture_loop_silent_enabled() -> bool {
+    std::env::var("SCREENPIPE_E2E_SEED")
+        .ok()
+        .is_some_and(|seeds| seed_list_has_capture_loop_silent(&seeds))
+}
+
+#[cfg(any(debug_assertions, test))]
+fn seed_list_has_focus_cold_heartbeat(seeds: &str) -> bool {
+    seeds
+        .split(',')
+        .any(|seed| seed.trim() == "focus-cold-heartbeat")
+}
+
+/// Deterministically reproduce a selected display remaining intentionally
+/// parked while the user works on another monitor. Production reaches this
+/// state through the focus tracker; the E2E seed removes physical-display and
+/// cursor placement from the regression test.
+#[cfg(debug_assertions)]
+fn e2e_force_focus_cold(monitor_id: u32) -> bool {
+    let enabled = std::env::var("SCREENPIPE_E2E_SEED")
+        .ok()
+        .is_some_and(|seeds| seed_list_has_focus_cold_heartbeat(&seeds));
+    if enabled
+        && E2E_FOCUS_COLD_MARKED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        info!(
+            "e2e: forcing focus-aware Cold state for monitor {} (focus-cold-heartbeat)",
+            monitor_id
+        );
+        if let Ok(dir) = std::env::var("SCREENPIPE_DATA_DIR") {
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join("e2e-focus-cold-heartbeat-fired"),
+                b"1",
+            );
+        }
+    }
+    enabled
+}
+
+/// Park every initial monitor loop after the pipeline has proved it can both
+/// attempt and reach a healthy terminal outcome (persist, dedup, or an explicit
+/// corrupt-frame skip). The tasks stay cancellable so VisionManager::stop can
+/// preempt them, while their metrics reproduce the real gone-silent shape.
+#[cfg(debug_assertions)]
+async fn e2e_park_capture_loop_once(
+    vision_metrics: &screenpipe_screen::PipelineMetrics,
+    monitor_id: u32,
+) {
+    if !e2e_capture_loop_silent_enabled()
+        || !E2E_CAPTURE_LOOP_SILENT_ARMED.load(Ordering::SeqCst)
+        || E2E_CAPTURE_LOOP_SILENT_PHASE.load(Ordering::SeqCst) == 2
+    {
+        return;
+    }
+
+    let snap = vision_metrics.snapshot();
+    if snap.last_capture_attempt_ts == 0 || snap.last_db_write_ts == 0 {
+        return;
+    }
+
+    if E2E_CAPTURE_LOOP_SILENT_PHASE
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        warn!("e2e: parking all capture loops after a healthy baseline (capture-loop-silent-once)");
+        if let Ok(dir) = std::env::var("SCREENPIPE_DATA_DIR") {
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join("e2e-capture-loop-silent-fired"),
+                b"1",
+            );
+        }
+        // The arm command wakes the watcher, but the capture loop may not
+        // enter the fault until a later focus/backstop wake. Notify again only
+        // after phase 1 is observable so accelerated watchdog thresholds can
+        // never classify the healthy pre-fault interval as the injected stall.
+        #[cfg(target_os = "macos")]
+        crate::sleep_monitor::display_reconfig_notify().notify_one();
+    }
+
+    if E2E_CAPTURE_LOOP_SILENT_PHASE.load(Ordering::SeqCst) == 1 {
+        warn!("e2e: capture loop parked for monitor {}", monitor_id);
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Arm the gone-silent fault only after the E2E spec has observed a healthy
+/// baseline. This prevents app/WebDriver startup time from racing the short
+/// accelerated recovery window.
+#[cfg(debug_assertions)]
+pub fn e2e_arm_capture_loop_silent_fault() -> bool {
+    if !e2e_capture_loop_silent_enabled()
+        || E2E_CAPTURE_LOOP_SILENT_PHASE.load(Ordering::SeqCst) != 0
+    {
+        return false;
+    }
+    E2E_CAPTURE_LOOP_SILENT_ARMED.store(true, Ordering::SeqCst);
+    // The production watcher may already be inside its 60-second event-driven
+    // backstop sleep. Wake that existing wait so it can observe the newly
+    // armed one-second E2E profile immediately; otherwise this deterministic
+    // probe depends on an unrelated display-reconfiguration event.
+    #[cfg(target_os = "macos")]
+    crate::sleep_monitor::display_reconfig_notify().notify_one();
+    true
+}
+
+/// Whether the full-stack liveness probe has entered or completed its fault
+/// window. Threshold acceleration starts only after a capture loop actually
+/// parks (phase 1), then remains enabled through recovery (phase 2). Merely
+/// arming the probe is not enough: a healthy loop may still be waiting on its
+/// normal focus/backstop cadence.
+#[cfg(debug_assertions)]
+pub fn e2e_capture_loop_silent_fault_started() -> bool {
+    e2e_capture_loop_silent_enabled()
+        && e2e_capture_loop_silent_phase_started(
+            E2E_CAPTURE_LOOP_SILENT_PHASE.load(Ordering::SeqCst),
+        )
+}
+
+#[cfg(any(debug_assertions, test))]
+fn e2e_capture_loop_silent_phase_started(phase: u8) -> bool {
+    phase != 0
+}
+
+#[cfg(not(debug_assertions))]
+pub fn e2e_arm_capture_loop_silent_fault() -> bool {
+    false
+}
+
+#[cfg(not(debug_assertions))]
+pub fn e2e_capture_loop_silent_fault_started() -> bool {
+    false
+}
+
+/// Called by the independent monitor watcher immediately before it restarts a
+/// detected stall. New-generation monitor tasks must not re-arm the one-shot.
+#[cfg(debug_assertions)]
+pub(crate) fn e2e_complete_capture_loop_silent_fault() {
+    if E2E_CAPTURE_LOOP_SILENT_PHASE.swap(2, Ordering::SeqCst) == 1 {
+        if let Ok(dir) = std::env::var("SCREENPIPE_DATA_DIR") {
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join("e2e-capture-loop-watchdog-fired"),
+                b"1",
+            );
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn e2e_complete_capture_loop_silent_fault() {}
 
 fn warm_visual_wait_duration(elapsed: Duration) -> Duration {
     WARM_VISUAL_CHECK_INTERVAL
@@ -60,7 +242,7 @@ async fn wait_for_warm_focus_or_timeout(
 ///
 /// Groups parameters that don't change between captures on the same monitor,
 /// keeping `do_capture`'s argument list manageable.
-pub struct CaptureParams<'a> {
+pub(crate) struct CaptureParams<'a> {
     pub db: &'a DatabaseManager,
     pub monitor: &'a SafeMonitor,
     pub monitor_id: u32,
@@ -72,6 +254,8 @@ pub struct CaptureParams<'a> {
     pub use_pii_removal: bool,
     pub pause_on_drm_content: bool,
     pub languages: &'a [screenpipe_core::Language],
+    /// Opt-in background semantic parser. None preserves historical capture.
+    pub semantic_tx: Option<&'a SemanticProjectionSender>,
 }
 
 async fn capture_with_timeout<F, T>(
@@ -117,23 +301,23 @@ pub enum CaptureTrigger {
     Manual,
 }
 
-/// A trigger plus the `correlation_id` of the originating `ui_events` row,
-/// if any. The recorder assigns the correlation id when forwarding events
-/// that warrant a capture; the capture loop accumulates them across
-/// debounced triggers and reports the full set back through the frame
-/// linker once the resulting frame lands. Internally-generated triggers
-/// (Idle, VisualChange, Manual) leave `correlation_id` as `None`.
+/// A trigger plus the correlation IDs of its originating `ui_events` rows.
+/// Most recorder events carry one ID; a settled scroll burst carries every
+/// row ID atomically so a bounded broadcast channel cannot lose part of the
+/// burst. The capture loop accumulates IDs across debounced triggers and
+/// reports the full set back through the frame linker once the resulting
+/// frame lands. Internally-generated triggers carry an empty vector.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureTriggerMsg {
     pub trigger: CaptureTrigger,
-    pub correlation_id: Option<crate::frame_linker::CorrelationId>,
+    pub correlation_ids: Vec<crate::frame_linker::CorrelationId>,
 }
 
 impl CaptureTriggerMsg {
     pub fn new(trigger: CaptureTrigger) -> Self {
         Self {
             trigger,
-            correlation_id: None,
+            correlation_ids: Vec::new(),
         }
     }
     pub fn with_correlation(
@@ -142,7 +326,17 @@ impl CaptureTriggerMsg {
     ) -> Self {
         Self {
             trigger,
-            correlation_id: Some(id),
+            correlation_ids: vec![id],
+        }
+    }
+
+    pub fn with_correlations(
+        trigger: CaptureTrigger,
+        correlation_ids: Vec<crate::frame_linker::CorrelationId>,
+    ) -> Self {
+        Self {
+            trigger,
+            correlation_ids,
         }
     }
 }
@@ -176,11 +370,7 @@ fn drain_pending_corr_ids(
     let mut out = Vec::new();
     loop {
         match trigger_rx.try_recv() {
-            Ok(msg) => {
-                if let Some(corr) = msg.correlation_id {
-                    out.push(corr);
-                }
-            }
+            Ok(msg) => out.extend(msg.correlation_ids),
             Err(broadcast::error::TryRecvError::Empty)
             | Err(broadcast::error::TryRecvError::Closed) => break,
             Err(broadcast::error::TryRecvError::Lagged(_)) => {
@@ -218,9 +408,7 @@ where
     let mut trigger: Option<CaptureTrigger> = None;
     let mut correlation_ids = Vec::new();
     for msg in msgs {
-        if let Some(corr) = msg.correlation_id {
-            correlation_ids.push(corr);
-        }
+        correlation_ids.extend(msg.correlation_ids);
         let candidate_priority = trigger_reduce_priority(&msg.trigger);
         let current_priority = trigger.as_ref().map(trigger_reduce_priority).unwrap_or(0);
         if trigger.is_none() || candidate_priority >= current_priority {
@@ -494,8 +682,9 @@ pub type TriggerReceiver = broadcast::Receiver<CaptureTriggerMsg>;
 
 /// Broadcast buffer for capture triggers. Sized to absorb a typing
 /// burst (Arc/Claude routinely emit 100+ Text/Click events in <200ms)
-/// while one monitor is mid-screenshot (250-800ms blocking). At 32B per
-/// `CaptureTriggerMsg` this is ~128KB total. Smaller buffers cause
+/// while one monitor is mid-screenshot (250-800ms blocking). The buffer
+/// remains modest for ordinary one-ID messages, while batched scroll IDs stay
+/// atomic within one slot. Smaller buffers cause
 /// `broadcast::error::RecvError::Lagged`, which drops correlation_ids
 /// permanently — the `ui_events` rows then stay `frame_id = NULL`.
 pub const TRIGGER_CHANNEL_BUFFER: usize = 4096;
@@ -654,8 +843,76 @@ fn idle_phase_delay(
 /// 2. ActivityFeed state transitions (typing pause, idle) via polling
 ///
 /// Each trigger results in a paired capture (screenshot + accessibility tree walk).
+fn record_capture_attempt(
+    aggregate: &screenpipe_screen::PipelineMetrics,
+    monitor: &screenpipe_screen::PipelineMetrics,
+) {
+    aggregate.record_capture_attempt();
+    monitor.record_capture_attempt();
+}
+
+fn record_capture_loop_heartbeat(
+    aggregate: &screenpipe_screen::PipelineMetrics,
+    monitor: &screenpipe_screen::PipelineMetrics,
+) {
+    aggregate.record_capture_loop_heartbeat();
+    monitor.record_capture_loop_heartbeat();
+}
+
+/// Mark the stage the loop is entering on both the aggregate and per-monitor
+/// metrics, so a frozen loop names its own freeze point (see
+/// [`screenpipe_screen::CaptureLoopStage`]). Per-monitor is what the watchdog
+/// reads: the aggregate is overwritten by whichever display iterated last.
+fn record_loop_stage(
+    aggregate: &screenpipe_screen::PipelineMetrics,
+    monitor: &screenpipe_screen::PipelineMetrics,
+    stage: screenpipe_screen::CaptureLoopStage,
+) {
+    aggregate.record_loop_stage(stage);
+    monitor.record_loop_stage(stage);
+}
+
+/// Publish whether this loop is taking screenshots, and if not why, so
+/// `/health` can tell an intentional pixel pause apart from a capture failure
+/// (#5808). Both inputs are process-global (a config flag and the active power
+/// profile), so every monitor's loop writes the same value and last-writer-wins
+/// on the aggregate is correct.
+fn record_screenshot_capture_state(
+    aggregate: &screenpipe_screen::PipelineMetrics,
+    monitor: &screenpipe_screen::PipelineMetrics,
+    state: screenpipe_screen::ScreenshotCaptureState,
+) {
+    aggregate.record_screenshot_capture_state(state);
+    monitor.record_screenshot_capture_state(state);
+}
+
+fn record_persisted_capture(
+    aggregate: &screenpipe_screen::PipelineMetrics,
+    monitor: &screenpipe_screen::PipelineMetrics,
+    duration: Duration,
+) {
+    aggregate.record_capture();
+    aggregate.record_db_write(duration);
+    monitor.record_capture();
+    monitor.record_db_write(duration);
+}
+
+fn record_capture_skip(
+    aggregate: &screenpipe_screen::PipelineMetrics,
+    monitor: &screenpipe_screen::PipelineMetrics,
+    corrupt_is_green: Option<bool>,
+) {
+    if let Some(is_green) = corrupt_is_green {
+        aggregate.record_corrupt_skip(is_green);
+        monitor.record_corrupt_skip(is_green);
+    } else {
+        aggregate.record_dedup_skip();
+        monitor.record_dedup_skip();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn event_driven_capture_loop(
+pub(crate) async fn event_driven_capture_loop(
     db: Arc<DatabaseManager>,
     monitor: Arc<SafeMonitor>,
     monitor_id: u32,
@@ -667,6 +924,7 @@ pub async fn event_driven_capture_loop(
     mut trigger_rx: TriggerReceiver,
     stop_signal: Arc<AtomicBool>,
     vision_metrics: Arc<screenpipe_screen::PipelineMetrics>,
+    monitor_liveness: Arc<screenpipe_screen::PipelineMetrics>,
     hot_frame_cache: Option<Arc<HotFrameCache>>,
     use_pii_removal: bool,
     pause_on_drm_content: bool,
@@ -678,6 +936,7 @@ pub async fn event_driven_capture_loop(
     // The loop polls `effective_interval_ms()` each tick; `None` here means
     // the override is fully disabled (no auto, no manual, no detector).
     high_fps_controller: Option<Arc<crate::high_fps_controller::HighFpsController>>,
+    semantic_tx: Option<SemanticProjectionSender>,
 ) -> Result<()> {
     info!(
         "event-driven capture started for monitor {} (device: {})",
@@ -686,6 +945,13 @@ pub async fn event_driven_capture_loop(
 
     let screenshots_disabled_by_config = config.disable_screenshots;
     let mut screenshot_disabled = screenshots_disabled_by_config;
+    // Publish the effective state so /health can name an intentional pixel
+    // pause instead of blaming Screen Recording permission for it (#5808).
+    record_screenshot_capture_state(
+        &vision_metrics,
+        &monitor_liveness,
+        screenpipe_screen::ScreenshotCaptureState::resolve(screenshots_disabled_by_config, false),
+    );
     let mut visual_check_enabled = config.visual_check_interval_ms > 0 && !screenshot_disabled;
     let mut visual_check_interval = Duration::from_millis(config.visual_check_interval_ms);
     let mut visual_change_threshold = config.visual_change_threshold;
@@ -805,6 +1071,7 @@ pub async fn event_driven_capture_loop(
         use_pii_removal,
         pause_on_drm_content,
         languages: &languages,
+        semantic_tx: semantic_tx.as_ref(),
     };
 
     // Capture immediately on startup so the timeline has a frame right away.
@@ -818,9 +1085,13 @@ pub async fn event_driven_capture_loop(
     {
         // Small delay to let the monitor settle after startup
         tokio::time::sleep(Duration::from_millis(500)).await;
+        // Let the capture proceed immediately after the settle delay.
         state.last_capture = Instant::now()
             .checked_sub(Duration::from_millis(500))
-            .unwrap_or(Instant::now()); // allow capture
+            .unwrap_or(Instant::now());
+        // Startup capture is a real attempt too. Count capture work from the
+        // first frame instead of waiting for the next idle fallback.
+        record_capture_attempt(&vision_metrics, &monitor_liveness);
         match capture_with_timeout(
             CAPTURE_OPERATION_TIMEOUT,
             do_capture(
@@ -831,7 +1102,7 @@ pub async fn event_driven_capture_loop(
                 None, // first capture — no elements ref
                 &mut walk_budget,
                 &mut ocr_gate,
-                false, // screenshot enabled on startup
+                screenshot_disabled,
                 false, // hd not active at startup (Manual is dedup-exempt anyway)
                 false, // not in a meeting at startup
                 true,  // focus unknown at startup — controller defaults to Active
@@ -852,8 +1123,11 @@ pub async fn event_driven_capture_loop(
                     if let Some(hash) = result.content_hash {
                         last_elements_cache.insert(device_name.clone(), (result.frame_id, hash));
                     }
-                    vision_metrics.record_capture();
-                    vision_metrics.record_db_write(Duration::from_millis(result.duration_ms));
+                    record_persisted_capture(
+                        &vision_metrics,
+                        &monitor_liveness,
+                        Duration::from_millis(result.duration_ms),
+                    );
                     // OCR metrics: record once per OCR run (each run = cache miss).
                     if let Some(ocr_ms) = result.ocr_duration_ms {
                         vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
@@ -872,13 +1146,17 @@ pub async fn event_driven_capture_loop(
                 } else if let Some(kind) = output.corrupt {
                     // Frame rejected as corrupt (black / green band) — distinct
                     // counter, not a dedup. Both tick the stall clock.
-                    vision_metrics.record_corrupt_skip(matches!(kind, CorruptKind::GreenBand));
+                    record_capture_skip(
+                        &vision_metrics,
+                        &monitor_liveness,
+                        Some(matches!(kind, CorruptKind::GreenBand)),
+                    );
                 } else {
                     // Symmetry with the live loop — startup capture rarely
                     // hits dedup (no prior hash on first frame) but if it
                     // does, treat it the same way: pipeline cycled fine,
                     // nothing new to write.
-                    vision_metrics.record_dedup_skip();
+                    record_capture_skip(&vision_metrics, &monitor_liveness, None);
                 }
             }
             Ok(Err(e)) => {
@@ -927,6 +1205,20 @@ pub async fn event_driven_capture_loop(
             break;
         }
 
+        // This is the task-liveness clock. Keep it independent from capture
+        // attempts: focus-aware scheduling intentionally parks non-focused
+        // monitors in Warm/Cold state, but the loop is still healthy and wakes
+        // on focus notifications or its bounded backstop.
+        record_capture_loop_heartbeat(&vision_metrics, &monitor_liveness);
+        record_loop_stage(
+            &vision_metrics,
+            &monitor_liveness,
+            screenpipe_screen::CaptureLoopStage::Heartbeat,
+        );
+
+        #[cfg(debug_assertions)]
+        e2e_park_capture_loop_once(&vision_metrics, monitor_id).await;
+
         // Focus-aware gating — always on. Skips or pauses capture on
         // non-focused monitors. If focus resolution fails on this platform
         // (Linux Wayland, permission denied, etc.) the controller's
@@ -938,16 +1230,32 @@ pub async fn event_driven_capture_loop(
         // to the normal capture path further down, bypassing other trigger
         // detection. This lets the Warm path capture only when pixels
         // actually changed without duplicating the whole capture machinery.
+        record_loop_stage(
+            &vision_metrics,
+            &monitor_liveness,
+            screenpipe_screen::CaptureLoopStage::FocusGate,
+        );
         let mut warm_trigger_override: Option<CaptureTrigger> = None;
         {
             use crate::focus_aware_controller::CaptureState;
-            let capture_state = focus_controller.state_for_monitor(&monitor);
+            // Only the debug-only e2e override below reassigns this.
+            #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+            let mut capture_state = focus_controller.state_for_monitor(&monitor);
+            #[cfg(debug_assertions)]
+            if e2e_force_focus_cold(monitor_id) {
+                capture_state = CaptureState::Cold;
+            }
 
             // Fires exactly once per focus-away transition, not every Cold
             // loop iteration, so the log line is meaningful and we don't
             // churn sck-rs / WGC locks.
             let is_cold = matches!(capture_state, CaptureState::Cold);
             if is_cold && !was_cold {
+                record_loop_stage(
+                    &vision_metrics,
+                    &monitor_liveness,
+                    screenpipe_screen::CaptureLoopStage::ReleaseStream,
+                );
                 monitor.release_capture_stream();
             }
             was_cold = is_cold;
@@ -986,9 +1294,23 @@ pub async fn event_driven_capture_loop(
                     // seeded yet (Active path fills it), this snapshot pass
                     // is still correct — it just might include pixels from
                     // soon-to-be-excluded transient windows.
-                    let snap = capture_monitor_image(&monitor, &cached_excluded_ids).await;
+                    // Bounded: an unbounded await here froze the whole loop
+                    // when ScreenCaptureKit wedged (see VISUAL_PROBE_TIMEOUT).
+                    let snap =
+                        bounded_visual_probe(&monitor, &cached_excluded_ids, monitor_id).await;
                     match snap {
-                        Ok((image, _)) => {
+                        Ok(None) => {
+                            // Probe timed out — treat like a failed check and
+                            // keep the Warm cadence (loop stays live).
+                            wait_for_warm_focus_or_timeout(
+                                &focus_controller,
+                                monitor_id,
+                                warm_visual_wait_duration(Duration::ZERO),
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(Some((image, _))) => {
                             let diff = comparer.compare(&image);
                             if diff > visual_change_threshold {
                                 debug!(
@@ -1038,6 +1360,11 @@ pub async fn event_driven_capture_loop(
                     }
                     // Block until focus returns. 5s backstop guards against
                     // stuck waiters if a focus event is ever missed.
+                    record_loop_stage(
+                        &vision_metrics,
+                        &monitor_liveness,
+                        screenpipe_screen::CaptureLoopStage::ColdWait,
+                    );
                     let notify = focus_controller.notify_for(monitor_id);
                     tokio::select! {
                         _ = notify.notified() => {}
@@ -1055,6 +1382,11 @@ pub async fn event_driven_capture_loop(
         // composing + delivering frames at the stream's frame interval into a
         // sleeping reader for the entire pause window — the exact cost the
         // user expected `capture_paused` to eliminate.
+        record_loop_stage(
+            &vision_metrics,
+            &monitor_liveness,
+            screenpipe_screen::CaptureLoopStage::PauseGate,
+        );
         let in_pause_state = crate::sleep_monitor::screen_is_locked()
             || power_profile_rx
                 .as_ref()
@@ -1160,6 +1492,14 @@ pub async fn event_driven_capture_loop(
                 visual_check_interval = Duration::from_millis(profile.visual_check_interval_ms);
                 visual_change_threshold = profile.visual_change_threshold;
                 screenshot_disabled = screenshots_disabled_by_config || profile.screenshot_disabled;
+                record_screenshot_capture_state(
+                    &vision_metrics,
+                    &monitor_liveness,
+                    screenpipe_screen::ScreenshotCaptureState::resolve(
+                        screenshots_disabled_by_config,
+                        profile.screenshot_disabled,
+                    ),
+                );
                 visual_check_enabled = profile.visual_check_interval_ms > 0 && !screenshot_disabled;
                 if visual_check_enabled && frame_comparer.is_none() {
                     frame_comparer =
@@ -1254,6 +1594,11 @@ pub async fn event_driven_capture_loop(
             let mut lagged_force_manual = false;
             let mut closed_now = false;
 
+            record_loop_stage(
+                &vision_metrics,
+                &monitor_liveness,
+                screenpipe_screen::CaptureLoopStage::TriggerWait,
+            );
             match tokio::time::timeout(poll_interval, trigger_rx.recv()).await {
                 Ok(Ok(msg)) => drained.push(msg),
                 Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
@@ -1286,6 +1631,21 @@ pub async fn event_driven_capture_loop(
                     // poll_activity below.
                 }
             }
+
+            // The bounded wait above returned, so anything past this point is
+            // synchronous gate work, not the timer. Re-marking here keeps the
+            // watchdog's "frozen in <stage>" message honest: `trigger-wait`
+            // now accuses only the 250ms-bounded await (a freeze there means
+            // the task was never resumed), while `trigger-drain` accuses the
+            // synchronous gates below (a freeze there means a lock is held by
+            // another thread). Previously both shared one marker, so a
+            // multi-minute #3939 freeze reported `trigger-wait` even though a
+            // 250ms timeout cannot account for it.
+            record_loop_stage(
+                &vision_metrics,
+                &monitor_liveness,
+                screenpipe_screen::CaptureLoopStage::TriggerDrain,
+            );
 
             // Drain any remaining triggers that piled up while we were
             // waiting on the first one.
@@ -1369,6 +1729,17 @@ pub async fn event_driven_capture_loop(
         // Use the same window exclusions as the full capture so the diff image
         // matches what we'd actually store — avoids triggering on excluded
         // windows and seeing phantom "visual changes" from their pixels.
+        //
+        // The armed e2e hang seed forces one check past the keyboard-idle
+        // gate so the fault injection fires deterministically even while
+        // someone is typing on the e2e host (debug builds only).
+        #[cfg(debug_assertions)]
+        let force_visual_check_for_e2e = trigger.is_none()
+            && visual_check_enabled
+            && frame_comparer.is_some()
+            && crate::visual_probe::e2e_visual_check_hang_armed();
+        #[cfg(not(debug_assertions))]
+        let force_visual_check_for_e2e = false;
         if should_run_visual_check(
             &trigger,
             visual_check_enabled,
@@ -1378,17 +1749,30 @@ pub async fn event_driven_capture_loop(
             last_visual_check.elapsed(),
             visual_check_interval,
             activity_feed.keyboard_idle_ms(),
-        ) {
+        ) || force_visual_check_for_e2e
+        {
             last_visual_check = Instant::now();
-            let mut fresh_ids = get_excluded_sck_window_ids(&capture_params.window_filters);
-            fresh_ids.sort_unstable();
-            fresh_ids.dedup();
+            // Bounded refresh + probe: neither the WindowServer IPC nor the
+            // SCK screenshot may freeze the loop — a wedged probe previously
+            // starved the idle-capture heartbeat and produced a false
+            // "recording needs help" incident (see VISUAL_PROBE_TIMEOUT).
+            record_loop_stage(
+                &vision_metrics,
+                &monitor_liveness,
+                screenpipe_screen::CaptureLoopStage::ExclusionProbe,
+            );
+            let fresh_ids = probe_excluded_sck_window_ids(&capture_params.window_filters).await;
             if fresh_ids != cached_excluded_ids {
                 cached_excluded_ids = fresh_ids;
             }
             if let Some(ref mut comparer) = frame_comparer {
-                match capture_monitor_image(&monitor, &cached_excluded_ids).await {
-                    Ok((image, _dur)) => {
+                record_loop_stage(
+                    &vision_metrics,
+                    &monitor_liveness,
+                    screenpipe_screen::CaptureLoopStage::VisualProbe,
+                );
+                match bounded_visual_probe(&monitor, &cached_excluded_ids, monitor_id).await {
+                    Ok(Some((image, _dur))) => {
                         let diff = comparer.compare(&image);
                         if diff > visual_change_threshold {
                             debug!(
@@ -1397,6 +1781,10 @@ pub async fn event_driven_capture_loop(
                             );
                             trigger = Some(CaptureTrigger::VisualChange);
                         }
+                    }
+                    Ok(None) => {
+                        // Probe timed out — skip this check; the idle fallback
+                        // still fires and keeps the capture heartbeat honest.
                     }
                     Err(e) => {
                         debug!(
@@ -1499,9 +1887,10 @@ pub async fn event_driven_capture_loop(
                     }
                 }
 
-                // Heartbeat: record that the loop is alive and attempting a capture.
-                // This keeps health "ok" even if the DB write below times out.
-                vision_metrics.record_capture_attempt();
+                // Record the capture operation separately from the loop heartbeat.
+                // This distinguishes active-but-failing work from intentional
+                // focus-aware Warm/Cold idling.
+                record_capture_attempt(&vision_metrics, &monitor_liveness);
 
                 // Compute elements_ref for frame-to-frame element dedup.
                 // If the current content_hash matches the previous frame's hash
@@ -1523,9 +1912,15 @@ pub async fn event_driven_capture_loop(
                 };
 
                 // Timeout prevents the capture loop from blocking indefinitely
-                // if the DB is truly stuck. 15s is generous — normal captures take
-                // 1-3s on debug builds. The semaphore serializes writes so they
-                // don't pile up, but each write still needs time.
+                // if the DB is truly stuck. Normal captures take 1-3s on debug
+                // builds; macOS gets a little more room for its bounded SCK ->
+                // CoreGraphics recovery chain. The semaphore serializes writes
+                // so they don't pile up, but each write still needs time.
+                record_loop_stage(
+                    &vision_metrics,
+                    &monitor_liveness,
+                    screenpipe_screen::CaptureLoopStage::Capture,
+                );
                 let capture_result = capture_with_timeout(
                     CAPTURE_OPERATION_TIMEOUT,
                     do_capture(
@@ -1539,13 +1934,10 @@ pub async fn event_driven_capture_loop(
                         screenshot_disabled,
                         hd_active,
                         in_meeting,
-                        // Meeting-OCR-gate scope (#5054): only the monitor
-                        // hosting the focused window is gated; Active is also
-                        // the controller's safe fallback when focus is unknown.
-                        matches!(
-                            focus_controller.state_for_monitor(&monitor),
-                            crate::focus_aware_controller::CaptureState::Active
-                        ),
+                        // AX pairing requires confirmed focus ownership.
+                        // CaptureState::Active is broader: it also covers
+                        // hysteresis and unknown/stale focus fallbacks.
+                        focus_controller.hosts_focus_for_monitor(&monitor),
                     ),
                 )
                 .await;
@@ -1605,9 +1997,11 @@ pub async fn event_driven_capture_loop(
                                 }
                             }
 
-                            vision_metrics.record_capture();
-                            vision_metrics
-                                .record_db_write(Duration::from_millis(result.duration_ms));
+                            record_persisted_capture(
+                                &vision_metrics,
+                                &monitor_liveness,
+                                Duration::from_millis(result.duration_ms),
+                            );
                             // OCR metrics: record once per OCR run. Each run is a
                             // cache miss (no OCR result cache exists). `ocr_duration_ms`
                             // is Some only when OCR actually ran for this frame.
@@ -1628,6 +2022,11 @@ pub async fn event_driven_capture_loop(
                             }
 
                             if let Some(ref cache) = hot_frame_cache {
+                                record_loop_stage(
+                                    &vision_metrics,
+                                    &monitor_liveness,
+                                    screenpipe_screen::CaptureLoopStage::HotCachePush,
+                                );
                                 push_to_hot_cache(cache, result, &device_name, &trigger).await;
                             }
 
@@ -1675,10 +2074,13 @@ pub async fn event_driven_capture_loop(
                             // broken. Corrupt frames get their own counter so a
                             // spike is visible instead of inflating dedup_skips.
                             if let Some(kind) = output.corrupt {
-                                vision_metrics
-                                    .record_corrupt_skip(matches!(kind, CorruptKind::GreenBand));
+                                record_capture_skip(
+                                    &vision_metrics,
+                                    &monitor_liveness,
+                                    Some(matches!(kind, CorruptKind::GreenBand)),
+                                );
                             } else {
-                                vision_metrics.record_dedup_skip();
+                                record_capture_skip(&vision_metrics, &monitor_liveness, None);
                             }
                             debug!(
                                 "capture skipped DB write for monitor {} (trigger={})",
@@ -1930,7 +2332,7 @@ fn resolve_capture_metadata_with_policy(
     Option<String>,
     Option<String>,
 ) {
-    let (mut app_name, mut window_name, browser_url, document_path) = match tree_snapshot {
+    let (mut app_name, mut window_name, mut browser_url, mut document_path) = match tree_snapshot {
         Some(snap) => (
             Some(snap.app_name.clone()),
             Some(snap.window_name.clone()),
@@ -1967,9 +2369,15 @@ fn resolve_capture_metadata_with_policy(
         } if !trigger_app_name.is_empty() => {
             if app_name.as_deref() != Some(trigger_app_name.as_str()) {
                 debug!(
-                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value",
+                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
                     trigger_app_name, app_name
                 );
+                // App-switch events typically do not carry the new window
+                // title. Keeping the previous tree's title, URL, or document
+                // path would create a metadata pair that never existed.
+                window_name = None;
+                browser_url = None;
+                document_path = None;
             }
             app_name = Some(trigger_app_name.clone());
         }
@@ -1989,6 +2397,30 @@ fn resolve_capture_metadata_with_policy(
     }
 
     (app_name, window_name, browser_url, document_path)
+}
+
+/// Final privacy gate for captures that reached metadata resolution without a
+/// conclusive tree-walk skip. Keep this decision in one place so every value
+/// that can reach `paired_capture` is covered by the same policy. Built-in
+/// incognito matching is limited to the focus-owning monitor; manual patterns
+/// preserve their existing all-monitor behavior.
+fn resolved_window_matches_privacy_filters(
+    ignore_incognito_windows: bool,
+    resolved_window_hosts_focus: bool,
+    ignored_patterns: &[WindowPattern],
+    app_name: Option<&str>,
+    window_name: Option<&str>,
+) -> bool {
+    if resolved_window_hosts_focus
+        && ignore_incognito_windows
+        && window_name.is_some_and(screenpipe_a11y::incognito::is_title_private)
+    {
+        return true;
+    }
+
+    let app_name = app_name.unwrap_or_default().to_lowercase();
+    let window_name = window_name.unwrap_or_default().to_lowercase();
+    window_pattern::matches_any(ignored_patterns, &app_name, &window_name)
 }
 
 /// Rate-limit OCR-heavy apps. Two groups:
@@ -2314,7 +2746,40 @@ async fn do_capture(
     let captured_at = Utc::now();
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
 
-    let image = if screenshot_disabled {
+    // Resolve ignored windows to SCK window IDs so ScreenCaptureKit excludes
+    // them from the capture buffer (zero overhead, pixel-perfect). Sorted +
+    // deduped so the persistent stream isn't needlessly recreated when
+    // transient windows (tooltips, popups) cause ordering changes. Bounded
+    // and off-thread: the raw call is a synchronous WindowServer IPC that
+    // would otherwise block this async task in a way the outer
+    // CAPTURE_OPERATION_TIMEOUT cannot preempt. `None` = exclusion state
+    // UNKNOWN while filters are configured: fail closed by skipping this
+    // frame's pixels (like `screenshot_disabled`; the a11y walk continues and
+    // applies its own independent window filtering) rather than storing a
+    // frame that may contain a window the user asked to hide.
+    let storage_exclusions = if screenshot_disabled {
+        Some(Vec::new())
+    } else {
+        storage_excluded_sck_window_ids(&params.window_filters).await
+    };
+    let skip_pixels_for_unknown_exclusions = storage_exclusions.is_none();
+    if skip_pixels_for_unknown_exclusions {
+        static LAST_SKIP_LOG: AtomicU64 = AtomicU64::new(0);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let prev = LAST_SKIP_LOG.load(Ordering::Relaxed);
+        if now_secs.saturating_sub(prev) >= 60 {
+            LAST_SKIP_LOG.store(now_secs, Ordering::Relaxed);
+            warn!(
+                "monitor {}: window-exclusion state unknown (WindowServer unresponsive); skipping frame pixels until a refresh succeeds",
+                params.monitor_id
+            );
+        }
+    }
+
+    let image = if screenshot_disabled || skip_pixels_for_unknown_exclusions {
         debug!(
             "screenshot capture skipped for monitor {} (trigger={})",
             params.monitor_id,
@@ -2322,13 +2787,7 @@ async fn do_capture(
         );
         image::DynamicImage::new_rgba8(1, 1)
     } else {
-        // Resolve ignored windows to SCK window IDs so ScreenCaptureKit
-        // excludes them from the capture buffer (zero overhead, pixel-perfect).
-        // Sort + dedup so the persistent stream isn't needlessly recreated when
-        // transient windows (tooltips, popups) cause ordering changes.
-        let mut excluded_ids = get_excluded_sck_window_ids(&params.window_filters);
-        excluded_ids.sort_unstable();
-        excluded_ids.dedup();
+        let excluded_ids = storage_exclusions.unwrap_or_default();
 
         // Take screenshot (with ignored windows excluded at the OS level)
         let (image, capture_dur) = capture_monitor_image(params.monitor, &excluded_ids).await?;
@@ -2350,7 +2809,7 @@ async fn do_capture(
     // write, but still return the image so the frame comparer stays updated
     // (prevents re-triggering on the same bad frame). The caller records the
     // matching telemetry counter from `corrupt`.
-    if !screenshot_disabled {
+    if !screenshot_disabled && !skip_pixels_for_unknown_exclusions {
         if let Some(kind) = frame_corruption(&image) {
             match kind {
                 // Green is the notable, rarer signal — surface it at warn so it
@@ -2382,30 +2841,38 @@ async fn do_capture(
     // the name directly; for all other triggers (visual change, idle, manual)
     // we do a lightweight platform query. This ensures the walk budget applies
     // to ALL captures, not just app switches.
-    let lightweight_focused_metadata = match trigger {
-        CaptureTrigger::AppSwitch { .. } => None,
-        _ => match tokio::time::timeout(
-            Duration::from_secs(1),
-            tokio::task::spawn_blocking(get_focused_metadata_lightweight),
-        )
-        .await
-        {
-            Ok(Ok(metadata)) => metadata,
-            Ok(Err(err)) => {
-                debug!("focused metadata lookup task failed: {}", err);
-                None
-            }
-            Err(_) => {
-                debug!("focused metadata lookup timed out");
-                None
-            }
-        },
+    let lightweight_focused_metadata = if monitor_hosts_focus {
+        match trigger {
+            CaptureTrigger::AppSwitch { .. } => None,
+            _ => match tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::task::spawn_blocking(get_focused_metadata_lightweight),
+            )
+            .await
+            {
+                Ok(Ok(metadata)) => metadata,
+                Ok(Err(err)) => {
+                    debug!("focused metadata lookup task failed: {}", err);
+                    None
+                }
+                Err(_) => {
+                    debug!("focused metadata lookup timed out");
+                    None
+                }
+            },
+        }
+    } else {
+        None
     };
-    let trigger_app = match trigger {
-        CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.clone()),
-        _ => lightweight_focused_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.app_name.clone()),
+    let trigger_app = if monitor_hosts_focus {
+        match trigger {
+            CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.clone()),
+            _ => lightweight_focused_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.app_name.clone()),
+        }
+    } else {
+        None
     };
 
     // Terminal OCR rate-limit: wezterm/alacritty/kitty/hyper/warp all bypass AX
@@ -2465,10 +2932,20 @@ async fn do_capture(
         config.walk_timeout_override = Some(decision.timeout);
     }
 
-    let tree_walk_result = tokio::task::spawn_blocking(move || {
-        screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
-    })
-    .await?;
+    // The AX walker returns the one globally focused window. Walking it for a
+    // different monitor would both waste work and pair unrelated pixels with
+    // that window's tree, identity, and dedup hash. Non-focused monitors use
+    // the screenshot/OCR path below instead.
+    let tree_walk_result = if monitor_hosts_focus {
+        Some(
+            tokio::task::spawn_blocking(move || {
+                screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
 
     // If the window was skipped (incognito/private browsing or user filter),
     // bail out entirely — don't OCR the screenshot.
@@ -2479,8 +2956,8 @@ async fn do_capture(
     // hash matches the previous frame under the same dedup gate used below);
     // NotFound → error. Skipped windows are intentionally NOT counted as walk
     // attempts — they're user/incognito filters, not real walks.
-    match tree_walk_result {
-        TreeWalkResult::Found(ref snap) => {
+    match tree_walk_result.as_ref() {
+        Some(TreeWalkResult::Found(snap)) => {
             walk_budget.record_walk(&snap.app_name, snap.walk_duration, snap.truncated);
             if snap.walk_duration > std::time::Duration::from_millis(100) {
                 let next = walk_budget.should_walk(&snap.app_name);
@@ -2539,16 +3016,16 @@ async fn do_capture(
                 crate::ui_recorder::record_tree_walk(outcome);
             }
         }
-        TreeWalkResult::NotFound => {
+        Some(TreeWalkResult::NotFound) => {
             crate::ui_recorder::record_tree_walk(crate::ui_recorder::TreeWalkOutcome::Error);
         }
         // Skipped: user filter / incognito — not a walk attempt, don't count.
-        TreeWalkResult::Skipped(_) => {}
+        Some(TreeWalkResult::Skipped(_)) | None => {}
     }
 
     let tree_snapshot = match tree_walk_result {
-        TreeWalkResult::Found(snap) => Some(snap),
-        TreeWalkResult::Skipped(reason) => {
+        Some(TreeWalkResult::Found(snap)) => Some(snap),
+        Some(TreeWalkResult::Skipped(reason)) => {
             debug!(
                 "skipping capture: window filtered ({}) on monitor {}",
                 reason, params.monitor_id
@@ -2560,7 +3037,7 @@ async fn do_capture(
                 corrupt: None,
             });
         }
-        TreeWalkResult::NotFound => None,
+        Some(TreeWalkResult::NotFound) | None => None,
     };
 
     // Safety net: when the tree walk returned NotFound (AX failure, budget skip,
@@ -2667,30 +3144,33 @@ async fn do_capture(
         });
     }
 
-    // Final ignored-window gate: check resolved metadata (app + window) against
-    // ignored patterns. This catches edge cases where the tree walk succeeded but
-    // didn't return Skipped (e.g. the trigger carried the app name, not the tree).
-    // Uses full `window_pattern` semantics, so scoped `App::Title` patterns fire
-    // here even though earlier app-only gates intentionally skipped them. Reuses
-    // the patterns parsed above.
-    {
+    // Final privacy gate: apply title-based incognito detection and ignored-window
+    // patterns to resolved metadata. This catches edge cases where the tree walk
+    // returned no verdict while focus ownership remained confirmed (for example,
+    // a WindowFocus trigger still supplied the window title). Uses full
+    // `window_pattern` semantics, so scoped `App::Title` patterns still fire here.
+    if resolved_window_matches_privacy_filters(
+        params.tree_walker_config.ignore_incognito_windows,
+        monitor_hosts_focus,
+        &params.ignored_patterns,
+        app_name_owned.as_deref(),
+        window_name_owned.as_deref(),
+    ) {
         let check_app = app_name_owned.as_deref().unwrap_or_default().to_lowercase();
         let check_win = window_name_owned
             .as_deref()
             .unwrap_or_default()
             .to_lowercase();
-        if window_pattern::matches_any(&params.ignored_patterns, &check_app, &check_win) {
-            debug!(
-                "skipping capture: resolved app='{}' / window='{}' matches ignored pattern on monitor {}",
-                check_app, check_win, params.monitor_id
-            );
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-                corrupt: None,
-            });
-        }
+        debug!(
+            "skipping capture: resolved app='{}' / window='{}' matches privacy filter on monitor {}",
+            check_app, check_win, params.monitor_id
+        );
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            corrupt: None,
+        });
     }
 
     // DRM content detection: check if the focused app/URL is a streaming service.
@@ -2755,13 +3235,26 @@ async fn do_capture(
         use_pii_removal: params.use_pii_removal,
         languages: params.languages.to_vec(),
         elements_ref_frame_id,
-        screenshot_disabled,
+        // A frame whose pixels were skipped for unknown exclusion state is
+        // persisted exactly like a screenshot-disabled frame: text pipeline
+        // only, no snapshot written for the 1x1 placeholder.
+        screenshot_disabled: screenshot_disabled || skip_pixels_for_unknown_exclusions,
         in_meeting,
         monitor_hosts_focus,
         focused_window_bounds,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
+    if let (Some(sender), Some(snapshot)) = (params.semantic_tx, tree_snapshot) {
+        sender.submit(SemanticProjectionJob::from_capture(
+            result.frame_id,
+            result.captured_at,
+            result.app_name.clone(),
+            result.browser_url.clone(),
+            snapshot,
+            params.use_pii_removal,
+        ));
+    }
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.
@@ -3109,6 +3602,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capture_loop_silent_seed_requires_exact_token() {
+        assert!(seed_list_has_capture_loop_silent(
+            "onboarding,no-audio,capture-loop-silent-once"
+        ));
+        assert!(seed_list_has_capture_loop_silent(
+            " capture-loop-silent-once "
+        ));
+        assert!(!seed_list_has_capture_loop_silent("capture-loop-silent"));
+        assert!(!seed_list_has_capture_loop_silent(
+            "prefix-capture-loop-silent-once"
+        ));
+    }
+
+    #[test]
+    fn capture_loop_silent_acceleration_starts_after_parking_and_survives_recovery() {
+        assert!(!e2e_capture_loop_silent_phase_started(0));
+        assert!(e2e_capture_loop_silent_phase_started(1));
+        assert!(e2e_capture_loop_silent_phase_started(2));
+    }
+
+    #[test]
+    fn focus_cold_heartbeat_seed_requires_exact_token() {
+        assert!(seed_list_has_focus_cold_heartbeat(
+            "onboarding,no-audio,focus-cold-heartbeat"
+        ));
+        assert!(seed_list_has_focus_cold_heartbeat(" focus-cold-heartbeat "));
+        assert!(!seed_list_has_focus_cold_heartbeat("focus-cold"));
+        assert!(!seed_list_has_focus_cold_heartbeat(
+            "prefix-focus-cold-heartbeat"
+        ));
+    }
+
+    #[test]
+    fn aggregate_and_per_monitor_liveness_advance_together() {
+        let aggregate = screenpipe_screen::PipelineMetrics::new();
+        let monitor = screenpipe_screen::PipelineMetrics::new();
+
+        record_capture_loop_heartbeat(&aggregate, &monitor);
+        record_capture_attempt(&aggregate, &monitor);
+        record_persisted_capture(&aggregate, &monitor, Duration::from_millis(7));
+        record_capture_attempt(&aggregate, &monitor);
+        record_capture_skip(&aggregate, &monitor, None);
+        record_capture_attempt(&aggregate, &monitor);
+        record_capture_skip(&aggregate, &monitor, Some(true));
+
+        let aggregate = aggregate.snapshot();
+        let monitor = monitor.snapshot();
+        assert_eq!(
+            aggregate.capture_loop_heartbeats,
+            monitor.capture_loop_heartbeats
+        );
+        assert_eq!(
+            aggregate.last_capture_loop_heartbeat_ts,
+            monitor.last_capture_loop_heartbeat_ts
+        );
+        assert_eq!(aggregate.capture_attempts, monitor.capture_attempts);
+        assert_eq!(aggregate.frames_db_written, monitor.frames_db_written);
+        assert_eq!(aggregate.dedup_skips, monitor.dedup_skips);
+        assert_eq!(aggregate.frames_corrupt_green, monitor.frames_corrupt_green);
+        assert_eq!(
+            aggregate.last_capture_attempt_ts,
+            monitor.last_capture_attempt_ts
+        );
+        assert_eq!(aggregate.last_db_write_ts, monitor.last_db_write_ts);
+    }
+
+    #[test]
     fn warm_visual_wait_duration_tracks_remaining_cadence_with_backstop() {
         assert_eq!(
             warm_visual_wait_duration(Duration::from_secs(0)),
@@ -3180,9 +3740,13 @@ mod tests {
     fn resolve_capture_metadata_uses_lightweight_metadata_when_tree_values_are_blank() {
         let snapshot = screenpipe_a11y::tree::TreeSnapshot {
             app_name: "  ".into(),
+            app_id: None,
+            executable: None,
+            app_version: None,
             window_name: "".into(),
             text_content: "visible text".into(),
             nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
             browser_url: None,
             document_path: None,
             timestamp: Utc::now(),
@@ -3211,9 +3775,13 @@ mod tests {
     fn resolve_capture_metadata_prefers_lightweight_metadata_over_stale_tree_values() {
         let snapshot = screenpipe_a11y::tree::TreeSnapshot {
             app_name: "electron".into(),
+            app_id: None,
+            executable: Some("electron".into()),
+            app_version: None,
             window_name: "stale browser title".into(),
             text_content: "visible text".into(),
             nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
             browser_url: None,
             document_path: None,
             timestamp: Utc::now(),
@@ -3246,9 +3814,13 @@ mod tests {
     fn resolve_capture_metadata_keeps_tree_values_when_lightweight_is_fallback_only() {
         let snapshot = screenpipe_a11y::tree::TreeSnapshot {
             app_name: "Safari".into(),
+            app_id: Some("com.apple.Safari".into()),
+            executable: None,
+            app_version: None,
             window_name: "Current Page".into(),
             text_content: "visible text".into(),
             nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
             browser_url: None,
             document_path: None,
             timestamp: Utc::now(),
@@ -3281,9 +3853,13 @@ mod tests {
     fn resolve_capture_metadata_normalizes_blank_tree_values_without_lightweight_metadata() {
         let snapshot = screenpipe_a11y::tree::TreeSnapshot {
             app_name: "  ".into(),
+            app_id: None,
+            executable: None,
+            app_version: None,
             window_name: "".into(),
             text_content: "visible text".into(),
             nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
             browser_url: None,
             document_path: None,
             timestamp: Utc::now(),
@@ -3322,6 +3898,118 @@ mod tests {
 
         assert_eq!(app_name.as_deref(), Some("Telegram"));
         assert_eq!(window_name.as_deref(), Some("Fresh Title"));
+    }
+
+    #[test]
+    fn incognito_setting_filters_resolved_title_when_tree_walk_is_unavailable() {
+        let trigger = CaptureTrigger::WindowFocus {
+            window_name: "Private search - Google Chrome (Incognito)".into(),
+            target: None,
+        };
+        let (app_name, window_name, _, _) = resolve_capture_metadata(None, &trigger, None);
+
+        assert!(
+            resolved_window_matches_privacy_filters(
+                true,
+                true,
+                &[],
+                app_name.as_deref(),
+                window_name.as_deref(),
+            ),
+            "ignoreIncognitoWindows must still reject an Incognito title when the AX tree walk is unavailable"
+        );
+    }
+
+    #[test]
+    fn resolved_incognito_fallback_respects_toggle_and_preserves_other_filters() {
+        let normal_title = "Private API docs - Google Chrome";
+        let private_title = "Private search - Google Chrome (Incognito)";
+
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            true,
+            &[],
+            Some("Google Chrome"),
+            Some(normal_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            false,
+            true,
+            &[],
+            Some("Google Chrome"),
+            Some(private_title),
+        ));
+
+        let manual_patterns = WindowPattern::parse_list(&["Private API docs".to_string()]);
+        assert!(resolved_window_matches_privacy_filters(
+            false,
+            false,
+            &manual_patterns,
+            Some("Google Chrome"),
+            Some(normal_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            false,
+            &[],
+            Some("Google Chrome"),
+            Some(private_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            true,
+            &[],
+            Some("Google Chrome"),
+            None,
+        ));
+
+        let app_patterns = WindowPattern::parse_list(&["Google Chrome".to_string()]);
+        assert!(resolved_window_matches_privacy_filters(
+            true,
+            false,
+            &app_patterns,
+            Some("Google Chrome"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn resolve_capture_metadata_drops_stale_window_context_on_app_switch() {
+        let snapshot = screenpipe_a11y::tree::TreeSnapshot {
+            app_name: "TextEdit".into(),
+            app_id: Some("com.apple.TextEdit".into()),
+            executable: None,
+            app_version: None,
+            window_name: "M1_B.txt".into(),
+            text_content: "visible text".into(),
+            nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
+            browser_url: Some("https://stale.example".into()),
+            document_path: Some("/tmp/M1_B.txt".into()),
+            timestamp: Utc::now(),
+            node_count: 0,
+            walk_duration: Duration::from_millis(1),
+            content_hash: 0,
+            simhash: 0,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+            window_bounds: None,
+        };
+
+        let (app_name, window_name, browser_url, document_path) = resolve_capture_metadata(
+            Some(&snapshot),
+            &CaptureTrigger::AppSwitch {
+                app_name: "Finder".into(),
+                target: None,
+            },
+            None,
+        );
+
+        assert_eq!(app_name.as_deref(), Some("Finder"));
+        assert_eq!(window_name, None);
+        assert_eq!(browser_url, None);
+        assert_eq!(document_path, None);
     }
 
     #[test]
@@ -3859,9 +4547,9 @@ mod tests {
         let m1 = rx1.try_recv().unwrap();
         let m2 = rx2.try_recv().unwrap();
         assert!(matches!(m1.trigger, CaptureTrigger::Click { x: 10, y: 20 }));
-        assert_eq!(m1.correlation_id, Some(42));
+        assert_eq!(m1.correlation_ids, vec![42]);
         assert!(matches!(m2.trigger, CaptureTrigger::Click { x: 10, y: 20 }));
-        assert_eq!(m2.correlation_id, Some(42));
+        assert_eq!(m2.correlation_ids, vec![42]);
     }
 
     #[test]
@@ -3888,6 +4576,37 @@ mod tests {
         assert!(matches!(trigger, Some(CaptureTrigger::WindowFocus { .. })));
         // All three corr ids accumulate.
         assert_eq!(corrs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn reduce_drained_scroll_stop_message_collects_all_corr_ids() {
+        let drained = [CaptureTriggerMsg::with_correlations(
+            CaptureTrigger::ScrollStop,
+            vec![1, 2, 3],
+        )];
+
+        let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
+
+        assert_eq!(trigger, Some(CaptureTrigger::ScrollStop));
+        assert_eq!(corrs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn reduce_drained_scroll_stop_survives_a_capped_burst_batch() {
+        // The recorder caps a burst at SCROLL_BURST_MAX_CORR_IDS (512) and
+        // ships the survivors in one message. That whole batch must reduce
+        // to a single ScrollStop with every id intact, otherwise the cap
+        // would just move the loss from the tracker into the reducer.
+        let ids: Vec<crate::frame_linker::CorrelationId> = (1..=512).collect();
+        let drained = [CaptureTriggerMsg::with_correlations(
+            CaptureTrigger::ScrollStop,
+            ids.clone(),
+        )];
+
+        let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
+
+        assert_eq!(trigger, Some(CaptureTrigger::ScrollStop));
+        assert_eq!(corrs, ids);
     }
 
     #[test]

@@ -12,13 +12,19 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Download, ExternalLink, Check, Loader2, Copy, Terminal, Lock, LogIn, LogOut, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, AlertCircle, MessageSquare } from "lucide-react";
+import { Download, ExternalLink, Check, Loader2, Copy, Terminal, LogIn, LogOut, RotateCw, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, AlertCircle, MessageSquare, Inbox } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { commands } from "@/lib/utils/tauri";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { useToast } from "@/components/ui/use-toast";
 import { ensureChatGptPreset } from "@/lib/utils/chatgpt-preset";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
+import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
+import { appDeepLinkScheme } from "@/lib/connections/mcp-oauth";
+import {
+  connectionResponseState,
+  visibleConnectionCredentials,
+} from "@/lib/utils/connection-credentials";
 import { searchInputBehaviorProps } from "@/lib/search-input-behavior";
 import {
   CONNECTION_CATEGORY_BY_ID,
@@ -32,12 +38,15 @@ import { Command } from "@tauri-apps/plugin-shell";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { message, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { localFetch } from "@/lib/api";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import { exists, writeFile, readTextFile, mkdir } from "@tauri-apps/plugin-fs";
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { tauriFetchWithDeadline } from "@/lib/http/tauri-fetch";
 import { platform } from "@tauri-apps/plugin-os";
 import { join, homeDir, tempDir, dirname } from "@tauri-apps/api/path";
 import { AppleCalendarCard } from "./apple-calendar-card";
 import { GoogleCalendarCard } from "./google-calendar-card";
+import { ImapCard } from "./imap-card";
+import { ComposioCard, COMPOSIO_TOOLKITS, type ComposioStatusMap } from "./composio-card";
 import { GoogleDocsCard } from "./google-docs-card";
 import { IcsCalendarCard } from "./ics-calendar-card";
 import { RemoteAgentCard } from "./remote-agent-card";
@@ -49,21 +58,17 @@ import { SkillsCard } from "./skills-card";
 import { PiExtensionsCard } from "./pi-extensions-card";
 import { WhatsAppPanel } from "./whatsapp-panel";
 import posthog from "posthog-js";
-import {
-  areExternalAgentSkillsInstalled,
-  installExternalAgentSkills,
-  removeExternalAgentSkills,
-} from "@/lib/external-agent-skills";
+import { areExternalAgentSkillsInstalled } from "@/lib/external-agent-skills";
 // Shared MCP matrix (build/install/uninstall per tool) — same module the
 // onboarding connect-all uses, so connect and disconnect can never drift.
 import {
   buildMcpConfig,
   buildCodexMcpToml,
-  installCursorMcp,
-  installCodexMcp,
-  uninstallClaudeMcp,
-  uninstallCursorMcp,
-  uninstallCodexMcp,
+  connectAiTool,
+  disconnectAiTool,
+  installClaudeMcp,
+  friendlyToolError,
+  type FriendlyToolError,
 } from "@/lib/ai-tools-mcp";
 import { AiToolsCard } from "./ai-tools-card";
 import { CursorLogo } from "./tool-logos";
@@ -89,12 +94,24 @@ function formatRelativeTime(ts: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+/** One budget for the whole release walk, not one per page. */
+const GITHUB_RELEASES_BUDGET_MS = 30_000;
+
 async function getLatestMcpRelease(): Promise<{ url: string; version: string }> {
   const maxPages = 5;
+  // The wrapper's deadline is per request, so five pages at the default would
+  // allow ~2.5 minutes of blocking. Share one deadline across the loop instead.
+  const deadlineAt = Date.now() + GITHUB_RELEASES_BUDGET_MS;
   for (let page = 1; page <= maxPages; page++) {
-    const response = await tauriFetch(
+    // Stop when the shared budget is gone rather than starting another page on
+    // the wrapper's minimum deadline — otherwise "one 30s budget" could still
+    // run ~1s per remaining page past it.
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new Error("Timed out looking for an MCP release");
+    const response = await tauriFetchWithDeadline(
       `${GITHUB_RELEASES_API}?per_page=50&page=${page}`,
-      { method: "GET", headers: { "Accept": "application/vnd.github.v3+json" } }
+      { method: "GET", headers: { "Accept": "application/vnd.github.v3+json" } },
+      { timeoutMs: remainingMs }
     );
     if (!response.ok) throw new Error("Failed to fetch releases");
     const releases: GitHubRelease[] = await response.json();
@@ -197,9 +214,7 @@ async function openWindowsShellTarget(target: string): Promise<void> {
 }
 
 import {
-  getClaudeConfigPath,
   getCodexConfigPath,
-  getCursorMcpConfigPath,
   getGrokConfigPath,
   getInstalledMcpVersion,
   getInstalledClaudeScreenpipeEntry,
@@ -433,7 +448,7 @@ async function installGrokMcp(): Promise<void> {
   const mcp = (config.mcp && typeof config.mcp === "object" ? config.mcp : {}) as Record<string, unknown>;
   const servers = (Array.isArray(mcp.servers) ? mcp.servers : []) as Record<string, unknown>[];
   const next = servers.filter((s) => s?.id !== "screenpipe");
-  next.push(buildGrokMcpServer(await buildMcpConfig()));
+  next.push(buildGrokMcpServer(await buildMcpConfig({ client: "grok" })));
   mcp.servers = next;
   config.mcp = mcp;
   await mkdir(await dirname(configPath), { recursive: true });
@@ -516,12 +531,16 @@ const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
         />
       </svg>
     ),
+    gmail: <img src="/images/gmail.svg" alt="Gmail" className="w-5 h-5" />,
     "google-calendar": <img src="/images/google-calendar.svg" alt="Google Calendar" className="w-5 h-5" />,
     "google-docs": <img src="/images/google-docs.svg" alt="Google Docs" className="w-5 h-5" />,
+    "google-drive": <img src="/images/google-drive.svg" alt="Google Drive" className="w-5 h-5" />,
+    "google-sheets": <img src="/images/google-sheets.svg" alt="Google Sheets" className="w-5 h-5" />,
     "ics-calendar": <CalendarIcon className="h-5 w-5 text-muted-foreground" />,
     "remote-agent": <img src="/openclaw-icon.svg" alt="Remote agent" className="w-5 h-5" />,
     bee: <img src="/images/bee.png" alt="Bee" className="w-5 h-5 rounded" />,
     email: <Send className="h-5 w-5 text-muted-foreground" />,
+    imap: <Inbox className="h-5 w-5 text-muted-foreground" />,
     todoist: (
       <svg viewBox="0 0 24 24" className="w-5 h-5" fill="#E44332">
         <path d="M21 0H3C1.34 0 0 1.34 0 3v18c0 1.66 1.34 3 3 3h18c1.66 0 3-1.34 3-3V3c0-1.66-1.34-3-3-3zM5.8 15.2l1.06-1.58c.12-.18.36-.24.54-.12 1.46.94 3.1 1.44 4.8 1.44 1.7 0 3.34-.5 4.8-1.44.18-.12.42-.06.54.12l1.06 1.58c.12.18.06.42-.12.54C16.56 17.16 14.34 17.8 12 17.8s-4.56-.64-6.48-2.06c-.18-.12-.24-.36-.12-.54zm0-4l1.06-1.58c.12-.18.36-.24.54-.12 1.46.94 3.1 1.44 4.8 1.44 1.7 0 3.34-.5 4.8-1.44.18-.12.42-.06.54.12l1.06 1.58c.12.18.06.42-.12.54C16.56 13.16 14.34 13.8 12 13.8s-4.56-.64-6.48-2.06c-.18-.12-.24-.36-.12-.54zm0-4l1.06-1.58c.12-.18.36-.24.54-.12C8.86 6.44 10.5 6.94 12.2 6.94c1.7 0 3.34-.5 4.8-1.44.18-.12.42-.06.54.12l1.06 1.58c.12.18.06.42-.12.54C16.56 9.16 14.34 9.8 12 9.8s-4.56-.64-6.48-2.06c-.18-.12-.24-.36-.12-.54z"/>
@@ -750,7 +769,11 @@ export const TRY_IN_CHAT_PROMPTS: Record<string, string> = {
   "apple-calendar": "What meetings do I have this week?",
   "ics-calendar": "What events are coming up this week?",
   granola: "Show notes from my recent meetings",
+  imap: "Summarize my recent emails",
   zoom: "Summarize my recent Zoom calls",
+  gmail: "Summarize my recent emails",
+  "google-drive": "Find my recent files in Google Drive",
+  "google-sheets": "What's in my latest spreadsheet?",
   krisp: "Search my meeting transcripts for action items",
   excalidraw: "What's on my recent Excalidraw boards?",
   whatsapp: "What were the latest messages in my WhatsApp?",
@@ -1011,8 +1034,44 @@ function PiExtensionsSpotlight({
 // ---------------------------------------------------------------------------
 
 
+// Inline panel error for config-write failures — replaces the old native OS
+// alerts. Headline names the cause, body leads with the reassurance ("your
+// file wasn't changed" — true since all writes are strict + atomic), and the
+// offending file is one click away. Persistent until retry: settings is a
+// management surface, errors here are conditions, not toasts.
+function PanelConfigError({ err }: { err: FriendlyToolError }) {
+  const revealPath = async (path: string) => {
+    try {
+      if (platform() === "macos") await Command.create("open", ["-R", path]).execute();
+    } catch (e) {
+      console.warn("[connections] reveal failed:", e);
+    }
+  };
+  return (
+    // App error grammar: one line, one red accent (the badge). Cause only —
+    // the retry button and open-file action ARE the instructions. The panel
+    // provides the tool context, so the message never restates it.
+    <div className="flex items-center gap-2 text-xs">
+      <span className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500/15 text-red-500 text-[9px] font-bold shrink-0">
+        !
+      </span>
+      <span className="text-muted-foreground min-w-0">{err.message}</span>
+      {err.path && platform() === "macos" && (
+        <button
+          type="button"
+          onClick={() => revealPath(err.path!)}
+          className="underline text-foreground/80 hover:text-foreground transition-colors shrink-0"
+        >
+          open file
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "connecting" | "connected">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   const [claudeAppInstalled, setClaudeAppInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -1021,15 +1080,14 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
       if (!(await areExternalAgentSkillsInstalled("claude"))) return;
       setState("connected");
       onConnected?.();
-      // Auto-repair legacy/keyless configs (older builds, hand-authored npx
-      // snippets) so they hit the MCP's fast env-key path instead of the slow
-      // discovery ladder that can stall Claude Desktop's attach. Idempotent:
-      // a config that already carries the key is left untouched.
+      // Auto-repair legacy managed configs so they use the fast env-key path
+      // and carry the fixed Claude category used by privacy-safe value metrics.
+      // Hand-customized configs are always left untouched.
       if (isStaleClaudeScreenpipeEntry(entry)) {
         try {
-          const next = await buildMcpConfig();
+          const next = await buildMcpConfig({ client: "claude" });
           if (next.env?.SCREENPIPE_LOCAL_API_KEY) {
-            await writeClaudeScreenpipeConfig();
+            await installClaudeMcp();
           }
         } catch (e) {
           console.warn("claude mcp auto-repair skipped:", e);
@@ -1047,7 +1105,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
         })
         .catch(() => setClaudeAppInstalled(false));
     } else if (os === "macos") {
-      Command.create("sh", ["-c", "ls /Applications/Claude.app"]).execute()
+      Command.create("exec-sh", ["-c", "ls /Applications/Claude.app"]).execute()
         .then(r => setClaudeAppInstalled(r.code === 0))
         .catch(() => setClaudeAppInstalled(false));
     } else {
@@ -1055,27 +1113,11 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
     }
   }, []);
 
-  // Write the screenpipe entry into Claude's config with the reliable, current
-  // shape (bundled-bun path + injected key). Used by both the explicit connect
-  // action and the on-mount auto-repair of stale/keyless configs.
-  const writeClaudeScreenpipeConfig = async (): Promise<McpCommand> => {
-    const configPath = await getClaudeConfigPath();
-    if (!configPath) throw new Error("unsupported platform");
-    let config: Record<string, unknown> = {};
-    try { config = JSON.parse(await readTextFile(configPath)); } catch { /* fresh */ }
-    if (!config.mcpServers || typeof config.mcpServers !== "object") config.mcpServers = {};
-    const mcp = await buildMcpConfig();
-    (config.mcpServers as Record<string, unknown>).screenpipe = mcp;
-    await mkdir(await dirname(configPath), { recursive: true });
-    await writeFile(configPath, new TextEncoder().encode(JSON.stringify(config, null, 2)));
-    return mcp;
-  };
-
   const handleConnect = async () => {
     try {
       setState("connecting");
-      const mcp = await writeClaudeScreenpipeConfig();
-      await installExternalAgentSkills("claude");
+      setConnectError(null);
+      const mcp = await connectAiTool("claude");
       setState("connected");
       onConnected?.();
       // The desktop app ships a bundled `bun`, so an npx fallback here means bun
@@ -1089,17 +1131,13 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
       }
     } catch (error) {
       console.error("failed to install claude mcp:", error instanceof Error ? error.message : String(error));
-      await message(
-        "could not write Claude Desktop config.\n\nmake sure claude desktop is installed and has been opened at least once, then try again.\n\ndownload: https://claude.ai/download",
-        { title: "claude mcp setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
 
   const handleDisconnect = async () => {
-    try { await uninstallClaudeMcp(); } catch (e) { console.warn("claude config remove failed:", e); }
-    try { await removeExternalAgentSkills("claude"); } catch (e) { console.warn("claude skills remove failed:", e); }
+    try { await disconnectAiTool("claude"); } catch (e) { console.warn("claude disconnect failed:", e); }
     setState("idle");
     onDisconnected?.();
   };
@@ -1134,7 +1172,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "connecting"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "connecting" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "connecting" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         {claudeAppInstalled === false ? (
@@ -1147,6 +1185,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         )}
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
       {state === "connected" && (
         <p className="text-xs text-muted-foreground">
           <strong>connected!</strong> MCP + both skills installed. Restart Claude and ask: &quot;what did I do in the last 5 minutes?&quot;
@@ -1158,6 +1197,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
 
 function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "installing" | "installed">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   const [cursorAppInstalled, setCursorAppInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -1176,7 +1216,7 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
         .then((exe) => setCursorAppInstalled(!!exe))
         .catch(() => setCursorAppInstalled(false));
     } else if (os === "macos") {
-      Command.create("sh", ["-c", "test -d '/Applications/Cursor.app' || test -d \"$HOME/Applications/Cursor.app\""]).execute()
+      Command.create("exec-sh", ["-c", "test -d '/Applications/Cursor.app' || test -d \"$HOME/Applications/Cursor.app\""]).execute()
         .then((r) => setCursorAppInstalled(r.code === 0))
         .catch(() => setCursorAppInstalled(false));
     } else {
@@ -1187,24 +1227,19 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
   const handleConnect = async () => {
     try {
       setState("installing");
-      await installCursorMcp();
-      await installExternalAgentSkills("cursor");
+      setConnectError(null);
+      await connectAiTool("cursor");
       setState("installed");
       onConnected?.();
     } catch (error) {
       console.error("failed to install cursor mcp:", error);
-      await message(
-        "Failed to write Cursor MCP config.\n\nManually add to ~/.cursor/mcp.json:\n\n" +
-        JSON.stringify({ mcpServers: { screenpipe: { command: "npx", args: ["-y", "screenpipe-mcp@latest"] } } }, null, 2),
-        { title: "Cursor MCP Setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
 
   const handleDisconnect = async () => {
-    try { await uninstallCursorMcp(); } catch (e) { console.warn("cursor config remove failed:", e); }
-    try { await removeExternalAgentSkills("cursor"); } catch (e) { console.warn("cursor skills remove failed:", e); }
+    try { await disconnectAiTool("cursor"); } catch (e) { console.warn("cursor disconnect failed:", e); }
     setState("idle");
     onDisconnected?.();
   };
@@ -1228,7 +1263,7 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "installing"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />installing...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />installing...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         {cursorAppInstalled === false ? (
@@ -1241,12 +1276,18 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         )}
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
+      <details className="text-xs text-muted-foreground">
+        <summary className="cursor-pointer">manual config</summary>
+        <pre className="mt-2 bg-muted border border-border rounded-lg p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{`add to ~/.cursor/mcp.json:\n\n${JSON.stringify({ mcpServers: { screenpipe: { command: "npx", args: ["-y", "screenpipe-mcp@latest"] } } }, null, 2)}`}</pre>
+      </details>
     </div>
   );
 }
 
 function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "installing" | "installed">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   useEffect(() => {
     Promise.all([isCodexMcpInstalled(), areExternalAgentSkillsInstalled("codex")])
       .then(([hasMcp, hasSkills]) => {
@@ -1265,23 +1306,19 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
   const handleConnect = async () => {
     try {
       setState("installing");
-      await installCodexMcp();
-      await installExternalAgentSkills("codex");
+      setConnectError(null);
+      await connectAiTool("codex");
       setState("installed");
       onConnected?.();
     } catch (error) {
       console.error("failed to install codex mcp:", error);
-      await message(
-        "Failed to write Codex MCP config.\n\nManually add a [mcp_servers.screenpipe] block to ~/.codex/config.toml with command npx and args [\"-y\", \"screenpipe-mcp@latest\"].",
-        { title: "Codex MCP Setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
 
   const handleDisconnect = async () => {
-    try { await uninstallCodexMcp(); } catch (e) { console.warn("codex config remove failed:", e); }
-    try { await removeExternalAgentSkills("codex"); } catch (e) { console.warn("codex skills remove failed:", e); }
+    try { await disconnectAiTool("codex"); } catch (e) { console.warn("codex disconnect failed:", e); }
     setState("idle");
     onDisconnected?.();
   };
@@ -1305,13 +1342,14 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "installing"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         <Button variant="outline" onClick={openCodex} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
           <ExternalLink className="h-3 w-3" />open codex
         </Button>
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
       {state === "installed" && (
         <p className="text-xs text-muted-foreground">
           <strong>connected!</strong> MCP + both skills installed. Open a new Codex session and ask: &quot;what did I do in the last 5 minutes?&quot;
@@ -1332,6 +1370,7 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
 
 function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "installing" | "installed">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   useEffect(() => { isGrokMcpInstalled().then(ok => { if (ok) { setState("installed"); onConnected?.(); } }); }, []);
 
   const manualConfig = useMemo(() => buildGrokMcpJson({
@@ -1342,15 +1381,13 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
   const handleConnect = async () => {
     try {
       setState("installing");
+      setConnectError(null);
       await installGrokMcp();
       setState("installed");
       onConnected?.();
     } catch (error) {
       console.error("failed to install grok mcp:", error);
-      await message(
-        "Failed to write Grok CLI MCP config.\n\nManually add a screenpipe entry to the mcp.servers array in ~/.grok/user-settings.json with command npx and args [\"-y\", \"screenpipe-mcp@latest\"].",
-        { title: "Grok CLI MCP Setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
@@ -1371,13 +1408,14 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "installing"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         <Button variant="outline" onClick={() => openUrl("https://github.com/superagent-ai/grok-cli")} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
           <ExternalLink className="h-3 w-3" />grok cli
         </Button>
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
       {state === "installed" && (
         <p className="text-xs text-muted-foreground">
           <strong>connected!</strong> start a new <code>grok</code> session and ask: &quot;what did I do in the last 5 minutes?&quot;
@@ -2220,8 +2258,6 @@ function OAuthPanel({
   onConnected?: () => void;
   onDisconnected?: () => void;
 }) {
-  const { settings } = useSettings();
-  const isPro = !!settings.user?.cloud_subscribed;
   const [status, setStatus] = useState<"idle" | "loading">("idle");
   const [accounts, setAccounts] = useState<OAuthAccount[]>([]);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
@@ -2389,7 +2425,7 @@ function OAuthPanel({
           })}
         </div>
       )}
-      {isSubdomainProvider && (isPro || connected) && (
+      {isSubdomainProvider && (
         <div className="space-y-1">
           <label className="text-[11px] text-muted-foreground">Zendesk subdomain</label>
           <div className="flex items-center gap-1">
@@ -2404,7 +2440,7 @@ function OAuthPanel({
           </div>
         </div>
       )}
-      {scopeVariants && (isPro || connected) && status !== "loading" && (
+      {scopeVariants && status !== "loading" && (
         <div className="space-y-1.5">
           <p className="text-[11px] text-muted-foreground">Access level</p>
           {scopeVariants.map((v) => (
@@ -2425,19 +2461,7 @@ function OAuthPanel({
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        {!isPro && !connected ? (
-          <div className="flex flex-col gap-1.5">
-            <Button disabled size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal whitespace-nowrap opacity-60">
-              <Lock className="h-3 w-3" />pro required
-            </Button>
-            <button
-              onClick={() => openUrl("https://screenpipe.com/onboarding")}
-              className="text-[10px] text-muted-foreground hover:text-foreground underline"
-            >
-              upgrade to pro to connect
-            </button>
-          </div>
-        ) : status === "loading" ? (
+        {status === "loading" ? (
           <div className="flex gap-2 items-center">
             <Button disabled size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal whitespace-nowrap">
               <Loader2 className="h-3 w-3 animate-spin" />connecting...
@@ -2498,6 +2522,7 @@ export function ConnectionCredentialForm({
   integrationId,
   fields,
   initialCredentials,
+  configured = false,
   onSaved,
   instanceName,
   onDisconnect,
@@ -2505,12 +2530,14 @@ export function ConnectionCredentialForm({
   integrationId: string;
   fields: IntegrationField[];
   initialCredentials?: Record<string, string>;
+  configured?: boolean;
   onSaved?: () => void;
   instanceName?: string;
   onDisconnect?: () => void;
 }) {
   const sessionKey = `disconnected:${integrationId}${instanceName ? `:${instanceName}` : ""}`;
-  const [creds, setCreds] = useState<Record<string, string>>(initialCredentials || {});
+  const safeInitialCredentials = () => visibleConnectionCredentials(fields, initialCredentials);
+  const [creds, setCreds] = useState<Record<string, string>>(safeInitialCredentials);
   const [visible, setVisible] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState<"idle" | "connecting" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -2518,7 +2545,7 @@ export function ConnectionCredentialForm({
   // suppressed if the user explicitly disconnected this session (persists across remounts)
   const [isSaved, setIsSaved] = useState(() => {
     if (typeof window !== "undefined" && sessionStorage.getItem(sessionKey)) return false;
-    return Object.values(initialCredentials || {}).some(v => !!v);
+    return configured;
   });
   // set when user explicitly clicks disconnect — blocks all future initialCredentials syncs
   const userDisconnectedRef = useRef(
@@ -2528,12 +2555,9 @@ export function ConnectionCredentialForm({
   useEffect(() => {
     if (userDisconnectedRef.current) return; // never auto-refill after explicit disconnect
     if (!initialCredentials) return;
-    const hasValues = Object.values(initialCredentials).some(v => !!v);
-    if (hasValues) {
-      setCreds(initialCredentials);
-      setIsSaved(true);
-    }
-  }, [initialCredentials]);
+    setCreds(safeInitialCredentials());
+    setIsSaved(configured);
+  }, [initialCredentials, configured]);
 
   const endpoint = instanceName
     ? `/connections/${integrationId}/instances/${encodeURIComponent(instanceName)}`
@@ -2616,13 +2640,13 @@ export function ConnectionCredentialForm({
           <div className="relative">
             <Input
               type={field.secret && !visible[field.key] ? "password" : "text"}
-              placeholder={field.placeholder}
+              placeholder={isSaved && field.secret ? "stored securely" : field.placeholder}
               value={creds[field.key] || ""}
               onChange={(e) => { setCreds(prev => ({ ...prev, [field.key]: e.target.value })); }}
               className="h-8 text-xs pr-8"
               readOnly={isSaved}
             />
-            {field.secret && (
+            {field.secret && !isSaved && (
               <button
                 type="button"
                 onClick={() => setVisible(prev => ({ ...prev, [field.key]: !prev[field.key] }))}
@@ -2918,6 +2942,7 @@ function ObsidianPanel({ onConnected, onDisconnected }: { onConnected?: () => vo
 interface InstanceData {
   name: string;
   credentials: Record<string, string>;
+  configured: boolean;
 }
 
 /**
@@ -3016,7 +3041,7 @@ function BeePairPanel({ onConnected }: { onConnected: () => void }) {
   );
 }
 
-function ApiIntegrationPanel({ integration, onRefresh }: {
+export function ApiIntegrationPanel({ integration, onRefresh }: {
   integration: IntegrationInfo;
   onRefresh: () => void;
 }) {
@@ -3025,23 +3050,19 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
   const [addingInstance, setAddingInstance] = useState(false);
   const [newInstanceName, setNewInstanceName] = useState("");
   const [defaultCreds, setDefaultCreds] = useState<Record<string, string>>({});
+  const [defaultConfigured, setDefaultConfigured] = useState(false);
 
-  // Load default credentials
+  // The tile is aggregate across every instance and auth mode. Read the
+  // default slot itself before deciding whether its form is configured.
   useEffect(() => {
-    if (integration.connected) {
-      localFetch(`/connections/${integration.id}`)
-        .then(r => r.json())
-        .then(data => {
-          if (data.credentials) {
-            const loaded: Record<string, string> = {};
-            for (const [k, v] of Object.entries(data.credentials)) {
-              if (typeof v === "string") loaded[k] = v;
-            }
-            setDefaultCreds(loaded);
-          }
-        })
-        .catch(() => {});
-    }
+    localFetch(`/connections/${integration.id}`)
+      .then(r => r.json())
+      .then(data => {
+        const state = connectionResponseState(integration.fields, data);
+        setDefaultCreds(state.credentials);
+        setDefaultConfigured(state.connected);
+      })
+      .catch(() => {});
   }, [integration.id, integration.connected]);
 
   // Load instances
@@ -3056,7 +3077,11 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
         if (Array.isArray(list)) {
           const mapped = list
             .filter((i: any) => i.instance != null)
-            .map((i: any) => ({ name: i.instance, credentials: i.credentials || {} }));
+            .map((i: any) => ({
+              name: i.instance,
+              credentials: i.credentials || {},
+              configured: i.enabled ?? i.connected ?? false,
+            }));
           setInstances(mapped);
         }
         setInstancesLoaded(true);
@@ -3069,6 +3094,7 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
   const refreshAll = (disconnected = false) => {
     if (disconnected) {
       setDefaultCreds({});
+      setDefaultConfigured(false);
     }
     onRefresh();
     // Re-fetch instances
@@ -3080,7 +3106,11 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
         if (Array.isArray(list)) {
           const mapped = list
             .filter((i: any) => i.instance != null)
-            .map((i: any) => ({ name: i.instance, credentials: i.credentials || {} }));
+            .map((i: any) => ({
+              name: i.instance,
+              credentials: i.credentials || {},
+              configured: i.enabled ?? i.connected ?? false,
+            }));
           setInstances(mapped);
         }
       })
@@ -3089,7 +3119,10 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
 
   const handleAddInstance = () => {
     if (!newInstanceName.trim()) return;
-    setInstances(prev => [...prev, { name: newInstanceName.trim(), credentials: {} }]);
+    setInstances(prev => [
+      ...prev,
+      { name: newInstanceName.trim(), credentials: {}, configured: false },
+    ]);
     setNewInstanceName("");
     setAddingInstance(false);
   };
@@ -3103,6 +3136,7 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
           integrationId={integration.id}
           fields={integration.fields}
           initialCredentials={defaultCreds}
+          configured={defaultConfigured}
           onSaved={refreshAll}
           onDisconnect={() => refreshAll(true)}
         />
@@ -3116,6 +3150,7 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
             integrationId={integration.id}
             fields={integration.fields}
             initialCredentials={inst.credentials}
+            configured={inst.configured}
             instanceName={inst.name}
             onSaved={refreshAll}
             onDisconnect={() => {
@@ -3290,6 +3325,7 @@ function OAuthMcpPanel({
       // (the server is persisted only when OAuth succeeds).
       const targetId = serverId ?? mcpRandomId();
       const isNew = !serverId;
+      const appScheme = await appDeepLinkScheme();
       const res = await localFetch(
         `/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`,
         {
@@ -3297,8 +3333,14 @@ function OAuthMcpPanel({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
             isNew
-              ? { name, url: mcpUrl, headers: [], enabled: true }
-              : {}
+              ? {
+                  name,
+                  url: mcpUrl,
+                  headers: [],
+                  enabled: true,
+                  app_scheme: appScheme,
+                }
+              : { app_scheme: appScheme }
           ),
         }
       );
@@ -3325,6 +3367,7 @@ function OAuthMcpPanel({
               setConnected(true);
               setServerId(targetId);
               setStatusMsg(null);
+              await foregroundAfterOAuth();
               notifyConnectionsUpdated();
               onConnected?.();
               return;
@@ -3335,7 +3378,9 @@ function OAuthMcpPanel({
           timerRef.current = setTimeout(poll, 2000);
         } else {
           setWaiting(false);
-          setStatusMsg("Sign-in was not completed");
+          setStatusMsg(
+            "Sign-in was not completed — if your browser blocks http://localhost (e.g. Safari HTTPS-Only mode), click \"Open screenpipe\" on the confirmation page"
+          );
         }
       };
       timerRef.current = setTimeout(poll, 2000);
@@ -3705,6 +3750,30 @@ export function ConnectionsSection({
   const [excalidrawConnected, setExcalidrawConnected] = useState(false);
   const [importedSkillsCount, setImportedSkillsCount] = useState(0);
   const [piExtensionCount, setPiExtensionCount] = useState(0);
+  // Composio-backed connections (managed auth through screenpipe.com; see
+  // composio-card.tsx): gmail, zoom, google drive/docs/sheets.
+  const { settings: composioSettings } = useSettings();
+  const [composioConnected, setComposioConnected] = useState<ComposioStatusMap>(
+    () =>
+      Object.fromEntries(COMPOSIO_TOOLKITS.map((t) => [t, false])) as ComposioStatusMap
+  );
+  const composioToken = composioSettings.user?.token;
+  useEffect(() => {
+    if (!composioToken) return;
+    fetch(screenpipeWebUrl("/api/composio/status", "https://screenpipe.com"), {
+      headers: { Authorization: `Bearer ${composioToken}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (!s) return;
+        setComposioConnected(
+          Object.fromEntries(
+            COMPOSIO_TOOLKITS.map((t) => [t, !!s[t]?.connected])
+          ) as ComposioStatusMap
+        );
+      })
+      .catch(() => {});
+  }, [composioToken]);
 
   const loadSkillsCount = useCallback(() => {
     commands
@@ -3840,15 +3909,16 @@ export function ConnectionsSection({
           apiCache.set(cacheKey, data.data, 30_000); // 30s TTL
           setIntegrations(data.data);
           setIntegrationsLoaded(true);
-          // Track active connections as user property (IDs only, no credentials)
+          // Track active connections as user property (IDs only, no credentials).
+          // Fires at zero too: gating this on connected.length > 0 made every
+          // user who has connected nothing invisible, which is exactly the
+          // cohort the suggested row exists to convert.
           const connected = data.data
             .filter((i: any) => i.connected)
             .map((i: any) => i.id);
-          if (connected.length > 0) {
-            posthog.capture("connections_loaded", {
-              $set: { active_connections: connected, connection_count: connected.length },
-            });
-          }
+          posthog.capture("connections_loaded", {
+            $set: { active_connections: connected, connection_count: connected.length },
+          });
           return;
         }
       } catch { /* server may not be running yet */ }
@@ -3882,6 +3952,9 @@ export function ConnectionsSection({
       ...(os === "macos" ? [{ id: "apple-calendar", name: "Apple Calendar", icon: "apple-calendar", connected: appleCalendarConnected }] : []),
       { id: "google-calendar", name: "Google Calendar", icon: "google-calendar", connected: false },
       { id: "google-docs", name: "Google Docs", icon: "google-docs", connected: false },
+      { id: "gmail", name: "Gmail", icon: "gmail", connected: composioConnected.gmail },
+      { id: "google-drive", name: "Google Drive", icon: "google-drive", connected: composioConnected.googledrive },
+      { id: "google-sheets", name: "Google Sheets", icon: "google-sheets", connected: composioConnected.googlesheets },
       { id: "ics-calendar", name: "ICS Calendar", icon: "ics-calendar", connected: false },
       { id: "remote-agent", name: "Remote agent", icon: "remote-agent", connected: false },
       { id: "whatsapp", name: "WhatsApp", icon: "whatsapp", connected: false, detected: detectedConnectionIds.has("whatsapp") },
@@ -3942,7 +4015,11 @@ export function ConnectionsSection({
     const googleCalTile = hardcoded.find(h => h.id === "google-calendar");
     if (googleCalTile) googleCalTile.connected = googleCalendarConnected;
     const googleDocsTile = hardcoded.find(h => h.id === "google-docs");
-    if (googleDocsTile) googleDocsTile.connected = googleDocsConnected;
+    // Docs lights for the Composio connection OR the legacy native OAuth one.
+    if (googleDocsTile) googleDocsTile.connected = googleDocsConnected || composioConnected.googledocs;
+    // Zoom's dot lights for the Composio connection OR a legacy Zoom OAuth connection.
+    const zoomTile = apiTiles.find(t => t.id === "zoom");
+    if (zoomTile) zoomTile.connected = zoomTile.connected || composioConnected.zoom;
     // Custom MCP tile shows the dot when any user-registered MCP server is enabled.
     const customMcpTile = hardcoded.find(h => h.id === "custom-mcp");
     if (customMcpTile) {
@@ -3955,7 +4032,7 @@ export function ConnectionsSection({
       category: CONNECTION_CATEGORY_BY_ID[tile.id] ?? tile.category ?? "Other",
       description: tile.description ?? CONNECTION_HARDCODED_DESCRIPTIONS[tile.id],
     }));
-  }, [os, claudeInstalled, cursorInstalled, codexInstalled, grokInstalled, chatgptConnected, browserUrlConnected, browserUrlDetected, integrations, appleCalendarConnected, googleCalendarConnected, googleDocsConnected, customMcpConnected, customMcpServerCount, krispConnected, plaudConnected, mcpProviderConnected, excalidrawConnected, importedSkillsCount, piExtensionCount, detectedConnectionIds]);
+  }, [os, claudeInstalled, cursorInstalled, codexInstalled, grokInstalled, chatgptConnected, browserUrlConnected, browserUrlDetected, integrations, appleCalendarConnected, googleCalendarConnected, googleDocsConnected, customMcpConnected, customMcpServerCount, krispConnected, plaudConnected, mcpProviderConnected, excalidrawConnected, importedSkillsCount, piExtensionCount, detectedConnectionIds, composioConnected]);
 
   const isDefaultView = !search.trim() && categoryFilter === ALL_CONNECTION_CATEGORIES;
 
@@ -4090,7 +4167,53 @@ export function ConnectionsSection({
         onConnected={() => setGoogleCalendarConnected(true)}
         onDisconnected={() => { setGoogleCalendarConnected(false); notifyConnectionsUpdated(); fetchIntegrations(); }}
       />;
-      case "google-docs": return <GoogleDocsCard />;
+      case "imap": return <ImapCard onChanged={fetchIntegrations} />;
+      case "google-docs": return (
+        <div className="space-y-3">
+          <ComposioCard toolkit="googledocs" initialConnected={composioConnected.googledocs} onChanged={setComposioConnected} />
+          {/* The native Docs connector (documents + drive.file scopes) still
+              works and keeps tokens local — keep it manageable for users who
+              connected before Composio became the primary path. */}
+          {googleDocsConnected && (
+            <details>
+              <summary className="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                advanced: manage the legacy google docs connection
+              </summary>
+              <div className="pt-2">
+                <GoogleDocsCard />
+              </div>
+            </details>
+          )}
+        </div>
+      );
+      case "google-drive": return <ComposioCard toolkit="googledrive" initialConnected={composioConnected.googledrive} onChanged={setComposioConnected} />;
+      case "google-sheets": return <ComposioCard toolkit="googlesheets" initialConnected={composioConnected.googlesheets} onChanged={setComposioConnected} />;
+      case "gmail": return <ComposioCard toolkit="gmail" initialConnected={composioConnected.gmail} onChanged={setComposioConnected} />;
+      case "zoom": return (
+        <div className="space-y-3">
+          <ComposioCard toolkit="zoom" initialConnected={composioConnected.zoom} onChanged={setComposioConnected} />
+          {/* The legacy Zoom OAuth app was rejected in marketplace review, so its
+              authorize page is dead for new connections. Surface the old panel
+              only for users who still HAVE a legacy connection (to manage or
+              disconnect it) — never as a connect path. */}
+          {selectedIntegration?.is_oauth && selectedIntegration.connected && (
+            <details>
+              <summary className="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                advanced: manage the legacy zoom connection
+              </summary>
+              <div className="pt-2">
+                <OAuthPanel
+                  integrationId="zoom"
+                  integrationName="Zoom"
+                  supportsOAuthInstances={!!selectedIntegration.supports_oauth_instances}
+                  onConnected={() => refreshIntegrationConnection("zoom", true)}
+                  onDisconnected={() => refreshIntegrationConnection("zoom", false)}
+                />
+              </div>
+            </details>
+          )}
+        </div>
+      );
       case "ics-calendar": return <IcsCalendarCard />;
       case "remote-agent": return <RemoteAgentCard />;
       case "whatsapp": return <WhatsAppPanel />;
@@ -4381,6 +4504,11 @@ export function ConnectionsSection({
                       <span className="px-2 py-0.5 text-xs font-medium border border-border text-muted-foreground rounded-full inline-flex items-center gap-1">
                         <CalendarIcon className="h-2.5 w-2.5" />
                         macOS
+                      </span>
+                    )}
+                    {["gmail", "zoom", "google-drive", "google-docs", "google-sheets"].includes(selectedTile.id) && (
+                      <span className="px-2 py-0.5 text-[10px] font-mono border border-border text-muted-foreground inline-flex items-center">
+                        via composio
                       </span>
                     )}
                   </div>

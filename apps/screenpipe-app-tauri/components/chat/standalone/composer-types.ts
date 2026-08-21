@@ -46,7 +46,10 @@ export interface ComposerSuggestionsProps {
   suggestions: Suggestion[];
   inputSectionWidth: number;
   isRefreshing: boolean;
-  onSendSuggestion: (text: string) => void | Promise<void>;
+  onSendSuggestion: (
+    suggestion: Suggestion,
+    position: number,
+  ) => void | Promise<void>;
   onRefresh: () => void;
   onHide: () => void;
 }
@@ -155,6 +158,12 @@ export interface ComposerModelControlsProps {
   currentQueueSessionId: string | null;
   onPresetSaved: (preset: AIPreset) => void | Promise<void>;
   onSelectPreset: (preset: AIPreset) => void;
+  /** Persist an ACP config choice (a select option value, or the mode) onto the
+   *  active preset's `acpAgent` defaults, so it applies on the next session
+   *  start — letting the user configure before sending the first message. */
+  onAcpConfigDefault?: (change: { optionId?: string; value?: string; modeId?: string }) => void;
+  /** Sign the ACP agent out and respawn, so the sign-in card returns. */
+  onReauthenticate?: () => void;
 }
 
 export interface ComposerConnectBannerProps {

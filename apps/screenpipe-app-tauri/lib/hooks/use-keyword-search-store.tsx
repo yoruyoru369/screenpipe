@@ -25,10 +25,10 @@ export interface SearchMatch {
 	confidence: number;
 	text: string;
 	url: string;
-	// "accessibility" (OS-native tree, primary) or "ocr" (fallback for
-	// terminals/canvas/weak a11y). Null for legacy rows captured before
-	// the field was tracked.
-	text_source?: "accessibility" | "ocr" | null;
+	// "accessibility" (OS-native tree, primary), "ocr" (fallback for
+	// terminals/canvas/weak a11y), or "hybrid" (thin tree supplemented by
+	// OCR). Null for legacy rows captured before the field was tracked.
+	text_source?: "accessibility" | "ocr" | "hybrid" | null;
 }
 
 export interface SearchMatchGroup {
@@ -70,6 +70,8 @@ export interface KeywordSearchState {
 	isSearching: boolean;
 	searchQuery: string;
 	error: string | null;
+	lastCandidatePageSize: number;
+	unavailableFrameIds: Set<number>;
 	lastRequest: SearchRequest | null;
 	activeRequestId: string | null;
 	currentAbortController: AbortController | null;
@@ -92,6 +94,8 @@ export interface KeywordSearchState {
 		signal?: AbortSignal,
 	) => Promise<void>;
 	setCurrentResultIndex: (index: number) => void;
+	removeSearchResult: (frameId: number) => void;
+	prepareForReplacementSearch: (replacementQuery: string) => void;
 	resetSearch: () => void;
 	nextResult: () => void;
 	previousResult: () => void;
@@ -99,6 +103,82 @@ export interface KeywordSearchState {
 
 const fuzzy_default = true;
 const offset_default = 0;
+export function queryHighlightTokens(query: string): string[] {
+	return query
+		.trim()
+		.split(/\s+/)
+		.flatMap((token) => {
+			const cleaned = token
+				.replace(/[\\"]/g, "")
+				.replace(/^'+|'+$/g, "");
+			const split = cleaned
+				.replace(/([a-z])([A-Z])/g, "$1 $2")
+				.replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+				.replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+				.split(/\s+/);
+
+			return split.length > 1
+				? [cleaned, ...split.filter((part) => part.length >= 2)]
+				: [cleaned];
+		})
+		.map((token) => token.toLowerCase())
+		.filter(Boolean);
+}
+
+function textContainsToken(text: string, token: string): boolean {
+	const normalizedText = text.toLowerCase();
+	if (!/^[\p{L}\p{N}_]+$/u.test(token)) {
+		return normalizedText.includes(token);
+	}
+
+	const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(
+		`(^|[^\\p{L}\\p{N}_])${escaped}`,
+		"iu",
+	).test(normalizedText);
+}
+
+export function visibleMatchingPositions(
+	positions: SearchMatch["text_positions"],
+	query: string,
+): SearchMatch["text_positions"] {
+	const tokens = queryHighlightTokens(query);
+	if (tokens.length === 0) return [];
+
+	// Selects the positions worth highlighting, using the same prefix and
+	// compound-token alternatives that backend fuzzy search joins with OR.
+	// Returning nothing means "no position is precise enough to highlight",
+	// never "this result should be discarded" — see narrowSearchMatchHighlights.
+	return positions.filter((position) =>
+		tokens.some((token) => textContainsToken(position.text, token)),
+	);
+}
+
+/**
+ * Narrow each result's highlight to the positions that match the query.
+ *
+ * The API remains authoritative and continues to return accessibility matches,
+ * but the desktop search UI temporarily omits them. AX labels can describe icon
+ * buttons or whole containers without rendering those words in the screenshot,
+ * and their element bounds are not trustworthy pixel highlights. Screenshot OCR
+ * is not run here because it shares the recorder's single OCR permit. Since
+ * text_source is frame-level, this is a temporary UI cutoff rather than exact
+ * per-query match provenance.
+ */
+export function narrowSearchMatchHighlights(
+	results: SearchMatch[],
+	query: string,
+): SearchMatch[] {
+	return results
+		.filter((result) => result.text_source !== "accessibility")
+		.map((result) => {
+			const matchingPositions = visibleMatchingPositions(
+				result.text_positions,
+				query,
+			);
+			return { ...result, text_positions: matchingPositions };
+		});
+}
 
 export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 	searchResults: [],
@@ -109,6 +189,8 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 	isSearching: false,
 	searchQuery: "",
 	error: null,
+	lastCandidatePageSize: 0,
+	unavailableFrameIds: new Set(),
 	lastRequest: null,
 	activeRequestId: null,
 	currentAbortController: null,
@@ -178,6 +260,8 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 				activeRequestId: requestId,
 				isSearching: true,
 				error: null,
+				lastCandidatePageSize: 0,
+				unavailableFrameIds: new Set(),
 			});
 		} else {
 			set((state) => ({
@@ -188,7 +272,8 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 			}));
 		}
 
-		const { searchResults } = get();
+		const { searchResults: searchResultsBeforeRequest } = get();
+		const { searchGroups: searchGroupsBeforeRequest } = get();
 
 		const searchRequest: SearchRequest = {
 			query,
@@ -209,7 +294,7 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 				offset: (options.offset ?? 0).toString(),
 				include_context: (options.include_context ?? false).toString(),
 				fuzzy_match: (options.fuzzy_match ?? fuzzy_default).toString(),
-				group: "false",
+				group: "true",
 			});
 
 			if (options.app_names) {
@@ -306,61 +391,78 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 				throw new Error("Search request failed");
 			}
 
-			const rawResults: SearchMatch[] = await response.json();
-			const results = rawResults;
-			// Wrap each flat result as a single-item group for UI compatibility
-			const groups: SearchMatchGroup[] = results.map((m) => ({
-				representative: m,
-				group_size: 1,
-				start_time: m.timestamp,
-				end_time: m.timestamp,
-				frame_ids: [m.frame_id],
-			}));
+			const rawGroups: SearchMatchGroup[] = await response.json();
+			loadUiEventsAfterKeyword();
+			const pageGroups: SearchMatchGroup[] = rawGroups.flatMap((group) => {
+				const [representative] = narrowSearchMatchHighlights(
+					[group.representative],
+					query,
+				);
+				return representative ? [{ ...group, representative }] : [];
+			});
 
 			if (get().activeRequestId === requestId) {
+				const { unavailableFrameIds } = get();
+				const baseResults = isInitialSearch
+					? []
+					: searchResultsBeforeRequest.filter(
+							(result) => !unavailableFrameIds.has(result.frame_id),
+						);
+				const existingFrameIds = new Set(
+					baseResults.map((result) => result.frame_id),
+				);
+				const finalPageGroups = pageGroups.filter(
+					(group) =>
+						!existingFrameIds.has(group.representative.frame_id) &&
+						!unavailableFrameIds.has(group.representative.frame_id),
+				);
+				const finalPageResults = finalPageGroups.map(
+					(group) => group.representative,
+				);
+				const finalResults = [...baseResults, ...finalPageResults];
+				const baseGroups = isInitialSearch
+					? []
+					: searchGroupsBeforeRequest.filter(
+							(group) =>
+								!unavailableFrameIds.has(group.representative.frame_id),
+						);
+				const finalGroups = [...baseGroups, ...finalPageGroups];
 				if (isInitialSearch) {
 					posthog.capture("search_ui_keyword_completed", {
 						...analyticsProperties,
 						duration_ms: Date.now() - analyticsStartedAt,
-						screen_result_count: results.length,
-						has_screen_results: results.length > 0,
+						screen_result_count: finalResults.length,
+						has_screen_results: finalResults.length > 0,
 					});
 				}
-				if (!isInitialSearch) {
-					const existingFrameIds = new Set(
-						searchResults.map((r) => r.frame_id),
-					);
-					const uniqueNewResults = results.filter(
-						(result: SearchMatch) => !existingFrameIds.has(result.frame_id),
-					);
-					const { searchGroups: existingGroups } = get();
-
-					set({
-						searchResults: [...searchResults, ...uniqueNewResults],
-						searchGroups: [...existingGroups, ...groups.filter(
-							(g: SearchMatchGroup) => !existingFrameIds.has(g.representative.frame_id),
-						)],
-						currentResultIndex: get().currentResultIndex,
-						searchQuery: query,
-						isSearching: false,
-						lastRequest: searchRequest,
-						currentAbortController: null,
-					});
-				} else {
-					set({
-						searchResults: results,
-						searchGroups: groups,
-						currentResultIndex: results.length > 0 ? 0 : -1,
-						searchQuery: query,
-						isSearching: false,
-						lastRequest: searchRequest,
-						currentAbortController: null,
-					});
-					loadUiEventsAfterKeyword();
-				}
+				set({
+					searchResults: finalResults,
+					searchGroups: finalGroups,
+					currentResultIndex:
+						finalResults.length === 0
+							? -1
+							: isInitialSearch
+								? 0
+								: Math.min(
+										Math.max(get().currentResultIndex, 0),
+										finalResults.length - 1,
+									),
+					searchQuery: query,
+					isSearching: false,
+					lastCandidatePageSize: rawGroups.length,
+					lastRequest: searchRequest,
+					currentAbortController: null,
+				});
 			}
 		} catch (error) {
 			if (error instanceof Error && error.name === "AbortError") {
+				if (get().activeRequestId === requestId) {
+					set({
+						activeRequestId: null,
+						isSearching: false,
+						currentAbortController: null,
+					});
+				}
 				return;
 			}
 
@@ -386,6 +488,72 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 		set({ currentResultIndex: index });
 	},
 
+	removeSearchResult: (frameId) => {
+		set((state) => {
+			const removedIndex = state.searchResults.findIndex(
+				(result) => result.frame_id === frameId,
+			);
+			if (removedIndex === -1) return state;
+
+			const searchResults = state.searchResults.filter(
+				(result) => result.frame_id !== frameId,
+			);
+			let currentResultIndex = state.currentResultIndex;
+			if (searchResults.length === 0) {
+				currentResultIndex = -1;
+			} else if (currentResultIndex > removedIndex) {
+				currentResultIndex -= 1;
+			} else if (currentResultIndex >= searchResults.length) {
+				currentResultIndex = searchResults.length - 1;
+			}
+
+			return {
+				searchResults,
+				searchGroups: state.searchGroups.filter(
+					(group) => group.representative.frame_id !== frameId,
+				),
+				currentResultIndex,
+				unavailableFrameIds: new Set([
+					...state.unavailableFrameIds,
+					frameId,
+				]),
+			};
+		});
+	},
+
+	prepareForReplacementSearch: (replacementQuery) => {
+		const { currentAbortController } = get();
+		currentAbortController?.abort();
+		const trimmedQuery = replacementQuery.trim();
+		const willRunKeywordSearch =
+			trimmedQuery.length >= 3 &&
+			!trimmedQuery.startsWith("#") &&
+			!trimmedQuery.startsWith("@");
+		if (!willRunKeywordSearch) {
+		}
+
+		// Clear the superseded epoch immediately, but keep frame reads alive until
+		// an eligible replacement keyword response identifies which frames it still
+		// needs. This lets consecutive queries share OCR for the same frame while
+		// the replacement search aborts different-frame work. Queries that cannot
+		// start keyword search cancel all frame work above.
+		set({
+			searchResults: [],
+			searchGroups: [],
+			uiEventResults: [],
+			isSearchingUiEvents: false,
+			currentResultIndex: -1,
+			isSearching: false,
+			searchQuery: "",
+			error: null,
+			lastCandidatePageSize: 0,
+			unavailableFrameIds: new Set(),
+			lastRequest: null,
+			activeRequestId: null,
+			currentAbortController: null,
+		});
+	},
+
 	resetSearch: () => {
 		const { currentAbortController } = get();
 		if (currentAbortController) {
@@ -401,6 +569,8 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 			isSearching: false,
 			searchQuery: "",
 			error: null,
+			lastCandidatePageSize: 0,
+			unavailableFrameIds: new Set(),
 			lastRequest: null,
 			activeRequestId: null,
 			currentAbortController: null,

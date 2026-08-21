@@ -1,3 +1,6 @@
+<!-- doc-covers: crates/screenpipe-engine/src/pipes_api.rs, crates/screenpipe-engine/src/routes/artifacts.rs, apps/screenpipe-app-tauri/components/settings/pipes-section.tsx, apps/screenpipe-app-tauri/components/settings/saf-sop-view.tsx -->
+<!-- doc-verified: 7493feff7 -->
+
 # Teach mode
 
 Teach mode records a bounded, privacy-minimized trajectory and turns it into a reviewable SOP.

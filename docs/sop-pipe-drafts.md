@@ -1,3 +1,6 @@
+<!-- doc-covers: crates/screenpipe-engine/src/pipe_drafts.rs, crates/screenpipe-engine/src/routes/artifacts.rs, apps/screenpipe-app-tauri/components/settings/saf-sop-view.tsx -->
+<!-- doc-verified: 7493feff7 -->
+
 # SOP to disabled pipe draft
 
 The Artifacts SOP viewer can turn a reviewed SAF v1 `kind=sop` artifact into a new, inert `pipe.md` draft.

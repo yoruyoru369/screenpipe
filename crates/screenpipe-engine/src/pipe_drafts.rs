@@ -648,6 +648,7 @@ mod tests {
             installed_version: None,
             source_hash: None,
             subagent: false,
+            history: false,
             privacy_filter: false,
             artifacts: vec![],
             schedule_config: None,
@@ -665,6 +666,8 @@ mod tests {
             last_run: None,
             last_success: None,
             is_running: false,
+            has_saved_context: false,
+            is_bundled_builtin: false,
             prompt_body: body.to_string(),
             raw_content: String::new(),
             last_error: None,
@@ -673,6 +676,7 @@ mod tests {
             source_slug: None,
             installed_version: None,
             locally_modified: None,
+            next_run: None,
             memory: PipeMemoryMetadata::default(),
         }
     }

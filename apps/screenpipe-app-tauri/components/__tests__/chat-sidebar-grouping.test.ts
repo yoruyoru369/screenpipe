@@ -9,41 +9,221 @@ import {
   sessionGroupTitle,
   buildGroupedRecents,
   buildSidebarRecentsSections,
-  pipeHasSidebarSchedule,
+  latestSidebarPipeRunTimes,
   visibleSidebarPipeNames,
   listMoveTargetGroups,
   recurringPipeGroupKeys,
   validateSidebarGroupName,
 } from "@/lib/utils/chat-sidebar-grouping";
+import {
+  buildPipeExecutionHistoryPage,
+  isPipeExecutionDeleted,
+  isTerminalPipeExecutionStatus,
+  pipeExecutionConversationId,
+  pipeExecutionDeletionKey,
+  shouldReloadPipeExecutionHistory,
+  uniquePipeExecutionConversations,
+} from "@/lib/pipe-execution-status";
 import type { SessionRecord } from "@/lib/stores/chat-store";
 
-describe("pipeHasSidebarSchedule", () => {
-  test("excludes manual pipes from the recurring sidebar section", () => {
-    expect(pipeHasSidebarSchedule({ schedule: "manual" })).toBe(false);
+describe("isTerminalPipeExecutionStatus", () => {
+  it("keeps running executions out of sidebar history", () => {
+    expect(isTerminalPipeExecutionStatus("queued")).toBe(false);
+    expect(isTerminalPipeExecutionStatus("running")).toBe(false);
+    expect(isTerminalPipeExecutionStatus("RUNNING")).toBe(false);
+    expect(isTerminalPipeExecutionStatus("completed")).toBe(true);
+    expect(isTerminalPipeExecutionStatus("failed")).toBe(true);
+  });
+});
+
+describe("buildPipeExecutionHistoryPage", () => {
+  it("advances past an active-only page", () => {
+    const page = buildPipeExecutionHistoryPage(
+      Array.from({ length: 11 }, (_, index) => ({
+        id: 20 - index,
+        status: "running",
+      })),
+      10,
+    );
+    expect(page.visibleExecutions).toEqual([]);
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursor).toBe(10);
   });
 
-  test("includes legacy and structured schedules", () => {
-    expect(pipeHasSidebarSchedule({ schedule: "every 30m" })).toBe(true);
+  it("does not skip a terminal row beyond a full visible page", () => {
+    const page = buildPipeExecutionHistoryPage(
+      [
+        { id: 13, status: "running" },
+        ...Array.from({ length: 10 }, (_, index) => ({
+          id: 12 - index,
+          status: "completed",
+        })),
+      ],
+      10,
+    );
+    expect(page.visibleExecutions.map((execution) => execution.id)).toEqual([
+      12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
+    ]);
+    expect(page.nextCursor).toBe(3);
+  });
+});
+
+describe("continued pipe chat inventory", () => {
+  it("collapses multiple runs onto their newest stable conversation", () => {
+    const executions = [
+      {
+        id: 12,
+        pipe_name: "daily-brief",
+        conversation_id: "pipe:daily-brief:continuous",
+      },
+      {
+        id: 11,
+        pipe_name: "daily-brief",
+        conversation_id: "pipe:daily-brief:continuous",
+      },
+      { id: 10, pipe_name: "daily-brief", conversation_id: null },
+    ];
+
     expect(
-      pipeHasSidebarSchedule({
-        schedule: "manual",
-        schedule_config: { frequency: "days", interval: 1 },
-      }),
-    ).toBe(true);
+      uniquePipeExecutionConversations(executions).map((execution) => execution.id),
+    ).toEqual([12, 10]);
+    expect(pipeExecutionConversationId(executions[0])).toBe(
+      "pipe:daily-brief:continuous",
+    );
+    expect(pipeExecutionConversationId(executions[2])).toBe(
+      "pipe:daily-brief:10",
+    );
+    expect(
+      uniquePipeExecutionConversations(
+        executions,
+        new Set(["pipe:daily-brief:continuous"]),
+      ).map((execution) => execution.id),
+    ).toEqual([10]);
+  });
+
+  it("lets a deleted continued chat return after the next execution", () => {
+    const deletedExecution = {
+      id: 12,
+      pipe_name: "daily-brief",
+      conversation_id: "pipe:daily-brief:continuous",
+    };
+    const nextExecution = { ...deletedExecution, id: 13 };
+    const tombstones = new Set([pipeExecutionDeletionKey(deletedExecution)]);
+
+    expect(isPipeExecutionDeleted(deletedExecution, tombstones)).toBe(true);
+    expect(isPipeExecutionDeleted(nextExecution, tombstones)).toBe(false);
+  });
+
+  it("keeps an isolated run deleted permanently", () => {
+    const execution = {
+      id: 12,
+      pipe_name: "daily-brief",
+      conversation_id: null,
+    };
+    const tombstones = new Set([pipeExecutionDeletionKey(execution)]);
+
+    expect(isPipeExecutionDeleted(execution, tombstones)).toBe(true);
+  });
+});
+
+describe("shouldReloadPipeExecutionHistory", () => {
+  it("invalidates an expanded history when inventory advances", () => {
+    expect(shouldReloadPipeExecutionHistory(41, 42)).toBe(true);
+    expect(shouldReloadPipeExecutionHistory(undefined, 42)).toBe(true);
+    expect(shouldReloadPipeExecutionHistory(42, 42)).toBe(false);
+    expect(shouldReloadPipeExecutionHistory(43, 42)).toBe(false);
+    expect(shouldReloadPipeExecutionHistory(42, undefined)).toBe(false);
+  });
+});
+
+describe("latestSidebarPipeRunTimes", () => {
+  it("updates only when a terminal pipe run enters history", () => {
+    const oldRun = "2026-07-24T08:00:00.000Z";
+    const completedAt = Date.parse("2026-07-24T09:00:00.000Z");
+    const runningAt = Date.parse("2026-07-24T10:00:00.000Z");
+
+    expect(
+      latestSidebarPipeRunTimes(
+        [{ name: "daily-recap", lastRun: oldRun }],
+        [
+          {
+            ...s("watch", "daily-recap #2", "daily-recap"),
+            kind: "pipe-watch",
+            updatedAt: runningAt,
+          },
+        ],
+      ),
+    ).toEqual({ "daily-recap": oldRun });
+
+    expect(
+      latestSidebarPipeRunTimes(
+        [{ name: "daily-recap", lastRun: oldRun }],
+        [
+          {
+            ...s("completed", "daily-recap #2", "daily-recap"),
+            kind: "pipe-run",
+            updatedAt: completedAt,
+          },
+        ],
+      ),
+    ).toEqual({ "daily-recap": "2026-07-24T09:00:00.000Z" });
   });
 });
 
 describe("visibleSidebarPipeNames", () => {
-  test("does not restore a known manual pipe from its run history", () => {
+  it("shows only execution-backed inventory and preserves unloaded history", () => {
     expect(
       visibleSidebarPipeNames(
         [
-          { name: "manual-template", hasSchedule: false },
-          { name: "daily-recap", hasSchedule: true },
+          { name: "never-ran", executionCount: 0, lastRun: null },
+          {
+            name: "daily-recap",
+            executionCount: 3,
+            lastRun: "2026-07-24T08:00:00.000Z",
+          },
         ],
-        ["manual-template", "daily-recap", "deleted-pipe"],
+        [
+          {
+            ...s("deleted-pipe-run", "deleted-pipe #1", "deleted-pipe"),
+            kind: "pipe-run",
+            updatedAt: Date.parse("2026-07-24T07:00:00.000Z"),
+          },
+        ],
       ),
     ).toEqual(["daily-recap", "deleted-pipe"]);
+  });
+
+  it("sorts locally completed runs by latest terminal time", () => {
+    expect(
+      visibleSidebarPipeNames(
+        [
+          {
+            name: "older-pipe",
+            executionCount: 2,
+            latestExecutionId: 20,
+            lastRun: "2026-07-24T08:00:00.000Z",
+          },
+          {
+            name: "oldest-pipe",
+            executionCount: 1,
+            latestExecutionId: 10,
+            lastRun: "2026-07-24T07:00:00.000Z",
+          },
+        ],
+        [
+          {
+            ...s("new-pipe-run", "new-pipe #1", "new-pipe"),
+            kind: "pipe-run",
+            updatedAt: Date.parse("2026-07-24T09:00:00.000Z"),
+          },
+          {
+            ...s("running-pipe-watch", "running-pipe #1", "running-pipe"),
+            kind: "pipe-watch",
+            updatedAt: Date.parse("2026-07-24T10:00:00.000Z"),
+          },
+        ],
+      ),
+    ).toEqual(["new-pipe", "older-pipe", "oldest-pipe"]);
   });
 });
 
@@ -393,14 +573,14 @@ describe("buildSidebarRecentsSections", () => {
 // ── listMoveTargetGroups ─────────────────────────────────────────────
 
 describe("listMoveTargetGroups", () => {
-  it("lists manual groups before recurring pipe groups", () => {
+  it("lists only manual groups, not auto pipe groups", () => {
     const result = listMoveTargetGroups([
       s("a", "chat", undefined, "work"),
       s("p1", "daily #1", "daily"),
       s("p2", "daily #2", "daily"),
       s("u", "ungrouped chat"),
     ]);
-    expect(result).toEqual(["work", "daily"]);
+    expect(result).toEqual(["work"]);
   });
 
   it("omits pipe names that appear only once", () => {
