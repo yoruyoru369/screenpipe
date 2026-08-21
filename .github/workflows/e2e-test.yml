@@ -211,9 +211,9 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ./apps/screenpipe-app-tauri/.next
-        key: ${{ runner.os }}-next-v2-${{ hashFiles('apps/screenpipe-app-tauri/package.json', 'apps/screenpipe-app-tauri/bun.lock', 'apps/screenpipe-app-tauri/next.config.mjs', 'apps/screenpipe-app-tauri/postcss.config.mjs', 'apps/screenpipe-app-tauri/app/**', 'apps/screenpipe-app-tauri/components/**', 'apps/screenpipe-app-tauri/lib/**', 'apps/screenpipe-app-tauri/styles/**') }}
+        key: ${{ runner.os }}-next-e2e-v3-${{ hashFiles('apps/screenpipe-app-tauri/package.json', 'apps/screenpipe-app-tauri/bun.lock', 'apps/screenpipe-app-tauri/next.config.mjs', 'apps/screenpipe-app-tauri/postcss.config.mjs', 'apps/screenpipe-app-tauri/app/**', 'apps/screenpipe-app-tauri/components/**', 'apps/screenpipe-app-tauri/lib/**', 'apps/screenpipe-app-tauri/styles/**') }}
         restore-keys: |
-          ${{ runner.os }}-next-v2-
+          ${{ runner.os }}-next-e2e-v3-
 
     - name: Build
       uses: tauri-apps/tauri-action@v0.5.17
@@ -609,9 +609,9 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ./apps/screenpipe-app-tauri/.next
-        key: ${{ runner.os }}-next-v2-${{ hashFiles('apps/screenpipe-app-tauri/package.json', 'apps/screenpipe-app-tauri/bun.lock', 'apps/screenpipe-app-tauri/next.config.mjs', 'apps/screenpipe-app-tauri/postcss.config.mjs', 'apps/screenpipe-app-tauri/app/**', 'apps/screenpipe-app-tauri/components/**', 'apps/screenpipe-app-tauri/lib/**', 'apps/screenpipe-app-tauri/styles/**') }}
+        key: ${{ runner.os }}-next-e2e-v3-${{ hashFiles('apps/screenpipe-app-tauri/package.json', 'apps/screenpipe-app-tauri/bun.lock', 'apps/screenpipe-app-tauri/next.config.mjs', 'apps/screenpipe-app-tauri/postcss.config.mjs', 'apps/screenpipe-app-tauri/app/**', 'apps/screenpipe-app-tauri/components/**', 'apps/screenpipe-app-tauri/lib/**', 'apps/screenpipe-app-tauri/styles/**') }}
         restore-keys: |
-          ${{ runner.os }}-next-v2-
+          ${{ runner.os }}-next-e2e-v3-
 
     - name: Build
       uses: tauri-apps/tauri-action@v0.5.17
@@ -904,9 +904,9 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ./apps/screenpipe-app-tauri/.next
-        key: ${{ runner.os }}-next-v2-${{ hashFiles('apps/screenpipe-app-tauri/package.json', 'apps/screenpipe-app-tauri/bun.lock', 'apps/screenpipe-app-tauri/next.config.mjs', 'apps/screenpipe-app-tauri/postcss.config.mjs', 'apps/screenpipe-app-tauri/app/**', 'apps/screenpipe-app-tauri/components/**', 'apps/screenpipe-app-tauri/lib/**', 'apps/screenpipe-app-tauri/styles/**') }}
+        key: ${{ runner.os }}-next-e2e-v3-${{ hashFiles('apps/screenpipe-app-tauri/package.json', 'apps/screenpipe-app-tauri/bun.lock', 'apps/screenpipe-app-tauri/next.config.mjs', 'apps/screenpipe-app-tauri/postcss.config.mjs', 'apps/screenpipe-app-tauri/app/**', 'apps/screenpipe-app-tauri/components/**', 'apps/screenpipe-app-tauri/lib/**', 'apps/screenpipe-app-tauri/styles/**') }}
         restore-keys: |
-          ${{ runner.os }}-next-v2-
+          ${{ runner.os }}-next-e2e-v3-
 
     - name: Build
       uses: tauri-apps/tauri-action@v0.5.17

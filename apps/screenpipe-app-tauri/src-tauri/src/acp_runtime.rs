@@ -2333,6 +2333,16 @@ fn wait_port_ready(port: u16, timeout: std::time::Duration) -> bool {
     false
 }
 
+fn npm_executable() -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        if command_on_path("npm.cmd") {
+            return Some("npm.cmd");
+        }
+    }
+    command_on_path("npm").then_some("npm")
+}
+
 fn spawn_core_mcp_http(config: &RuntimeConfig, port: u16) -> Option<std::process::Child> {
     use std::process::{Command, Stdio};
 
@@ -2382,6 +2392,66 @@ fn spawn_core_mcp_http(config: &RuntimeConfig, port: u16) -> Option<std::process
                     "[screenpipe-mcp] start failed version={} phase=http-start",
                     package_version(package),
                 );
+            }
+        }
+
+        // Bun's Windows package extraction can leave optional Sentry files
+        // absent even though the npm package resolved successfully. When that
+        // happens the published fallback is still usable through npm's own
+        // installer/runtime. Keep this runner fallback bounded and metadata-only
+        // so a transient Bun tree cannot take the ACP connector down.
+        if let Some(npm) = npm_executable() {
+            let mut npm_cmd = Command::new(npm);
+            npm_cmd
+                .args([
+                    "exec",
+                    "--yes",
+                    "--package",
+                    package,
+                    "--",
+                    "screenpipe-mcp",
+                    "--http",
+                    "--port",
+                ])
+                .arg(port.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit());
+            if let Some(engine_port) =
+                env_nonempty("SCREENPIPE_LOCAL_API_PORT").or_else(|| env_nonempty("SCREENPIPE_PORT"))
+            {
+                npm_cmd.arg("--screenpipe-port").arg(engine_port);
+            }
+            if let Some(url) = &engine_url {
+                npm_cmd.env("SCREENPIPE_API_URL", url);
+            }
+            if let Some(key) = &api_key {
+                npm_cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
+            }
+            scrub_runtime_env(&mut npm_cmd);
+
+            match npm_cmd.spawn() {
+                Ok(mut child) => {
+                    if wait_port_ready(port, std::time::Duration::from_secs(8)) {
+                        eprintln!(
+                            "[screenpipe-mcp] runner fallback=npm version={} phase=http-start",
+                            package_version(package)
+                        );
+                        return Some(child);
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!(
+                        "[screenpipe-mcp] readiness timeout version={} phase=http-readiness runner=npm",
+                        package_version(package)
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[screenpipe-mcp] runner unavailable=npm version={} phase=http-start",
+                        package_version(package)
+                    );
+                }
             }
         }
 

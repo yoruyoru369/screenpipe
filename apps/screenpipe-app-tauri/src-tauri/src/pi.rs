@@ -1008,7 +1008,8 @@ fn pi_package_dir(install_dir: &Path) -> PathBuf {
 /// Seed the pi-agent package.json with overrides and dependencies to fix resolution.
 /// `hosted-git-info` requires `lru-cache@^10`, but bun on Windows can hoist
 /// an ESM-only lru-cache@7.x that breaks CJS `require()`.
-/// `@earendil-works/pi-ai`, `@anthropic-ai/sdk`, `chalk`, and `isexe` are
+/// `@earendil-works/pi-ai`, `@anthropic-ai/sdk`, `chalk`, `isexe`, `typebox`,
+/// and `which` are
 /// transitive/runtime deps that bun on Windows can fail to hoist into the
 /// top-level node_modules, so we pin them as direct deps. Writing these before
 /// `bun add` ensures correct versions are used and makes a partial cache copy
@@ -1033,6 +1034,8 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
     let expected_cross_spawn = json!("^7.0.6");
     let expected_chalk = json!("5.6.2");
     let expected_isexe = json!("^2.0.0");
+    let expected_typebox = json!("1.3.7");
+    let expected_which = json!("^2.0.1");
     let expected_overrides = json!({
         "hosted-git-info": {
             "lru-cache": "^10.0.0"
@@ -1097,6 +1100,14 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
                             deps_obj.insert("isexe".to_string(), expected_isexe.clone());
                             changed = true;
                         }
+                        if deps_obj.get("typebox") != Some(&expected_typebox) {
+                            deps_obj.insert("typebox".to_string(), expected_typebox.clone());
+                            changed = true;
+                        }
+                        if deps_obj.get("which") != Some(&expected_which) {
+                            deps_obj.insert("which".to_string(), expected_which.clone());
+                            changed = true;
+                        }
                     }
                 }
                 if changed {
@@ -1108,13 +1119,15 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
                         let _ = std::fs::remove_file(install_dir.join("bun.lock"));
                         let _ = std::fs::remove_file(install_dir.join("bun.lockb"));
                         info!(
-                            "Patched pi-agent package.json (pins: pi {}, anthropic sdk {}, pi-ai {}, cross-spawn {}, chalk {}, isexe {}; dropped {} legacy @mariozechner deps)",
+                            "Patched pi-agent package.json (pins: pi {}, anthropic sdk {}, pi-ai {}, cross-spawn {}, chalk {}, isexe {}, typebox {}, which {}; dropped {} legacy @mariozechner deps)",
                             expected_pi_version,
                             expected_sdk,
                             expected_pi_ai_version,
                             expected_cross_spawn,
                             expected_chalk,
                             expected_isexe,
+                            expected_typebox,
+                            expected_which,
                             removed_legacy
                         );
                     }
@@ -1140,6 +1153,8 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
             "cross-spawn": expected_cross_spawn,
             "chalk": expected_chalk,
             "isexe": expected_isexe,
+            "typebox": expected_typebox,
+            "which": expected_which,
         },
         "overrides": {
             "hosted-git-info": {
@@ -1237,6 +1252,8 @@ fn local_pi_install_integrity_error(install_dir: &Path) -> Option<String> {
         "cross-spawn",
         "chalk",
         "isexe",
+        "typebox",
+        "which",
     ] {
         if resolve_node_module_package_from(&resolve_start, install_dir, package_name).is_none() {
             return Some(format!(
@@ -6143,6 +6160,16 @@ printf '%s\n' '{"type":"agent_end"}'
             &super::node_module_package_dir(install_dir, "isexe"),
             "isexe",
             "2.0.0",
+        );
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "typebox"),
+            "typebox",
+            "1.3.7",
+        );
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "which"),
+            "which",
+            "2.0.2",
         );
     }
 

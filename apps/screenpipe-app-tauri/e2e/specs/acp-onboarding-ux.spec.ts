@@ -83,7 +83,10 @@ describe("ACP onboarding UX", () => {
     // no send is dispatched anywhere in this test.
     await invokeOrThrow("pi_start", {
       sessionId: null,
-      projectDir: "",
+      // ACP requires a real project root for execute/async requests. Keep the
+      // UX warmup in the fixture directory so it never depends on a user's
+      // checkout or home path.
+      projectDir: path.dirname(fixturePath),
       userToken: null,
       providerConfig: mockAcpPreset("normal"),
     });

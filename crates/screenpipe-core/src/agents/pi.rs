@@ -3058,17 +3058,27 @@ fn is_local_pi_version_current() -> bool {
     true
 }
 
-/// Seed the pi-agent package.json with overrides + strip legacy deps.
+/// Seed the pi-agent package.json with overrides, Windows-sensitive direct
+/// dependencies, and strip legacy deps.
 /// `hosted-git-info` requires `lru-cache@^10`, but bun on Windows can hoist
 /// an ESM-only lru-cache@7.x that breaks CJS `require()`. Also drops any
 /// stale `@mariozechner/*` keys carried over from before the upstream
-/// namespace rename (issue #3527).
+/// namespace rename (issue #3527). `pi-ai` and `pi-coding-agent` load
+/// `typebox`, while `cross-spawn` loads `which`; declaring them directly keeps
+/// Bun's Windows hoist from leaving the runtime with a missing package.
 fn seed_pi_package_json(install_dir: &Path) {
     let pkg_path = install_dir.join("package.json");
     let expected_overrides = json!({
         "hosted-git-info": {
             "lru-cache": "^10.0.0"
         }
+    });
+    let expected_dependencies = json!({
+        "chalk": "5.6.2",
+        "cross-spawn": "^7.0.6",
+        "isexe": "^2.0.0",
+        "typebox": "1.3.7",
+        "which": "^2.0.1",
     });
     if pkg_path.exists() {
         let read_result = std::fs::read_to_string(&pkg_path);
@@ -3102,8 +3112,8 @@ fn seed_pi_package_json(install_dir: &Path) {
                     obj.insert("overrides".to_string(), expected_overrides.clone());
                     changed = true;
                 }
-                if let Some(deps_obj) = obj.get_mut("dependencies").and_then(|d| d.as_object_mut())
-                {
+                let deps = obj.entry("dependencies").or_insert_with(|| json!({}));
+                if let Some(deps_obj) = deps.as_object_mut() {
                     let legacy: Vec<String> = deps_obj
                         .keys()
                         .filter(|k| k.starts_with("@mariozechner/"))
@@ -3113,6 +3123,14 @@ fn seed_pi_package_json(install_dir: &Path) {
                         deps_obj.remove(k);
                         changed = true;
                     }
+                    if let Some(expected) = expected_dependencies.as_object() {
+                        for (name, version) in expected {
+                            if deps_obj.get(name) != Some(version) {
+                                deps_obj.insert(name.clone(), version.clone());
+                                changed = true;
+                            }
+                        }
+                    }
                 }
             }
             if changed {
@@ -3120,13 +3138,14 @@ fn seed_pi_package_json(install_dir: &Path) {
                     let _ = std::fs::write(&pkg_path, new_contents);
                     let _ = std::fs::remove_file(install_dir.join("bun.lock"));
                     let _ = std::fs::remove_file(install_dir.join("bun.lockb"));
-                    info!("Patched pi-agent package.json (overrides + legacy dep cleanup)");
+                    info!("Patched pi-agent package.json (overrides + direct runtime deps + legacy dep cleanup)");
                 }
             }
             return;
         }
     }
     let pkg_json = json!({
+        "dependencies": expected_dependencies,
         "overrides": {
             "hosted-git-info": {
                 "lru-cache": "^10.0.0"
