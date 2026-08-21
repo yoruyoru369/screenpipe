@@ -1417,6 +1417,29 @@ async fn main() {
                         e
                     );
                 }
+
+                #[cfg(feature = "e2e")]
+                if std::env::var("SCREENPIPE_E2E_SEED")
+                    .map(|flags| {
+                        flags
+                            .split(',')
+                            .any(|flag| flag.trim().eq_ignore_ascii_case("search-fixture"))
+                    })
+                    .unwrap_or(false)
+                {
+                    // Search fixtures live in the runner temp directory so
+                    // long serial E2E runs cannot let snapshot compaction
+                    // remove their media. Grant only this E2E-owned path to
+                    // the asset protocol; production builds never use it.
+                    let fixture_dir = std::env::temp_dir().join("screenpipe-e2e-fixtures");
+                    if let Err(e) = app.asset_protocol_scope().allow_directory(&fixture_dir, true) {
+                        warn!(
+                            "failed to allow E2E search fixture directory {} in asset protocol scope: {}",
+                            fixture_dir.display(),
+                            e
+                        );
+                    }
+                }
             }
 
             // Enterprise builds can identify org/device health in Sentry and
