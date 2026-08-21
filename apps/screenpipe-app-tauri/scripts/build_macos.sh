@@ -82,8 +82,30 @@ rm -rf "$APP_ROOT/src-tauri/target/release/bundle"
 # Tauri reads APPLE_SIGNING_IDENTITY and signs the main app plus nested code
 # during bundling. Keep the Development config, screenpi.pe.dev identifier,
 # and Metal feature used by this local build.
-APPLE_SIGNING_IDENTITY="$APPLE_SIGNING_IDENTITY" \
-  bun tauri build --features metal
+# Only the .app is needed for local install and verification. tauri.conf.json
+# also lists a dmg target, and bundle_dmg.sh fails outside a Finder session
+# (it drives the DMG window layout via AppleScript), so restrict the bundles.
+# mlx.metallib is not Mach-O, so its signature lives in extended attributes.
+# build.rs signs the staged copy in src-tauri/, but shipping it through
+# `bundle.macOS.files` copies the bytes without xattrs and the bundle ends up
+# with an unsigned metallib, which the hardened-runtime app signature rejects
+# ("In subcomponent: .../MacOS/mlx.metallib"). release-app.yml works around
+# this by moving the metallib into `externalBin` on arm64 so Tauri signs it
+# inside the bundle; mirror that here with a config overlay instead of
+# rewriting the tracked tauri.macos.conf.json. JSON merge patch semantics:
+# a null value removes the key. x86_64 keeps the tracked defaults (no metallib
+# sidecar, libonnxruntime.dylib via files), exactly like the release CI.
+readonly HOST_ARCH="$(uname -m)"
+if [[ "$HOST_ARCH" == "arm64" ]]; then
+  readonly SIDECAR_OVERLAY='{"bundle":{"externalBin":["bun","ffmpeg","ffprobe","mlx.metallib"],"macOS":{"files":{"MacOS/mlx.metallib":null,"MacOS/libonnxruntime.dylib":null}}}}'
+  [[ -f "$APP_ROOT/src-tauri/mlx.metallib-aarch64-apple-darwin" ]] \
+    || die "mlx.metallib-aarch64-apple-darwin sidecar is missing (pre_build.js should stage it)"
+  APPLE_SIGNING_IDENTITY="$APPLE_SIGNING_IDENTITY" \
+    bun tauri build --features metal --bundles app --config "$SIDECAR_OVERLAY"
+else
+  APPLE_SIGNING_IDENTITY="$APPLE_SIGNING_IDENTITY" \
+    bun tauri build --features metal --bundles app
+fi
 
 [[ -d "$APP_PATH" ]] || die "Tauri did not produce the expected app bundle: ${APP_PATH}"
 
