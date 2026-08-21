@@ -338,7 +338,7 @@ jobs:
     # truncates the suite and hides whatever the unreached specs would say.
     # Windows and macOS already sit at 120. Measured on b4b22f011: setup+Build
     # ~9m, then 90 of 112 specs in the remaining ~80m.
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       # WebKit2GTK + xvfb workarounds. Without these, WebKit2GTK 4.1
@@ -835,7 +835,7 @@ jobs:
     runs-on: macos-15
     # Backstop above the 70-min advisory step timeout on "Run E2E Tests" so the
     # post-test steps (coverage, artifact upload) finish inside the job budget.
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
     - uses: actions/checkout@v4
 
