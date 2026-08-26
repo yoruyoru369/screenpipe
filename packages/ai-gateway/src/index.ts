@@ -49,7 +49,11 @@ import {
 } from './services/transcription-budget';
 import { trackResponseUsage } from './utils/stream-usage-tracker';
 import { pruneRuntimeState } from './services/runtime-state-maintenance';
-import { resolveLatencyClass, isBackgroundRequest } from './utils/latency';
+import {
+	applyBackgroundReasoningDefault,
+	resolveLatencyClass,
+	isBackgroundRequest,
+} from './utils/latency';
 import {
 	reserveDailyCostCap,
 	withDailyCostSettlement,
@@ -98,6 +102,8 @@ import { getCloudflareHostedChatUsage } from './services/cloudflare-ai-gateway-u
 import {
 	resolveBackgroundFallbackBody,
 } from './services/background-limit-fallback';
+import { buildBackgroundPipeAllowanceAdvisory } from './services/background-pipe-advisory';
+import { logApiAuthAudit, logApiRouteAudit } from './services/api-audit';
 // import { handleTTSWebSocketUpgrade } from './handlers/voice-ws';
 
 export { RateLimiter };
@@ -335,11 +341,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 		// Authenticate and get tier info for all other endpoints
 		const authResult = await validateAuth(request, env);
 		const usageTier = authResult.usageTier ?? authResult.tier;
-		console.log('auth result:', {
-			tier: authResult.tier,
-			usageTier,
-			deviceId: authResult.deviceId,
-		});
+		await logApiAuthAudit(authResult);
 
 		// Check rate limit with tier info. Chat completions are checked inside
 		// their own block instead — there we know the model, so free (weight-0)
@@ -422,6 +424,10 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						can_buy_credits: false,
 						byok_supported: true,
 					},
+					background_pipe_advisory: buildBackgroundPipeAllowanceAdvisory({
+						env,
+						allowances: cloudflareUsage?.allowances ?? null,
+					}),
 				};
 				return addCorsHeaders(createSuccessResponse(enriched));
 			}
@@ -487,6 +493,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					can_buy_credits: false,
 					byok_supported: true,
 				},
+				background_pipe_advisory: null,
 			};
 			return addCorsHeaders(createSuccessResponse(enriched));
 		}
@@ -566,6 +573,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					message: 'Request body must be a JSON object.',
 				})));
 			}
+			body = applyBackgroundReasoningDefault(body, isBackgroundRequest(request));
 
 			// Reject requests with no usable model up-front — every downstream
 			// model.toLowerCase() (createProvider, isModelAllowed, cost tracking)
@@ -578,6 +586,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			}
 			// Retired hosted IDs remain valid compatibility inputs, but all policy,
 			// metering, and cost logic must see the current model that will be served.
+			const requestedModel = body.model;
 			body.model = resolveModelAlias(body.model);
 			// Paid users bypass this gate. Authenticated free users receive two
 			// account-wide logical messages; Pi's tool-loop calls for one visible
@@ -824,6 +833,17 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				// "auto" had every such row priced by the $0.01 unknown-model
 				// fallback (most auto traffic is free Vertex MaaS = $0 real cost).
 				const servedModel = resolveServedModel(response, body.model);
+				logApiRouteAudit({
+					requested_model: requestedModel,
+					resolved_model: body.model,
+					served_model: servedModel,
+					served_tier: response.headers.get('x-screenpipe-served-tier'),
+					router_tier: routerTier,
+					workload: latency,
+					gateway_mode: cloudflareGateway ? 'cloudflare' : 'legacy',
+					latency_ms: latencyMs,
+					status_code: response.status,
+				});
 
 				// Flex-served Gemini bills at half rate. tryModel tags the response
 				// with x-screenpipe-served-tier=flex; price (and log) under the
@@ -1128,6 +1148,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 		}
 
 		if (path === '/v1/text-to-speech' && request.method === 'POST') {
+			const gate = paidHostedAiRouteError(authResult);
+			if (gate) return gate;
 			return await handleTextToSpeech(request, env);
 		}
 

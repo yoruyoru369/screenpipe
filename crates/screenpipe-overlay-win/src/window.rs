@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use windows::core::Result;
+use windows::core::{w, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_POINT_2F};
 use windows::Win32::Graphics::Direct2D::{
@@ -43,17 +43,23 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MSG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINDOWPOS,
-    WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, KillTimer,
+    LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu,
+    TranslateMessage, UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST,
+    IDC_ARROW, MF_SEPARATOR, MF_STRING, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+    SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_TOPALIGN, ULW_ALPHA,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPOS, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::actions::{action_for, anchor_action};
+use crate::actions::{
+    action_for, anchor_action, brand_context_menu_action, BRAND_CONTEXT_MENU_HIDE_HOUR,
+    BRAND_CONTEXT_MENU_OPEN_SETTINGS,
+};
 use crate::anim::Equalizer;
 use crate::drag_stage;
 use crate::layout::{self, Layout, SHADOW_PAD};
@@ -82,6 +88,45 @@ const HOVER_POLL_MS: u32 = 90;
 /// Pointer travel before a press on the pill becomes a drag rather than a click.
 const DRAG_THRESHOLD: f32 = 4.0;
 
+/// Show the same two-choice brand context menu as the macOS overlay. Returning
+/// the selected app action keeps presentation inside the Win32 window while
+/// preserving the cross-platform callback contract.
+unsafe fn show_brand_context_menu(hwnd: HWND) -> Option<String> {
+    let menu = CreatePopupMenu().ok()?;
+    let result = (|| {
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            BRAND_CONTEXT_MENU_HIDE_HOUR,
+            w!("Hide for 1 hour"),
+        )
+        .ok()?;
+        AppendMenuW(menu, MF_SEPARATOR, 0, w!("")).ok()?;
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            BRAND_CONTEXT_MENU_OPEN_SETTINGS,
+            w!("Settings..."),
+        )
+        .ok()?;
+
+        let mut point = POINT::default();
+        GetCursorPos(&mut point).ok()?;
+        let command = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            None,
+        );
+        brand_context_menu_action(command.0 as usize)
+    })();
+    let _ = DestroyMenu(menu);
+    result
+}
+
 /// Gap in DIP between the pinned pill and the edge of the work area. Shared
 /// with the drag stage so a landing target is drawn exactly where the pill it
 /// stands for will come to rest.
@@ -97,6 +142,7 @@ enum Cmd {
     DismissNotification,
     Show,
     Hide,
+    SetCaptureProtected(bool),
     Quit,
 }
 
@@ -161,6 +207,9 @@ impl Overlay {
     }
     pub fn hide(&self) {
         self.send(Cmd::Hide);
+    }
+    pub fn set_capture_protected(&self, protected: bool) {
+        self.send(Cmd::SetCaptureProtected(protected));
     }
     pub fn quit(&self) {
         self.send(Cmd::Quit);
@@ -234,6 +283,7 @@ struct Ctx {
     dragging: bool,
     drag_offset: (i32, i32),
     animating: bool,
+    capture_protected: bool,
     /// The dimmed sheet and its landing targets. Built the first time the pill
     /// is dragged and kept for the process' life, hidden between drags.
     stage: Option<Stage>,
@@ -311,6 +361,7 @@ fn run_message_loop(
             dragging: false,
             drag_offset: (0, 0),
             animating: false,
+            capture_protected: false,
             stage: None,
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
@@ -618,6 +669,12 @@ fn show_stage(pill: HWND, ctx: &mut Ctx) {
             );
             match hwnd {
                 Ok(hwnd) => {
+                    let affinity = if ctx.capture_protected {
+                        WDA_EXCLUDEFROMCAPTURE
+                    } else {
+                        WDA_NONE
+                    };
+                    let _ = SetWindowDisplayAffinity(hwnd, affinity);
                     ctx.stage = Some(Stage {
                         hwnd,
                         dib: None,
@@ -1077,6 +1134,20 @@ fn drain_commands(hwnd: HWND) -> (bool, bool) {
                 ctx.state.notification = None;
                 rearm_dismiss = true;
             }
+            Cmd::SetCaptureProtected(protected) => {
+                ctx.capture_protected = protected;
+                let affinity = if protected {
+                    WDA_EXCLUDEFROMCAPTURE
+                } else {
+                    WDA_NONE
+                };
+                unsafe {
+                    let _ = SetWindowDisplayAffinity(hwnd, affinity);
+                    if let Some(stage) = ctx.stage.as_ref() {
+                        let _ = SetWindowDisplayAffinity(stage.hwnd, affinity);
+                    }
+                }
+            }
             Cmd::Quit => quit = true,
         }
     }
@@ -1303,6 +1374,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
                 arm_dismiss_timer(hwnd);
                 apply_state(hwnd);
+                fire(hwnd, action);
+                LRESULT(0)
+            }
+
+            WM_RBUTTONDOWN => LRESULT(0),
+
+            WM_RBUTTONUP => {
+                let (x, y) = mouse_dip(hwnd, lparam);
+                let is_brand = ctx_of(hwnd)
+                    .is_some_and(|ctx| ctx.layout.hit_test(x, y) == Some(Control::Brand));
+                let action = if is_brand {
+                    show_brand_context_menu(hwnd)
+                } else {
+                    None
+                };
+                arm_dismiss_timer(hwnd);
                 fire(hwnd, action);
                 LRESULT(0)
             }

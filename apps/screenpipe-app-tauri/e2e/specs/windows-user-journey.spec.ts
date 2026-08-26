@@ -50,7 +50,15 @@ async function appServerRequest(
   )) as { ok: boolean; status: number; text: string };
 }
 
-async function postNotification(id: string, title: string, body: string): Promise<void> {
+type NotificationPriority = "high" | "normal" | "low";
+
+async function postNotification(
+  id: string,
+  title: string,
+  body: string,
+  priority: NotificationPriority = "normal",
+  autoDismissMs = 2_000,
+): Promise<void> {
   const response = await appServerRequest("/notify", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -59,8 +67,8 @@ async function postNotification(id: string, title: string, body: string): Promis
       title,
       body,
       type: "pipe",
-      priority: "high",
-      autoDismissMs: 2_000,
+      priority,
+      autoDismissMs,
     }),
   });
 
@@ -647,7 +655,7 @@ describe("Windows user journey", function () {
     expect(existsSync(shortcutsScreenshot)).toBe(true);
   });
 
-  it("keeps the shortcut reminder overlay on screen and drives its dock actions", async function () {
+  it("lets users control the shortcut reminder and drives its dock actions", async function () {
     if (!isWindows) this.skip();
 
     await openHomeWindow();
@@ -660,10 +668,8 @@ describe("Windows user journey", function () {
     await displayNav.waitForDisplayed({ timeout: t(15_000) });
     await displayNav.click();
 
-    // The overlay carries recording health, live meeting state and meeting
-    // alerts, so it ships unhideable and Display offers only a size. The
-    // `overlay-hiding-control` remote flag can restore the switch, but it is
-    // off by default and E2E never initializes PostHog.
+    // Like Wispr Flow, the persistent choice lives in Settings while the
+    // floating menu owns the temporary one-hour snooze.
     await waitForBodyText(
       (bodyText) =>
         bodyText.includes("theme, windows, and overlay appearance") &&
@@ -671,7 +677,7 @@ describe("Windows user journey", function () {
         bodyText.includes("overlay size"),
       "Display settings did not show the shortcut reminder controls",
     );
-    expect(await $("#shortcut-overlay").isExisting()).toBe(false);
+    expect(await $("#shortcut-overlay").isExisting()).toBe(true);
 
     try {
       await expectShortcutReminderVisible(true, t(20_000));
@@ -790,14 +796,67 @@ describe("Windows user journey", function () {
       await overlaySettingsButton.waitForDisplayed({ timeout: t(10_000) });
       await overlaySettingsButton.click();
 
-      // The gear opens Display settings; it must not offer to hide the pill,
-      // and the pill must still be on screen afterwards.
-      expect(await $('button[title="Hide for today"]').isExisting()).toBe(false);
-      expect(await $('button[title="Hide for a week"]').isExisting()).toBe(false);
+      // Match Wispr Flow's progressive disclosure: the floating bar offers a
+      // one-hour snooze and links to the persistent control in Display.
+      const hideForHourButton = await $('button[title="Hide for 1 hour"]');
+      await hideForHourButton.waitForDisplayed({ timeout: t(10_000) });
+      const persistentSettingsButton = await $('button[title="Open overlay settings"]');
+      await persistentSettingsButton.waitForDisplayed({ timeout: t(10_000) });
       await expectShortcutReminderVisible(true, t(20_000));
     } finally {
       if ((await browser.getWindowHandles()).includes("home")) {
         await browser.switchToWindow("home").catch(() => {});
+      }
+    }
+  });
+
+  it("shows every notification priority in the top-right panel", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+    const notificationIds: string[] = [];
+
+    try {
+      for (const priority of ["high", "normal", "low"] as const) {
+        const notificationId = `windows-e2e-panel-${priority}-${Date.now()}`;
+        const notificationTitle = `${priority} priority panel notification`;
+        notificationIds.push(notificationId);
+
+        await postNotification(
+          notificationId,
+          notificationTitle,
+          `The ${priority} priority notification reached the top-right panel.`,
+          priority,
+          0,
+        );
+
+        await waitForWindowHandle("notification-panel", t(20_000));
+        await browser.switchToWindow("notification-panel");
+        await browser.waitUntil(
+          async () => (await $("body").getText()).includes(notificationTitle),
+          {
+            timeout: t(20_000),
+            interval: 250,
+            timeoutMsg: `${priority} priority notification never reached the panel`,
+          },
+        );
+
+        const screenshot = await saveScreenshot(
+          `windows-user-journey-notification-panel-${priority}`,
+        );
+        expect(existsSync(screenshot)).toBe(true);
+
+        await browser.switchToWindow("home");
+      }
+    } finally {
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+        await invokeOrThrow("hide_notification_panel").catch(() => {});
+        for (const id of notificationIds) {
+          await appServerRequest(`/notifications/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+          }).catch(() => {});
+        }
       }
     }
   });

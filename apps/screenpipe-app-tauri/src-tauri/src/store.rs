@@ -14,6 +14,60 @@ use tauri::AppHandle;
 use tauri_plugin_store::StoreBuilder;
 use tracing::{error, warn};
 
+#[cfg(windows)]
+const WINDOWS_STORE_RETRY_ATTEMPTS: usize = 6;
+#[cfg(windows)]
+const WINDOWS_STORE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Windows scanners and sync providers can briefly open the canonical store
+/// without write/delete sharing. Retry only the Win32 errors produced by that
+/// conflict; a persistent ACL/CFA denial uses the same ACCESS_DENIED code, so
+/// it receives the same short bound and then returns the original error.
+#[cfg(windows)]
+fn is_retryable_windows_store_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return matches!(io_error.raw_os_error(), Some(5 | 32 | 33));
+        }
+        source = current.source();
+    }
+    false
+}
+
+fn retry_windows_store_io<T, E>(mut operation: impl FnMut() -> Result<T, E>) -> Result<T, E>
+where
+    E: std::error::Error + 'static,
+{
+    #[cfg(not(windows))]
+    {
+        operation()
+    }
+
+    #[cfg(windows)]
+    {
+        let first_error = match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_retryable_windows_store_error(&error) => error,
+            Err(error) => return Err(error),
+        };
+
+        for _ in 1..WINDOWS_STORE_RETRY_ATTEMPTS {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY);
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error) if is_retryable_windows_store_error(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(first_error)
+    }
+}
+
+fn read_store_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    retry_windows_store_io(|| std::fs::read(path))
+}
+
 /// Process-lifetime cache for the resolved API auth key.
 ///
 /// `to_recording_config` is a sync function called many times per second
@@ -178,7 +232,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?; // contents + metadata to stable storage before the rename
     }
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    if let Err(e) = retry_windows_store_io(|| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -202,7 +256,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// a post-wipe state that re-seeded default presets (and therefore looks
 /// healthy) can't destroy the only copy of the user's real settings.
 pub fn snapshot_last_good(store_path: &Path) {
-    let data = match std::fs::read(store_path) {
+    let data = match read_store_file(store_path) {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -210,7 +264,7 @@ pub fn snapshot_last_good(store_path: &Path) {
         return;
     }
     let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
-    if let Ok(existing) = std::fs::read(&last_good) {
+    if let Ok(existing) = read_store_file(&last_good) {
         if existing != data && store_json_has_presets(&existing) {
             let prev = store_path.with_extension(LAST_GOOD_PREV_SUFFIX);
             if let Err(e) = durable_write(&prev, &existing) {
@@ -236,7 +290,7 @@ pub fn snapshot_last_good(store_path: &Path) {
 fn read_healthy_snapshot(store_path: &Path) -> Option<(std::path::PathBuf, Vec<u8>)> {
     for suffix in [LAST_GOOD_SUFFIX, LAST_GOOD_PREV_SUFFIX] {
         let p = store_path.with_extension(suffix);
-        if let Ok(data) = std::fs::read(&p) {
+        if let Ok(data) = read_store_file(&p) {
             if store_json_has_presets(&data) {
                 return Some((p, data));
             }
@@ -265,7 +319,7 @@ fn restore_snapshot_over(store_path: &Path, why: &str) -> bool {
     let pre_restore = store_path.with_extension(format!("bin.pre-restore-{}", ts));
     let mut pre_restore_note = String::from("no pre-restore copy (store.bin was absent)");
     if store_path.exists() {
-        if let Err(e) = std::fs::copy(store_path, &pre_restore) {
+        if let Err(e) = retry_windows_store_io(|| std::fs::copy(store_path, &pre_restore)) {
             tracing::warn!(
                 "settings recovery: failed to back up {} to {}: {} — aborting restore",
                 store_path.display(),
@@ -307,7 +361,7 @@ pub fn auto_restore_if_wiped(store_path: &Path) -> bool {
     // Only act on plain-JSON files. Encrypted files are handled by the
     // decrypt path (L2b); we don't want to restore over a blob that the
     // keychain key could still open.
-    let cur = match std::fs::read(store_path) {
+    let cur = match read_store_file(store_path) {
         Ok(d) => d,
         // Missing entirely (user/cleaner delete, chkdsk quarantining a torn
         // file to found.000 after an unclean shutdown) is the worst wipe.
@@ -352,7 +406,7 @@ enum DecryptOutcome {
 /// Decrypt store.bin in place if it's encrypted and keychain key is available.
 /// No-op if the file is already plain JSON or keychain is unavailable.
 fn decrypt_store_file(path: &Path) -> DecryptOutcome {
-    let data = match std::fs::read(path) {
+    let data = match read_store_file(path) {
         Ok(d) => d,
         Err(_) => return DecryptOutcome::PlainOrMissing,
     };
@@ -565,7 +619,7 @@ pub fn reencrypt_store(app: AppHandle) -> Result<(), String> {
 fn save_store_to_disk<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
 ) -> Result<(), String> {
-    store.save().map_err(|e| e.to_string())
+    retry_windows_store_io(|| store.save()).map_err(|e| e.to_string())
 }
 
 /// Flush the process-shared store to durable, encrypted storage before a
@@ -601,6 +655,19 @@ fn build_store_at<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     store_path: std::path::PathBuf,
 ) -> anyhow::Result<Arc<tauri_plugin_store::Store<R>>> {
+    // A Windows sharing lock can make the plugin's load look like a successful
+    // empty store because tauri-plugin-store swallows read errors. Do not let a
+    // persistently unreadable canonical file reach that wipe-primed state.
+    if store_path.exists() {
+        read_store_file(&store_path).map_err(|error| {
+            anyhow::anyhow!(
+                "settings store is not readable at {}: {}",
+                store_path.display(),
+                error
+            )
+        })?;
+    }
+
     // Decrypt store.bin before the plugin reads it (no-op if plain JSON or keychain unavailable)
     if store_path.exists() && decrypt_store_file(&store_path) == DecryptOutcome::Locked {
         // L2b — the encrypted blob is unreadable (key denied/missing or
@@ -636,7 +703,7 @@ fn build_store_at<R: tauri::Runtime>(
     // L5 precondition — note whether the disk file holds a parseable
     // `settings` key right before the plugin reads it. Compared against the
     // loaded store after build to detect silently-swallowed load failures.
-    let disk_has_settings = std::fs::read(&store_path)
+    let disk_has_settings = read_store_file(&store_path)
         .ok()
         .and_then(|d| serde_json::from_slice::<Value>(&d).ok())
         .map(|v| v.get("settings").is_some())
@@ -888,7 +955,7 @@ impl OnboardingStore {
         let mut onboarding = Self::get(app)?.unwrap_or_default();
         update(&mut onboarding);
         store.set("onboarding", json!(onboarding));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -899,7 +966,7 @@ impl OnboardingStore {
         };
 
         store.set("onboarding", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -982,13 +1049,15 @@ pub struct SettingsStore {
     /// Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
     #[serde(rename = "shortcutOverlaySize", default = "default_overlay_size")]
     pub shortcut_overlay_size: String,
-    /// The user's choice, honored only while `allow_hiding_shortcut_overlay`
-    /// is on. The overlay ships unhideable, so this is inert by default.
+    /// The user's persistent choice for the shortcut reminder. Recording-health
+    /// incidents may still reveal their own temporary recovery surface.
     #[serde(rename = "showShortcutOverlay", default = "default_true")]
     pub show_shortcut_overlay: bool,
-    /// Remote-controlled capability (`overlay-hiding-control`), written by the
-    /// desktop remote-control registry. False ships; flipping the flag on gives
-    /// the Display toggle back without a release.
+    /// Unix timestamp until which the user asked to hide the shortcut reminder.
+    #[serde(rename = "shortcutOverlaySnoozedUntil", default)]
+    pub shortcut_overlay_snoozed_until: Option<i64>,
+    /// Compatibility capability written by the desktop remote-control registry.
+    /// Consumer visibility is controlled by `show_shortcut_overlay` above.
     #[serde(rename = "allowHidingShortcutOverlay", default)]
     pub allow_hiding_shortcut_overlay: bool,
     /// Where the user dragged the overlay: one of top/bottom x left/center/right.
@@ -1006,6 +1075,10 @@ pub struct SettingsStore {
     /// When disabled, users must click "update now" in the tray menu.
     #[serde(rename = "autoUpdate", default = "default_true")]
     pub auto_update: bool,
+    /// Consumer updater channel selected on this device. Older stores omit it
+    /// and therefore remain on the stable channel.
+    #[serde(rename = "updateChannel", default = "default_update_channel")]
+    pub update_channel: String,
     /// Auto-update store-installed pipes that haven't been locally modified.
     #[serde(rename = "autoUpdatePipes", default = "default_true")]
     pub auto_update_pipes: bool,
@@ -1026,13 +1099,19 @@ pub struct SettingsStore {
     /// "window" (normal resizable window with title bar).
     #[serde(rename = "overlayMode", default = "default_overlay_mode")]
     pub overlay_mode: String,
-    /// Allow screen recording apps to capture the overlay.
-    /// Disabled by default so the overlay doesn't appear in screenpipe's own recordings.
+    /// Legacy inverse overlay preference, retained only for settings-file compatibility.
+    /// New capture behavior is controlled by `hide_overlay_in_screen_recording` below.
     #[serde(rename = "showOverlayInScreenRecording", default)]
     pub show_overlay_in_screen_recording: bool,
 
-    /// Hide screenpipe windows from screenshots and screen-sharing viewers
-    /// while keeping them visible and interactive on the user's own display.
+    /// Hide only overlay windows from screen recordings and screen sharing.
+    /// New and upgraded installs default to visible until the user opts out.
+    #[serde(rename = "hideOverlayInScreenRecording", default)]
+    pub hide_overlay_in_screen_recording: bool,
+
+    /// Legacy global capture-protection preference. Retained for settings-file
+    /// compatibility; capture protection is now controlled only by the overlay
+    /// preference above.
     #[serde(rename = "hideAppInScreenShare", default = "default_true")]
     pub hide_app_in_screen_share: bool,
 
@@ -1093,6 +1172,10 @@ fn generate_device_id() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_update_channel() -> String {
+    "stable".to_string()
 }
 
 fn default_overlay_size() -> String {
@@ -1158,6 +1241,13 @@ pub struct AcpAgentPresetConfig {
     /// Default session mode id, applied after every session/new.
     #[serde(default)]
     pub mode_id: Option<String>,
+    /// Screenpipe-owned ACP permission response policy (`ask` or `allow-all`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
+    /// Send this agent's model calls through Screenpipe Cloud. `None` keeps
+    /// presets saved before this choice on the agent's own provider account.
+    #[serde(default)]
+    pub use_screenpipe_cloud: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Type, Clone)]
@@ -1308,7 +1398,11 @@ fn entitlement_is_lifetime(entitlement: &serde_json::Value) -> bool {
 fn is_verified_paid_plan_id(plan: &str) -> bool {
     matches!(
         plan.trim().to_ascii_lowercase().as_str(),
-        "standard"
+        "basic"
+            | "standard"
+            | "business"
+            | "business_max"
+            | "business_ultra"
             | "pro"
             | "pro_max"
             | "pro_ultra"
@@ -1594,9 +1688,11 @@ Rules:
             shortcut_overlay_anchor: default_overlay_anchor(),
             shortcut_overlay_display: String::new(),
             show_shortcut_overlay: true,
+            shortcut_overlay_snoozed_until: None,
             allow_hiding_shortcut_overlay: false,
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: true,
+            update_channel: default_update_channel(),
             auto_update_pipes: true,
             enhanced_ai: false,
             remote_log_collection_enabled: false,
@@ -1606,6 +1702,7 @@ Rules:
             #[cfg(not(target_os = "macos"))]
             overlay_mode: "window".to_string(),
             show_overlay_in_screen_recording: false,
+            hide_overlay_in_screen_recording: false,
             hide_app_in_screen_share: true,
             chat_always_on_top: true,
             show_restart_notifications: false,
@@ -1761,7 +1858,7 @@ impl SettingsStore {
                 // Persist sanitized fields back to store so the migration only warns once
                 if sanitized != raw {
                     store.set("settings", sanitized.clone());
-                    let _ = store.save();
+                    let _ = save_store_to_disk(store.as_ref());
                     reencrypt_store_file(app);
                 }
                 let settings = serde_json::from_value(sanitized);
@@ -2001,8 +2098,13 @@ impl SettingsStore {
         }
     }
 
-    pub(crate) fn restricts_paid_local_features(&self) -> bool {
+    /// True for verified Free or missing/conflicting/unverified plan truth.
+    pub(crate) fn is_free_or_unattributed_user(&self) -> bool {
         self.local_plan_policy() != LocalPlanPolicy::VerifiedPaid
+    }
+
+    pub(crate) fn restricts_paid_local_features(&self) -> bool {
+        self.is_free_or_unattributed_user()
     }
 
     pub(crate) fn has_account_identity(&self) -> bool {
@@ -2105,7 +2207,7 @@ impl SettingsStore {
         };
 
         store.set("settings", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2419,7 +2521,7 @@ impl CloudSyncSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("cloud_sync", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2454,7 +2556,7 @@ impl CloudArchiveSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("cloud_archive", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2490,7 +2592,7 @@ impl IcsCalendarSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("ics_calendars", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2631,6 +2733,17 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_defaults_to_stable_for_old_stores() {
+        assert_eq!(SettingsStore::default().update_channel, "stable");
+
+        let missing: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": []
+        }))
+        .unwrap();
+        assert_eq!(missing.update_channel, "stable");
+    }
+
+    #[test]
     fn shortcut_overlay_anchor_defaults_to_top_center() {
         assert_eq!(SettingsStore::default().shortcut_overlay_anchor, "top-center");
 
@@ -2642,10 +2755,19 @@ mod tests {
         assert_eq!(missing.shortcut_overlay_anchor, "top-center");
     }
 
-    /// Stored dismissals from before the overlay became permanent must not
-    /// resurrect: the keys are gone, and an old file carrying them still loads.
     #[test]
-    fn retired_overlay_dismissal_keys_are_ignored() {
+    fn shortcut_overlay_preferences_survive_old_and_new_stores() {
+        let defaults = SettingsStore::default();
+        assert!(defaults.show_shortcut_overlay);
+        assert_eq!(defaults.shortcut_overlay_snoozed_until, None);
+
+        let missing: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": []
+        }))
+        .unwrap();
+        assert!(missing.show_shortcut_overlay);
+        assert_eq!(missing.shortcut_overlay_snoozed_until, None);
+
         let legacy: SettingsStore = serde_json::from_value(json!({
             "aiPresets": [],
             "showShortcutOverlay": false,
@@ -2653,7 +2775,8 @@ mod tests {
             "shortcutOverlayMinimalReshowVersion": 1,
         }))
         .unwrap();
-        assert_eq!(legacy.shortcut_overlay_anchor, "top-center");
+        assert!(!legacy.show_shortcut_overlay);
+        assert_eq!(legacy.shortcut_overlay_snoozed_until, Some(4_102_444_800));
     }
 
     #[test]
@@ -3051,6 +3174,7 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::VerifiedFree);
+        assert!(store.is_free_or_unattributed_user());
         let config = store.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, Some(2));
     }
@@ -3078,6 +3202,7 @@ mod tests {
             "features": { "app": true }
         }));
         assert_eq!(lifetime.local_plan_policy(), LocalPlanPolicy::VerifiedPaid);
+        assert!(!lifetime.is_free_or_unattributed_user());
         let config = lifetime.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, None);
     }
@@ -3097,6 +3222,7 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::Unknown);
+        assert!(store.is_free_or_unattributed_user());
         assert!(store.restricts_paid_local_features());
         let config = store.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, Some(2));
@@ -3126,6 +3252,33 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::Unknown);
+    }
+
+    #[test]
+    fn recognized_paid_plan_names_are_unrestricted() {
+        for plan in [
+            "basic",
+            "standard",
+            "business",
+            "pro",
+            "team",
+            "enterprise",
+            "lifetime",
+        ] {
+            let mut store = SettingsStore::default();
+            store.user.id = Some("known_paid_user".to_string());
+            store.user.subscription_plan = Some(plan.to_string());
+            store.user.app_entitled = Some(true);
+            store.user.entitlement = Some(json!({
+                "active": true,
+                "plan": plan,
+                "source": if plan == "lifetime" { "lifetime" } else { "subscription" },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+                "features": { "app": true }
+            }));
+
+            assert!(!store.is_free_or_unattributed_user(), "plan={plan}");
+        }
     }
 
     #[test]
@@ -3450,6 +3603,213 @@ mod tests {
             b"new",
             "shorter new content must fully replace the old file"
         );
+    }
+
+    #[cfg(windows)]
+    fn open_with_share_mode(path: &Path, share_mode: u32) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share_mode)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn open_with_restrictive_sharing(path: &Path) -> std::fs::File {
+        open_with_share_mode(path, 1) // FILE_SHARE_READ: deny writes and replacement.
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_restrictive_sharing_identifies_open_and_replace_failure_stages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let replacement_path = tmp.path().join("replacement.tmp");
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+        std::fs::write(&replacement_path, b"replacement").unwrap();
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let open_error = std::fs::write(&store_path, b"must-not-land").unwrap_err();
+        let replace_error = std::fs::rename(&replacement_path, &store_path).unwrap_err();
+
+        eprintln!(
+            "restrictive sharing: fs::write open/truncate raw_os_error={:?}; atomic rename raw_os_error={:?}",
+            open_error.raw_os_error(),
+            replace_error.raw_os_error()
+        );
+        assert!(matches!(open_error.raw_os_error(), Some(5 | 32 | 33)));
+        assert!(matches!(replace_error.raw_os_error(), Some(5 | 32 | 33)));
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-before");
+        assert_eq!(std::fs::read(&replacement_path).unwrap(), b"replacement");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_write_retries_transient_windows_replacement_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+
+        let lock = open_with_restrictive_sharing(&store_path);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        durable_write(&store_path, b"canonical-after").unwrap();
+        unlocker.join().unwrap();
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-after");
+        assert!(lingering_durable_temps(tmp.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_recovery_retries_transient_windows_read_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(tmp.path(), &json!({"settings": {"aiPresets": []}}));
+        write_last_good(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+        let lock = open_with_share_mode(&store_path, 0);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        assert!(auto_restore_if_wiped(&store_path));
+        unlocker.join().unwrap();
+        assert!(store_json_has_presets(&std::fs::read(&store_path).unwrap()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_persistent_windows_read_denial_fails_closed() {
+        use tauri_plugin_store::StoreExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+        let snapshot_path = write_last_good(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(3)}}),
+        );
+        let canonical_before = std::fs::read(&store_path).unwrap();
+        let snapshot_before = std::fs::read(&snapshot_path).unwrap();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let _lock = open_with_share_mode(&store_path, 0);
+
+        let started = std::time::Instant::now();
+        let result = build_store_at(app.handle(), store_path.clone());
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "persistent denial must fail closed");
+        assert!(elapsed < std::time::Duration::from_secs(2));
+        drop(_lock);
+        assert_eq!(std::fs::read(&store_path).unwrap(), canonical_before);
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert!(app.get_store(&store_path).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_write_bounds_persistent_windows_denial_and_preserves_recovery_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let snapshot_path = store_path.with_extension(LAST_GOOD_SUFFIX);
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+        std::fs::write(&snapshot_path, b"snapshot-before").unwrap();
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let started = std::time::Instant::now();
+        let error = durable_write(&store_path, b"must-not-land").unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(matches!(error.raw_os_error(), Some(5 | 32 | 33)));
+        assert!(
+            elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
+                && elapsed < std::time::Duration::from_secs(2),
+            "retry bound was not respected: {elapsed:?}"
+        );
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-before");
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), b"snapshot-before");
+        assert!(lingering_durable_temps(tmp.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_save_retries_transient_windows_open_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        store.set("value", json!("before"));
+        save_store_to_disk(store.as_ref()).unwrap();
+        store.set("value", json!("after"));
+
+        let lock = open_with_restrictive_sharing(&store_path);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        save_store_to_disk(store.as_ref()).unwrap();
+        unlocker.join().unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(saved.get("value"), Some(&json!("after")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_save_bounds_persistent_windows_denial_without_touching_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let snapshot_path = store_path.with_extension(LAST_GOOD_SUFFIX);
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        store.set("value", json!("canonical-before"));
+        save_store_to_disk(store.as_ref()).unwrap();
+        std::fs::write(&snapshot_path, b"snapshot-before").unwrap();
+        store.set("value", json!("must-not-land"));
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let started = std::time::Instant::now();
+        let error = save_store_to_disk(store.as_ref()).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            error.contains("os error 5")
+                || error.contains("os error 32")
+                || error.contains("os error 33"),
+            "unexpected persistent-denial error: {error}"
+        );
+        assert!(
+            elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
+                && elapsed < std::time::Duration::from_secs(2),
+            "retry bound was not respected: {elapsed:?}"
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(saved.get("value"), Some(&json!("canonical-before")));
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), b"snapshot-before");
     }
 
     #[test]
@@ -4056,6 +4416,26 @@ mod tests {
         let preset = &sanitized_acp["aiPresets"][0];
         assert_eq!(preset["provider"].as_str(), Some("acp"));
         assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
+    }
+
+    #[test]
+    fn acp_cloud_billing_route_survives_preset_persistence() {
+        let preset: AIPreset = serde_json::from_value(json!({
+            "id": "claude code",
+            "provider": "acp",
+            "model": "claude-acp",
+            "acpAgent": {
+                "id": "claude-acp",
+                "useScreenpipeCloud": true
+            }
+        }))
+        .expect("ACP preset should deserialize");
+
+        let persisted = serde_json::to_value(preset).expect("ACP preset should serialize");
+        assert_eq!(
+            persisted["acpAgent"]["useScreenpipeCloud"].as_bool(),
+            Some(true)
+        );
     }
 
     /// The exact shape an ACP-unaware build leaves behind: provider rewritten

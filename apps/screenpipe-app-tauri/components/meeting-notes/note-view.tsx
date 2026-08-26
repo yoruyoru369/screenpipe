@@ -24,6 +24,7 @@ import {
   Info,
   Languages,
   Loader2,
+  MessageSquareText,
   Mic2,
   Play,
   RefreshCw,
@@ -35,7 +36,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { commands } from "@/lib/utils/tauri";
+import { commands, type AIPreset } from "@/lib/utils/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
@@ -87,7 +88,9 @@ import type {
 } from "@/lib/utils/live-capture-state";
 import { isLiveCaptureDegraded } from "@/lib/utils/live-capture-state";
 import {
+  fetchMeetingAudio,
   fetchMeetingContext,
+  renderMeetingTranscript,
   type MeetingContext,
 } from "@/lib/utils/meeting-context";
 import {
@@ -109,7 +112,15 @@ import {
   resizeImageDataUrl,
 } from "./image-utils";
 import { TranscriptPanel } from "./transcript-panel";
-import { useSettings, type Settings } from "@/lib/hooks/use-settings";
+import {
+  useSettings,
+  type Settings,
+} from "@/lib/hooks/use-settings";
+import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
+import {
+  DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
+  filterPresetsForEnterprisePolicy,
+} from "@/lib/enterprise-ai-preset-policy";
 import {
   MeetingNoteSaveQueue,
   sameMeetingNoteDraft,
@@ -127,7 +138,10 @@ import {
 } from "./meeting-share-menu";
 import { copyMeetingSummary, emailMeetingSummary } from "./share-summary";
 import { ConnectedShareDialog } from "@/components/connected-share-dialog";
-import { createMeetingShareArtifact } from "@/lib/connected-share";
+import {
+  createMeetingShareArtifact,
+  type ConnectedShareDestination,
+} from "@/lib/connected-share";
 import {
   readRememberedShare,
   rememberedSendLabel,
@@ -142,6 +156,7 @@ import {
   meetingSummaryFailure,
   meetingSummaryFailureCopy,
   meetingSummaryLifecycleFromStatus,
+  meetingSummaryPresentation,
   summaryLifecycleIsWorking,
   SUMMARY_ACTIVE_POLL_MS,
   SUMMARY_IDLE_POLL_MS,
@@ -150,6 +165,7 @@ import {
 } from "./meeting-summary-lifecycle";
 import { QUOTA_PLAN_LABELS } from "@/lib/chat/quota-errors";
 import { openExternalUrl } from "@/lib/open-external-url";
+import { openBusinessUpgradeSurface } from "@/lib/upgrade-flow";
 import { MeetingSummaryTransition } from "./meeting-summary-transition";
 import {
   advanceMeetingSummaryStream,
@@ -167,9 +183,47 @@ import {
   type MeetingWorkspaceTab,
 } from "./meeting-workspace";
 import { meetingRetranscribeSuccessCopy } from "./transcript-recovery-copy";
-import { startMeetingSummaryRun } from "./meeting-summary-run";
+import {
+  loadMeetingSummaryPipeConfig,
+  startMeetingSummaryRun,
+  updateMeetingSummaryPrimaryPreset,
+} from "./meeting-summary-run";
+import { MeetingChatPanel } from "./meeting-chat-panel";
+import {
+  useMeetingChat,
+  type MeetingChatContext,
+} from "./use-meeting-chat";
+import type { MeetingChatConditions } from "./meeting-chat-state";
+import type { AcpConfigDefaultChange } from "@/components/chat/standalone/acp-config-selector";
+import {
+  readStoredChatWidth,
+  writeStoredChatWidth,
+} from "./meeting-chat-width";
+import {
+  findTranscriptRowForTime,
+  readTranscriptRowBounds,
+} from "./transcript-focus";
+import {
+  readActiveAiPresetId,
+  resolveActiveAiPreset,
+  writeActiveAiPresetId,
+} from "@/lib/active-ai-preset";
+import { useAcpRolloutEnabled } from "@/lib/acp-rollout";
+import {
+  implicitSummaryPresetId,
+  summaryPresetModelLabel,
+  summaryPresetOptions,
+} from "./meeting-summary-presets";
+import {
+  hostedAiAllowanceForModel,
+  useUsageStatus,
+} from "@/lib/hooks/use-usage-status";
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
+// Transcript window handed to a chat turn. Long meetings are windowed to the
+// most recent span rather than silently truncated mid-prompt (case 76).
+const CHAT_TRANSCRIPT_MAX_CHARS = 24_000;
+const MEETING_CHAT_LIVE_REFRESH_MS = 30_000;
 // How long a successful save stays on screen before the footer goes quiet.
 const SAVE_RECEIPT_DWELL_MS = 4000;
 
@@ -189,6 +243,13 @@ interface NoteViewProps {
   calendarEvents?: CalendarEvent[];
   transcriptOpenIntent?: TranscriptOpenIntent;
   transcriptOpenRequestKey?: number;
+  initialWorkspaceTab?: MeetingWorkspaceTab;
+}
+
+interface MeetingChatTranscriptSnapshot {
+  text: string;
+  turnCount: number;
+  truncated: boolean;
 }
 
 type SaveState =
@@ -235,6 +296,7 @@ export function NoteView({
   calendarEvents = [],
   transcriptOpenIntent,
   transcriptOpenRequestKey,
+  initialWorkspaceTab,
 }: NoteViewProps) {
   const { toast } = useToast();
   const [title, setTitle] = useState(meeting.title ?? "");
@@ -251,6 +313,8 @@ export function NoteView({
     null,
   );
   const [shareOpen, setShareOpen] = useState(false);
+  const [requestedShareDestination, setRequestedShareDestination] =
+    useState<ConnectedShareDestination | null>(null);
   // Read once per open rather than on every render: the menu only needs to
   // name the app, and the dialog re-reads the full preference when it mounts.
   const sendLabel = useMemo(
@@ -266,14 +330,18 @@ export function NoteView({
     useState<MeetingSummaryLifecycle>({ kind: "idle" });
   const [summaryStatusRefreshKey, setSummaryStatusRefreshKey] = useState(0);
   const [summaryRevealKey, setSummaryRevealKey] = useState(0);
+  const [summaryPresetIds, setSummaryPresetIds] = useState<string[]>([]);
+  const [summaryPresetReady, setSummaryPresetReady] = useState(false);
+  const [summaryPresetSaving, setSummaryPresetSaving] = useState(false);
   const [meetingCtx, setMeetingCtx] = useState<MeetingContext | null>(null);
   const [activeTab, setActiveTab] = useState<MeetingWorkspaceTab>(() =>
-    resolveTranscriptOpen(
+    initialWorkspaceTab ??
+    (resolveTranscriptOpen(
       transcriptOpenIntent,
       readTranscriptOpenPreference(meeting.id),
     )
       ? "transcript"
-      : "notes",
+      : "notes"),
   );
   const [transcriptRefreshKey, setTranscriptRefreshKey] = useState(0);
   const [transcriptFreshness, setTranscriptFreshness] = useState<{
@@ -304,11 +372,42 @@ export function NoteView({
     "retranscribe" | "delete" | null
   >(null);
   const { settings, updateSettings } = useSettings();
+  const { isManagedDeployment, policy: enterprisePolicy } =
+    useManagedPolicy();
+  const chatUsage = useUsageStatus();
   const noteEditorRef = useRef<NoteEditorHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLDivElement>(null);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
+  // Chat rail state. The transcript itself lives in TranscriptPanel; the rail
+  // only needs a count to know whether there is anything to ask about, and a
+  // rendered window when a turn is actually sent.
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatTranscript, setChatTranscript] =
+    useState<MeetingChatTranscriptSnapshot>({
+      text: "",
+      turnCount: 0,
+      truncated: false,
+    });
+  const [chatPresetId, setChatPresetId] = useState<string | null>(() =>
+    readActiveAiPresetId(),
+  );
+  const [chatPresetOverride, setChatPresetOverride] =
+    useState<AIPreset | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [paneWidth, setPaneWidth] = useState(0);
+  const [storedPanelWidth, setStoredPanelWidth] = useState<number | null>(
+    () => readStoredChatWidth(),
+  );
+  const [pendingCitationMs, setPendingCitationMs] = useState<number | null>(
+    null,
+  );
   const canSummarizeMeeting =
-    !isLive && !stopping && !savingBeforeStop && Boolean(meeting.meeting_end);
+    !isLive &&
+    !resuming &&
+    !stopping &&
+    !savingBeforeStop &&
+    Boolean(meeting.meeting_end);
   const shareArtifact = useMemo(
     () =>
       createMeetingShareArtifact({
@@ -319,7 +418,25 @@ export function NoteView({
       }),
     [attendees, meeting, note, title],
   );
-  const oneTapSend = useMeetingOneTapSend(shareArtifact);
+  // The activity bundle is already loaded for receipts and replay. Reuse it to
+  // rank connected destinations without adding another history query or moving
+  // raw window/app evidence off device.
+  const meetingShareEvidence = useMemo(() => {
+    const activity = meetingCtx?.activity;
+    if (!activity) return [];
+    return [
+      ...activity.apps.map((app) => app.name),
+      ...activity.windows.flatMap((window) => [
+        window.app_name,
+        window.window_name,
+        window.browser_url,
+      ]),
+    ].filter(Boolean);
+  }, [meetingCtx?.activity]);
+  const oneTapSend = useMeetingOneTapSend(
+    shareArtifact,
+    meetingShareEvidence,
+  );
 
   /**
    * The press is the confirmation, so the receipt has to be unmissable.
@@ -343,20 +460,118 @@ export function NoteView({
   }, [oneTapSend, toast]);
 
   const summaryPipeSlug = settings.meetingSummaryPipeSlug || "meeting-summary";
-  const summaryWorking =
-    summarizing ||
-    summaryLifecycle.kind === "finalizing" ||
-    summaryLifecycle.kind === "queued" ||
-    summaryLifecycle.kind === "running";
+  // The picker offers ACP presets behind the same rollout gate as the rest of
+  // the ACP UI, and falls back to a pipe-compatible model. Both rules live in
+  // meeting-summary-presets.ts, next to their tests.
+  const acpEnabled = useAcpRolloutEnabled();
+  const summaryPresets = useMemo(
+    () =>
+      summaryPresetOptions(settings.aiPresets, {
+        acpEnabled,
+        isManagedDeployment,
+        aiPresetPolicy: enterprisePolicy.aiPresetPolicy,
+      }),
+    [
+      acpEnabled,
+      enterprisePolicy.aiPresetPolicy,
+      isManagedDeployment,
+      settings.aiPresets,
+    ],
+  );
+  const defaultSummaryPresetId = useMemo(
+    () => implicitSummaryPresetId(summaryPresets),
+    [summaryPresets],
+  );
+  const summaryPresetId = summaryPresetReady
+    ? summaryPresetIds[0] ?? defaultSummaryPresetId
+    : null;
+  const summaryPreset = summaryPresets.find(
+    (preset) => preset.id === summaryPresetId,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setSummaryPresetReady(false);
+    void loadMeetingSummaryPipeConfig(summaryPipeSlug)
+      .then(({ presetIds }) => {
+        if (cancelled) return;
+        setSummaryPresetIds(presetIds);
+        setSummaryPresetReady(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.warn("failed to read meeting summary model", error);
+        setSummaryPresetIds([]);
+        setSummaryPresetReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [summaryPipeSlug]);
+
+  const handleSummaryPresetSelect = useCallback(
+    async (preset: AIPreset | null) => {
+      if (!preset || summaryPresetSaving) return false;
+      const previousPresetIds = summaryPresetIds;
+      const optimisticPresetIds = [
+        preset.id,
+        ...previousPresetIds
+          .slice(1)
+          .filter((presetId) => presetId !== preset.id),
+      ];
+      setSummaryPresetIds(optimisticPresetIds);
+      setSummaryPresetSaving(true);
+      try {
+        const saved = await updateMeetingSummaryPrimaryPreset({
+          pipeSlug: summaryPipeSlug,
+          presetId: preset.id,
+          currentPresetIds: previousPresetIds,
+        });
+        setSummaryPresetIds(saved.presetIds);
+        posthog.capture("meeting_summary_model_changed", {
+          pipe_slug: summaryPipeSlug,
+          provider: preset.provider,
+        });
+        return true;
+      } catch (error) {
+        setSummaryPresetIds(previousPresetIds);
+        console.error("failed to save meeting summary model", error);
+        toast({
+          title: "couldn't change summary model",
+          description: "your previous model is still selected.",
+          variant: "destructive",
+        });
+        return false;
+      } finally {
+        setSummaryPresetSaving(false);
+      }
+    },
+    [
+      summaryPipeSlug,
+      summaryPresetIds,
+      summaryPresetSaving,
+      toast,
+    ],
+  );
+  const summaryPresentation = meetingSummaryPresentation({
+    isLive,
+    resuming,
+    meetingEnded: Boolean(meeting.meeting_end),
+    summarizing,
+    lifecycle: summaryLifecycle,
+  });
+  const visibleSummaryLifecycle = summaryPresentation.lifecycle;
+  const summaryWorking = summaryPresentation.working;
   const retranscriptionSummaryRefreshWorking =
     transcriptRefreshRequested === true &&
     !summarizing &&
-    (summaryLifecycle.kind === "finalizing" ||
-      summaryLifecycle.kind === "queued" ||
-      summaryLifecycle.kind === "running");
+    (visibleSummaryLifecycle.kind === "finalizing" ||
+      visibleSummaryLifecycle.kind === "queued" ||
+      visibleSummaryLifecycle.kind === "running");
   const summaryExecutionId =
-    summaryLifecycle.kind === "queued" || summaryLifecycle.kind === "running"
-      ? summaryLifecycle.execution.id
+    visibleSummaryLifecycle.kind === "queued" ||
+    visibleSummaryLifecycle.kind === "running"
+      ? visibleSummaryLifecycle.execution.id
       : null;
   const summaryExecutionIdRef = useRef<number | null>(summaryExecutionId);
   summaryExecutionIdRef.current = summaryExecutionId;
@@ -368,6 +583,14 @@ export function NoteView({
     executionId: number;
     markdown: string;
   } | null>(null);
+  useEffect(() => {
+    if (!isLive) return;
+    // A resumed meeting starts a new end generation. Forget presentation
+    // state retained from the prior stop so it cannot flash again when this
+    // generation eventually ends and the first fresh status poll is pending.
+    setSummaryLifecycle({ kind: "idle" });
+    setRenderedSummaryStream(null);
+  }, [isLive, meeting.id]);
   const streamedSummary =
     summaryExecutionId != null &&
     renderedSummaryStream?.pipeSlug === summaryPipeSlug &&
@@ -1463,16 +1686,20 @@ export function NoteView({
         detail: "notes and transcript save automatically",
       };
     }
-    if (summaryLifecycle.kind === "finalizing") {
+    if (resuming) {
       return {
-        title: "finalizing transcript",
-        detail: "your meeting is saved · summary will start automatically",
+        title: "resuming meeting",
+        detail: "reopening this note for live capture",
       };
     }
-    if (
-      summaryLifecycle.kind === "queued" ||
-      summaryLifecycle.kind === "running"
-    ) {
+    if (summaryPresentation.transitionPhase === "finalizing") {
+      return {
+        title: "meeting saved",
+        detail:
+          "finishing the transcript before summary · you can safely leave",
+      };
+    }
+    if (summaryWorking) {
       return {
         title: retranscriptionSummaryRefreshWorking
           ? "refreshing summary"
@@ -1482,16 +1709,22 @@ export function NoteView({
           : "you can leave · it appears here live and saves when finished",
       };
     }
-    if (summaryLifecycle.kind === "completed") {
+    if (visibleSummaryLifecycle.kind === "completed") {
       return {
         title: "summary ready",
         detail: "saved to this meeting note",
       };
     }
-    if (summaryLifecycle.kind === "failed") {
+    if (visibleSummaryLifecycle.kind === "failed") {
+      const failure = meetingSummaryFailure(visibleSummaryLifecycle.execution);
       return {
-        title: "summary needs attention",
-        detail: meetingSummaryFailure(summaryLifecycle.execution).copy,
+        // "Nothing to summarize" is a factual outcome, not something the user
+        // needs to fix — keep "needs attention" for actionable failures only.
+        title:
+          failure.kind === "nothing_to_summarize"
+            ? "nothing to summarize"
+            : "summary needs attention",
+        detail: failure.copy,
       };
     }
     return {
@@ -1502,19 +1735,49 @@ export function NoteView({
           : "notes and transcript saved locally",
     };
   })();
-  const summaryUpgrade =
-    summaryLifecycle.kind === "failed"
-      ? meetingSummaryFailure(summaryLifecycle.execution).upgrade
+  const summaryFailure =
+    visibleSummaryLifecycle.kind === "failed"
+      ? meetingSummaryFailure(visibleSummaryLifecycle.execution)
       : null;
-  // Whether the footer has anything to report. A finished meeting that is not
-  // recording, summarizing or failing has no news, and the badge plus detail
-  // line collapse to a single quiet caption.
-  // summaryWorking already covers finalizing, queued and running.
+  const summaryUpgrade = summaryFailure?.upgrade ?? null;
+  const handleSummaryUpgrade = useCallback(async () => {
+    if (!summaryUpgrade) return;
+    posthog.capture("meeting_summary_upgrade_clicked", {
+      source: "meeting-summary-limit",
+      target_plan: summaryUpgrade.requiredPlan,
+    });
+    try {
+      // The native account surface owns the common Basic → Business offer.
+      // Higher tiers and Basic have gateway-owned billing URLs whose exact
+      // target cannot be represented by that one offer card.
+      if (summaryUpgrade.requiredPlan === "business") {
+        await openBusinessUpgradeSurface("meeting-summary-limit");
+      } else {
+        await openExternalUrl(summaryUpgrade.upgradeUrl);
+      }
+    } catch (error) {
+      console.error("failed to open meeting summary upgrade", error);
+      toast({
+        title: "couldn't open upgrade options",
+        description: "try again from Settings → Account.",
+        variant: "destructive",
+      });
+    }
+  }, [summaryUpgrade, toast]);
+  // Notes and Summary now own their summary lifecycle in the reading area.
+  // Repeating the same state in the footer made the page look like two jobs
+  // were running. Transcript still gets the global footer because it has no
+  // local summary surface of its own.
+  const summaryLifecycleInActivePanel =
+    (summaryWorking && activeTab !== "transcript") ||
+    (visibleSummaryLifecycle.kind === "failed" && activeTab === "summary");
   const footerHasNews =
-    isLive ||
-    summaryWorking ||
-    hasSaveStatus ||
-    summaryLifecycle.kind === "failed";
+    !summaryLifecycleInActivePanel &&
+    (isLive ||
+      resuming ||
+      summaryWorking ||
+      hasSaveStatus ||
+      visibleSummaryLifecycle.kind === "failed");
   // The footer exists to report something. A finished meeting that is not
   // recording, summarizing, failing or saving has nothing to report, and its
   // resting caption ("meeting saved") was pure reassurance, so the whole bar
@@ -1530,44 +1793,295 @@ export function NoteView({
       : "summarizing meeting"
     : !canSummarizeMeeting
       ? "summary unavailable"
-      : summaryLifecycle.kind === "completed" ||
+      : visibleSummaryLifecycle.kind === "completed" ||
           (transcriptRefreshRequested !== null &&
             (transcriptRefreshRequested === false ||
               autoSummaryEnabled !== true))
         ? "summarize again"
-        : summaryLifecycle.kind === "failed"
+        : visibleSummaryLifecycle.kind === "failed"
           ? "retry summary"
           : "summarize meeting";
   const stopActionLabel =
     stopping || savingBeforeStop
       ? "stopping meeting"
-      : autoSummaryEnabled === false
-        ? "stop meeting"
-        : "stop and summarize";
-  const summaryTransitionPhase = summaryWorking
-    ? summaryLifecycle.kind === "finalizing"
-      ? "finalizing"
-      : "writing"
-    : null;
+      : autoSummaryEnabled === true
+        ? "stop and summarize"
+        : "stop meeting";
+  const stopButtonLabel =
+    stopping || savingBeforeStop
+      ? "stopping…"
+      : autoSummaryEnabled === true
+        ? "stop & summarize"
+        : "stop";
+  const summaryTransitionPhase = summaryPresentation.transitionPhase;
   // Share only what is finished and on disk. A half-streamed summary would put
   // a truncated one in someone's inbox.
   const canShareSummary =
-    Boolean(extractMeetingSummary(note)) && !summaryWorking;
+    Boolean(extractMeetingSummary(note)) &&
+    !isLive &&
+    !resuming &&
+    !summaryWorking;
   // A dot on a tab means "this needs you". A summary that finished normally
   // does not, and leaving the dot lit forever on every summarized meeting is
   // what teaches people to stop reading dots. Only in-flight work and failures
   // earn one.
   const summaryTabState = summaryWorking
     ? "working"
-    : summaryLifecycle.kind === "failed"
+    : visibleSummaryLifecycle.kind === "failed"
       ? "attention"
       : null;
+
+  // ── chat rail ──────────────────────────────────────────────────────────
+  // The rail can ask during or after a meeting and reports while it is working.
+  // Everything decidable without React lives in meeting-chat-state.ts.
+  const chatPresets = useMemo(() => {
+    const presets = (settings.aiPresets ?? []) as AIPreset[];
+    if (!isManagedDeployment) return presets;
+    return filterPresetsForEnterprisePolicy(
+      presets,
+      enterprisePolicy.aiPresetPolicy ?? DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
+    );
+  }, [
+    enterprisePolicy.aiPresetPolicy,
+    isManagedDeployment,
+    settings.aiPresets,
+  ]);
+  const resolvedChatPreset = useMemo(
+    () => resolveActiveAiPreset(chatPresets, chatPresetId),
+    [chatPresetId, chatPresets],
+  );
+  // ACP configuration can be chosen before the private turn session exists.
+  // Keep that choice local immediately while the settings context persists it.
+  const chatPreset =
+    chatPresetOverride?.id === resolvedChatPreset?.id
+      ? chatPresetOverride
+      : resolvedChatPreset;
+  const handleChatPresetSelect = useCallback((preset: AIPreset) => {
+    setChatPresetId(preset.id);
+    setChatPresetOverride(null);
+    // This is the same shared choice as the main Chat composer, so moving
+    // between Chat and a meeting never silently changes the running model.
+    writeActiveAiPresetId(preset.id);
+  }, []);
+  const handleChatAcpConfigDefault = useCallback(
+    (change: AcpConfigDefaultChange) => {
+      const agent = chatPreset?.acpAgent;
+      if (!chatPreset || !agent) return;
+      const nextAgent = { ...agent };
+      if ("modeId" in change && change.modeId !== undefined) {
+        nextAgent.modeId = change.modeId;
+      }
+      if (change.approvalMode !== undefined) {
+        nextAgent.approvalMode = change.approvalMode;
+      }
+      if (
+        "optionId" in change &&
+        change.optionId !== undefined &&
+        change.value !== undefined
+      ) {
+        nextAgent.config = {
+          ...(agent.config ?? {}),
+          [change.optionId]: change.value,
+        };
+      }
+      const nextPreset = { ...chatPreset, acpAgent: nextAgent };
+      setChatPresetOverride(nextPreset);
+      void updateSettings({
+        aiPresets: settings.aiPresets.map((preset) =>
+          preset.id === chatPreset.id ? nextPreset : preset,
+        ),
+      });
+    },
+    [chatPreset, settings.aiPresets, updateSettings],
+  );
+  const chatCloudflareAllowance = hostedAiAllowanceForModel(
+    chatUsage,
+    chatPreset?.model,
+  );
+  const chatQuotaExhausted = Boolean(
+    chatPreset?.provider === "screenpipe-cloud" &&
+      chatUsage &&
+      (chatUsage.hosted_ai?.allowance_managed_by === "cloudflare"
+        ? chatCloudflareAllowance?.remaining_percent === 0
+        : chatUsage.remaining <= 0),
+  );
+
+  const readChatTranscript = useCallback(
+    async (): Promise<MeetingChatTranscriptSnapshot> => {
+      const chunks = await fetchMeetingAudio(
+        meeting.meeting_start,
+        meeting.meeting_end ?? new Date().toISOString(),
+        1_000,
+        typeof meeting.id === "number" ? meeting.id : undefined,
+      );
+      const rendered = renderMeetingTranscript(chunks);
+      const truncated = rendered.length > CHAT_TRANSCRIPT_MAX_CHARS;
+      return {
+        text: truncated
+          ? rendered.slice(rendered.length - CHAT_TRANSCRIPT_MAX_CHARS)
+          : rendered,
+        turnCount: chunks?.length ?? 0,
+        truncated,
+      };
+    },
+    [meeting.id, meeting.meeting_start, meeting.meeting_end],
+  );
+  const buildChatContext = useCallback(
+    (snapshot: MeetingChatTranscriptSnapshot): MeetingChatContext => ({
+      meetingId: meeting.id,
+      title,
+      startIso: meeting.meeting_start,
+      endIso: meeting.meeting_end,
+      transcript: snapshot.text,
+      note,
+      transcriptTruncated: snapshot.truncated,
+      transcriptSettling:
+        isLive ||
+        stopping ||
+        savingBeforeStop ||
+        summaryLifecycle.kind === "finalizing",
+    }),
+    [
+      isLive,
+      meeting.id,
+      meeting.meeting_end,
+      meeting.meeting_start,
+      note,
+      savingBeforeStop,
+      stopping,
+      summaryLifecycle.kind,
+      title,
+    ],
+  );
+  const meetingChatContext = useMemo(
+    () => buildChatContext(chatTranscript),
+    [buildChatContext, chatTranscript],
+  );
+  const refreshMeetingChatContext = useCallback(async () => {
+    const latest = await readChatTranscript();
+    setChatTranscript(latest);
+    return buildChatContext(latest);
+  }, [buildChatContext, readChatTranscript]);
+
+  const meetingChat = useMeetingChat({
+    context: meetingChatContext,
+    refreshContext: refreshMeetingChatContext,
+    preset: chatPreset,
+    userToken: settings.user?.token ?? null,
+  });
+
+  const chatConditions: MeetingChatConditions = {
+    isLive,
+    isStopping: stopping || savingBeforeStop,
+    captureDegraded: Boolean(captureState && isLiveCaptureDegraded(captureState)),
+    summaryLifecycle,
+    refreshingAfterRetranscription: retranscriptionSummaryRefreshWorking,
+    transcriptTurnCount: chatTranscript.turnCount,
+    hasWrittenContext: Boolean(note.trim()),
+    hasPreset: Boolean(chatPreset),
+    quotaExhausted: chatQuotaExhausted,
+    turnInFlight: meetingChat.inFlight,
+  };
+
+  // The transcript panel owns its own copy for rendering; chat keeps a bounded
+  // plain-text window. Opening a live panel refreshes immediately and then at
+  // the same cadence as TranscriptPanel. The send path above refreshes once
+  // more, so a question never relies on the mount-time snapshot (case 16).
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const latest = await readChatTranscript();
+        if (cancelled) return;
+        setChatTranscript(latest);
+      } catch {
+        // A transcript we cannot read means "nothing to ask about", which the
+        // rail already renders as a disabled composer.
+        if (!cancelled) {
+          setChatTranscript({ text: "", turnCount: 0, truncated: false });
+        }
+      }
+    };
+    void load();
+    const interval =
+      isLive && chatOpen
+        ? window.setInterval(() => void load(), MEETING_CHAT_LIVE_REFRESH_MS)
+        : null;
+    return () => {
+      cancelled = true;
+      if (interval !== null) window.clearInterval(interval);
+    };
+  }, [chatOpen, isLive, readChatTranscript, transcriptRefreshKey]);
+
+  // Case 50/51: widths re-clamp against the live shell, not a stored guess,
+  // and the same measurement decides overlay versus dock.
+  useEffect(() => {
+    const node = mainRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    setPaneWidth(node.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (typeof width === "number") setPaneWidth(width);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  // Case 81/82: a citation switches tabs, then scrolls once the rows exist.
+  useEffect(() => {
+    if (pendingCitationMs === null) return;
+    if (activeTab !== "transcript") return;
+    let frame = 0;
+    let attempts = 0;
+    const tryScroll = () => {
+      const container = mainRef.current;
+      if (!container) return;
+      const rows = readTranscriptRowBounds(container);
+      if (rows.length === 0) {
+        // Case 82: the transcript may not have loaded yet. Keep the intent.
+        if (attempts++ < 40) {
+          frame = requestAnimationFrame(tryScroll);
+          return;
+        }
+        setPendingCitationMs(null);
+        return;
+      }
+      const hit = findTranscriptRowForTime(rows, pendingCitationMs);
+      setPendingCitationMs(null);
+      if (!hit) return;
+      const target = rows[hit.index].element;
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      // A brief ring rather than a persistent selection: the point is to show
+      // where the answer came from, not to leave the row selected.
+      target.setAttribute("data-cited", "true");
+      window.setTimeout(() => target.removeAttribute("data-cited"), 2_000);
+    };
+    frame = requestAnimationFrame(tryScroll);
+    return () => cancelAnimationFrame(frame);
+  }, [pendingCitationMs, activeTab]);
+
+  const handleCitationClick = useCallback((atMs: number) => {
+    setActiveTab("transcript");
+    setPendingCitationMs(atMs);
+  }, []);
+
+  const citationWindow = useMemo(() => {
+    const startMs = new Date(meeting.meeting_start).getTime();
+    if (!Number.isFinite(startMs)) return null;
+    // A live meeting stays open-ended: the citation parser resolves "now" when
+    // it runs, so an answer streaming during the call can still cite a moment
+    // that happened after this memo was computed.
+    if (!meeting.meeting_end) return { startMs, endMs: null };
+    const endMs = new Date(meeting.meeting_end).getTime();
+    return { startMs, endMs: Number.isFinite(endMs) ? endMs : null };
+  }, [meeting.meeting_start, meeting.meeting_end]);
   const summarySurfaceState = summaryWorking
     ? "working"
-    : summaryLifecycle.kind === "completed"
-      ? "ready"
-      : summaryLifecycle.kind === "failed"
-        ? "attention"
+    : visibleSummaryLifecycle.kind === "failed"
+      ? "attention"
+      : visibleSummaryLifecycle.kind === "completed" ||
+          extractMeetingSummary(note)
+        ? "ready"
         : "idle";
 
   // Every meeting action hangs off the single `⋯` menu on the tab rule.
@@ -1578,62 +2092,86 @@ export function NoteView({
   // neither trigger says what it holds, so finding anything meant opening both.
   // One menu with labelled groups means "it is in the menu" is a complete
   // instruction. Summarize loses its square here but keeps the prominent
-  // button inside the summary tab, next to the output it produces.
-  const meetingMenuGroups: MeetingMenuGroup[] = isLive
-    ? []
-    : [
-        {
-          label: "summary",
-          items: [
-            {
-              key: "summarize",
-              label: summaryActionLabel,
-              icon: summaryWorking
-                ? Loader2
-                : summaryLifecycle.kind === "completed" ||
-                    summaryLifecycle.kind === "failed"
-                  ? RefreshCw
-                  : Sparkles,
-              onSelect: () => handleSummaryAction(),
-              disabled:
-                summaryWorking || retranscribing || !canSummarizeMeeting,
-            },
-          ],
-        },
-        {
-          label: "meeting",
-          items: [
-            {
-              key: "resume",
-              label: resuming ? "resuming meeting" : "resume meeting",
-              icon: resuming ? Loader2 : Play,
-              onSelect: () => void onResume(),
-              disabled: resuming,
-            },
-            {
-              key: "retranscribe",
-              label: "retranscribe saved audio",
-              icon: retranscribing ? Loader2 : AudioLines,
-              onSelect: () => setConfirmingAction("retranscribe"),
-              disabled: retranscribing || summaryWorking,
-            },
-            {
-              key: "export",
-              label: "export to mp4",
-              icon: exporting ? Loader2 : Download,
-              onSelect: () => void handleExport(),
-              disabled: exporting,
-            },
-            {
-              key: "delete",
-              label: "delete meeting",
-              icon: Trash2,
-              onSelect: () => setConfirmingAction("delete"),
-              destructive: true,
-            },
-          ],
-        },
-      ];
+  // button inside the summary tab, next to the output it produces. Model
+  // choice stays reachable during a live meeting so the post-stop automatic
+  // summary uses the intended model.
+  const summaryMenuItems: MeetingMenuGroup["items"] = [
+    {
+      key: "summary-model",
+      label: "summary model",
+      icon: Sparkles,
+      disabled:
+        !summaryPresetReady ||
+        summaryPresetSaving ||
+        summaryPresets.length === 0,
+      submenu: {
+        selectedKey: summaryPresetId,
+        selectedLabel: summaryPresetReady
+          ? summaryPresetModelLabel(summaryPreset) || "select"
+          : "loading…",
+        options: summaryPresets.map((preset) => ({
+          key: preset.id,
+          label: preset.id,
+          detail: summaryPresetModelLabel(preset),
+          onSelect: () => void handleSummaryPresetSelect(preset),
+        })),
+      },
+    },
+  ];
+  if (!isLive && !resuming) {
+    summaryMenuItems.push({
+      key: "summarize",
+      label: summaryActionLabel,
+      icon: summaryWorking
+        ? Loader2
+        : visibleSummaryLifecycle.kind === "completed" ||
+            visibleSummaryLifecycle.kind === "failed"
+          ? RefreshCw
+          : Sparkles,
+      onSelect: () => handleSummaryAction(),
+      disabled: summaryWorking || retranscribing || !canSummarizeMeeting,
+    });
+  }
+  const meetingMenuGroups: MeetingMenuGroup[] = [
+    { label: "summary", items: summaryMenuItems },
+    ...(isLive || resuming
+      ? []
+      : [
+          {
+            label: "meeting",
+            items: [
+              {
+                key: "resume",
+                label: resuming ? "resuming meeting" : "resume meeting",
+                icon: resuming ? Loader2 : Play,
+                onSelect: () => void onResume(),
+                disabled: resuming,
+              },
+              {
+                key: "retranscribe",
+                label: "retranscribe saved audio",
+                icon: retranscribing ? Loader2 : AudioLines,
+                onSelect: () => setConfirmingAction("retranscribe"),
+                disabled: retranscribing || summaryWorking,
+              },
+              {
+                key: "export",
+                label: "export to mp4",
+                icon: exporting ? Loader2 : Download,
+                onSelect: () => void handleExport(),
+                disabled: exporting,
+              },
+              {
+                key: "delete",
+                label: "delete meeting",
+                icon: Trash2,
+                onSelect: () => setConfirmingAction("delete"),
+                destructive: true,
+              },
+            ],
+          },
+        ]),
+  ];
 
   // The confirmations are controlled by `confirmingAction`, so they no longer
   // need to wrap the trigger that opens them.
@@ -1686,8 +2224,12 @@ export function NoteView({
     <div ref={rootRef} className="relative flex h-full flex-col bg-background">
       <ConnectedShareDialog
         open={shareOpen}
-        onOpenChange={setShareOpen}
+        onOpenChange={(open) => {
+          setShareOpen(open);
+          if (!open) setRequestedShareDestination(null);
+        }}
         artifact={shareArtifact}
+        initialDestination={requestedShareDestination}
       />
       {meetingConfirmations}
       {isDraggingImage && (
@@ -1781,6 +2323,36 @@ export function NoteView({
             // and one menu holding everything else — destinations and meeting
             // lifecycle both, which is what let the second dropdown go away.
             trailing={
+              <>
+              {/* The one entry point. Chat is a lens over whichever tab is
+                  open, so it belongs on the rule that spans all of them,
+                  beside the other whole-meeting actions. Nothing is rendered
+                  until this is pressed. */}
+              <button
+                type="button"
+                data-testid="meeting-chat-toggle"
+                aria-label="ask about this meeting"
+                aria-pressed={chatOpen}
+                title="ask about this meeting"
+                onClick={() => {
+                  setChatOpen((open) => {
+                    if (!open) {
+                      posthog.capture("meeting_chat_opened", {
+                        tab: activeTab,
+                        has_summary: canShareSummary,
+                      });
+                    }
+                    return !open;
+                  });
+                }}
+                className={cn(
+                  MEETING_RULE_ACTION_CLASS,
+                  "px-4",
+                  chatOpen && "bg-foreground text-background",
+                )}
+              >
+                <MessageSquareText className="h-3.5 w-3.5" />
+              </button>
               <MeetingShareMenu
                 canShareSummary={canShareSummary}
                 canSend={shareArtifact.sections.length > 0}
@@ -1802,6 +2374,7 @@ export function NoteView({
                   });
                 }}
                 resendLabel={oneTapSend.label ?? undefined}
+                suggestedDestinations={oneTapSend.suggestions}
                 onShare={(action) => {
                   posthog.capture("meeting_share_action", {
                     action,
@@ -1814,11 +2387,26 @@ export function NoteView({
                   if (action === "summary") void handleCopySummary();
                   else if (action === "email") void handleEmailSummary();
                   else if (action === "transcript") void handleCopyTranscript();
-                  else if (action === "send") setShareOpen(true);
+                  else if (action === "send") {
+                    setRequestedShareDestination(null);
+                    setShareOpen(true);
+                  }
                   else if (action === "resend") void handleOneTapSend();
                   else void handleCopy();
                 }}
+                onDestinationSelect={(destination) => {
+                  const suggestion = oneTapSend.suggestions.find(
+                    (item) => item.destination === destination,
+                  );
+                  posthog.capture("meeting_share_destination_clicked", {
+                    destination,
+                    observed_in_meeting: suggestion?.observed === true,
+                  });
+                  setRequestedShareDestination(destination);
+                  setShareOpen(true);
+                }}
               />
+              </>
             }
           />
         </div>
@@ -1827,7 +2415,10 @@ export function NoteView({
       {/* Each tab owns exactly one scroll viewport. The notes editor remains
           mounted while hidden so switching tabs never drops draft/selection
           state. The footer is a flex sibling, so no tab can render beneath it. */}
-      <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+      <div ref={mainRef} className="relative flex min-h-0 min-w-0 flex-1">
+      <main
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
+      >
         <section
           id="meeting-panel-notes"
           role="tabpanel"
@@ -1839,12 +2430,21 @@ export function NoteView({
           )}
         >
           <div className={cn(MEETING_SHELL_CLASS, "pb-16 pt-8 sm:pt-10")}>
+            <MeetingSummaryTransition
+              phase={summaryTransitionPhase}
+              transcriptOpen={transcriptOpen}
+              onTranscriptToggle={() => setTranscriptOpen((open) => !open)}
+              onResume={() => void onResume()}
+              onOpenSummary={() => setActiveTab("summary")}
+            />
             <NoteEditor
               ref={noteEditorRef}
               key={meeting.id}
               value={note}
               onChange={setNote}
-              placeholder={'write notes, or type "/" for blocks'}
+              placeholder={
+                'write what matters — it helps focus the summary · "/" for blocks'
+              }
               readOnly={summaryWorking}
               summaryRevealKey={summaryRevealKey}
               className={cn(
@@ -1854,11 +2454,6 @@ export function NoteView({
                   ? "[&_.ProseMirror]:!min-h-0"
                   : "[&_.ProseMirror]:min-h-[45vh]",
               )}
-            />
-            <MeetingSummaryTransition
-              phase={summaryTransitionPhase}
-              transcriptOpen={transcriptOpen}
-              onTranscriptToggle={() => setTranscriptOpen((open) => !open)}
             />
           </div>
         </section>
@@ -1890,7 +2485,57 @@ export function NoteView({
             streamedSummary={streamedSummary}
             onGenerate={handleSummaryAction}
             canGenerate={
-              canSummarizeMeeting && !summaryWorking && !retranscribing
+              canSummarizeMeeting &&
+              !summaryWorking &&
+              !retranscribing &&
+              !summaryPresetSaving
+            }
+            recovery={
+              summaryFailure
+                ? {
+                    title: summaryFailure.title,
+                    detail: summaryFailure.copy,
+                    retryable: summaryFailure.retryable,
+                    upgrade: summaryUpgrade
+                      ? {
+                          label: `upgrade to ${QUOTA_PLAN_LABELS[
+                            summaryUpgrade.requiredPlan
+                          ].toLowerCase()}`,
+                          onSelect: () => void handleSummaryUpgrade(),
+                        }
+                      : undefined,
+                    model: summaryFailure.changeModelRecommended
+                      ? {
+                          selectedId: summaryPresetId,
+                          selectedLabel: summaryPreset
+                            ? `${summaryPreset.id} · ${summaryPreset.model}`
+                            : "no summary model selected",
+                          saving: summaryPresetSaving,
+                          options: summaryPresets
+                            .filter((preset) => preset.id !== summaryPresetId)
+                            .map((preset) => ({
+                              id: preset.id,
+                              label: preset.id,
+                              detail: `${preset.provider.replace(/-/g, " ")} · ${preset.model}`,
+                              onSelect: () => {
+                                void (async () => {
+                                  const changed =
+                                    await handleSummaryPresetSelect(preset);
+                                  if (changed) await handleSummarize();
+                                })();
+                              },
+                            })),
+                          onManage: () => {
+                            window.dispatchEvent(
+                              new CustomEvent("open-settings", {
+                                detail: { section: "ai" },
+                              }),
+                            );
+                          },
+                        }
+                      : undefined,
+                  }
+                : undefined
             }
             // Mounted with the tab rather than always: the strip pulls the
             // meeting's transcript rows and frame samples, and opening a
@@ -1921,6 +2566,38 @@ export function NoteView({
           />
         )}
       </main>
+
+      {/* Beside the document, not beneath it. Nothing renders until the ask
+          control is used, so notes and summary keep the footer-free shell they
+          have today. */}
+      {chatOpen && (
+        <MeetingChatPanel
+          conditions={chatConditions}
+          meetingTitle={title}
+          meetingStart={meeting.meeting_start}
+          meetingEnd={meeting.meeting_end}
+          turns={meetingChat.turns}
+          draft={chatDraft}
+          onDraftChange={setChatDraft}
+          onSubmit={meetingChat.send}
+          onStop={meetingChat.stop}
+          onRetry={meetingChat.retry}
+          onClose={() => setChatOpen(false)}
+          activePreset={chatPreset}
+          onPresetSelect={handleChatPresetSelect}
+          onAcpConfigDefault={handleChatAcpConfigDefault}
+          onRunSummary={handleSummaryAction}
+          citationWindow={citationWindow}
+          onCitationClick={handleCitationClick}
+          viewportWidth={paneWidth}
+          storedWidth={storedPanelWidth}
+          onWidthChange={(next) => {
+            setStoredPanelWidth(next);
+            writeStoredChatWidth(next);
+          }}
+        />
+      )}
+      </div>
 
       {footerVisible && (
       <footer className="z-30 min-w-0 shrink-0 border-t border-border bg-background">
@@ -1969,12 +2646,13 @@ export function NoteView({
                   isLive && captureState?.severity === "warning"
                     ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
                     : isLive ||
-                        summaryLifecycle.kind === "finalizing" ||
-                        summaryLifecycle.kind === "queued" ||
-                        summaryLifecycle.kind === "running" ||
-                        summaryLifecycle.kind === "completed"
+                        resuming ||
+                        visibleSummaryLifecycle.kind === "finalizing" ||
+                        visibleSummaryLifecycle.kind === "queued" ||
+                        visibleSummaryLifecycle.kind === "running" ||
+                        visibleSummaryLifecycle.kind === "completed"
                       ? "border-foreground bg-foreground text-background"
-                      : summaryLifecycle.kind === "failed"
+                      : visibleSummaryLifecycle.kind === "failed"
                         ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
                         : "bg-muted text-muted-foreground",
                 )}
@@ -1989,11 +2667,15 @@ export function NoteView({
                       maxAudioDeviceLevel(audioStatusDevices),
                     )}
                   />
+                ) : resuming ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : visibleSummaryLifecycle.kind === "finalizing" ? (
+                  <Check className="h-4 w-4" />
                 ) : summaryWorking ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
-                ) : summaryLifecycle.kind === "completed" ? (
+                ) : visibleSummaryLifecycle.kind === "completed" ? (
                   <Sparkles className="h-4 w-4" />
-                ) : summaryLifecycle.kind === "failed" ? (
+                ) : visibleSummaryLifecycle.kind === "failed" ? (
                   <AlertTriangle className="h-4 w-4" />
                 ) : (
                   <Check className="h-4 w-4" />
@@ -2031,9 +2713,7 @@ export function NoteView({
                         type="button"
                         data-testid="meeting-summary-upgrade-link"
                         className="underline underline-offset-2 transition-colors hover:text-foreground"
-                        onClick={() =>
-                          void openExternalUrl(summaryUpgrade.upgradeUrl)
-                        }
+                        onClick={() => void handleSummaryUpgrade()}
                       >
                         upgrade to{" "}
                         {QUOTA_PLAN_LABELS[
@@ -2064,13 +2744,14 @@ export function NoteView({
                       onClick={() => void handleStopClick()}
                       disabled={stopping || savingBeforeStop}
                       aria-label={stopActionLabel}
-                      className="h-9 w-9 rounded-none p-0 disabled:border-border disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-100"
+                      className="h-9 gap-2 rounded-none px-3 font-mono text-[10px] uppercase tracking-[0.1em] disabled:border-border disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-100"
                     >
                       {stopping || savingBeforeStop ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <Square className="h-3.5 w-3.5" />
                       )}
+                      <span>{stopButtonLabel}</span>
                     </Button>
                   </MeetingControlTooltip>
                 )}

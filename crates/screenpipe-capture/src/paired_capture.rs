@@ -16,7 +16,9 @@ use chrono::{DateTime, Utc};
 use image::{DynamicImage, GenericImageView};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use screenpipe_a11y::tree::{create_tree_walker, TreeSnapshot, TreeWalkerConfig};
+use screenpipe_a11y::tree::{
+    create_tree_walker, TreeSnapshot, TreeWalkerConfig, TreeWalkerPlatform,
+};
 use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
@@ -26,6 +28,8 @@ use screenpipe_screen::text_regions::{
 use screenpipe_screen::OcrGateDecision;
 
 use crate::ocr_gate::{OcrDecision, OcrGate};
+#[cfg(target_os = "windows")]
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -127,6 +131,19 @@ fn clamp_window_crop(b: FocusedWindowBounds, frame_w: u32, frame_h: u32) -> Opti
     })
 }
 
+/// Mark a retained AX observation as detached from screenshot pixels in place.
+/// This is intentionally allocation-free because focus races occur on the
+/// capture hot path.
+pub fn detach_tree_from_pixels(snapshot: &mut TreeSnapshot) {
+    for node in snapshot
+        .nodes
+        .iter_mut()
+        .chain(snapshot.semantic_nodes.iter_mut())
+    {
+        node.on_screen = Some(false);
+    }
+}
+
 /// Context for a paired capture operation — replaces positional arguments.
 pub struct CaptureContext<'a> {
     pub db: &'a DatabaseManager,
@@ -165,6 +182,11 @@ pub struct CaptureContext<'a> {
     /// metadata. Callers without per-monitor focus knowledge should pass
     /// `true` only when capturing a single monitor.
     pub monitor_hosts_focus: bool,
+    /// Whether the focused accessibility snapshot was collected under the
+    /// same stable process identity as these pixels. When false, the AX data
+    /// is still persisted, but it cannot supply pixel text, bounds, identity,
+    /// dedup, or element references for this screenshot.
+    pub ax_screenshot_coherent: bool,
     /// Screen bounds of the focused window in this frame's pixel space, when
     /// the platform exposes them (macOS AX frame, Windows GetWindowRect).
     /// While meeting-gated, the text-region detect and any escalated OCR are
@@ -203,6 +225,9 @@ pub struct PairedCaptureResult {
     /// True when OCR ran but produced (near-)empty text — an OCR-quality
     /// failure proxy. False when OCR didn't run or returned usable text.
     pub ocr_was_empty: bool,
+    /// True only when this capture reused the live OCR gate's cached payload.
+    /// A gate skip with no detected text is not a cache hit.
+    pub ocr_cache_hit: bool,
     /// How the OCR gate resolved this capture — `Some` only when an OCR
     /// trigger fired AND a gate was wired (the engine loop).
     /// The capture loop feeds this to
@@ -242,6 +267,22 @@ pub async fn paired_capture(
     // ownership so callers cannot attach the focused app's tree or identity
     // to unrelated pixels from another monitor.
     let tree_snapshot = tree_snapshot.filter(|_| ctx.monitor_hosts_focus);
+    // A caller detecting an app switch marks the retained AX observation
+    // off-screen in place. Reusing the existing visibility bit keeps visual
+    // search from projecting those bounds onto unrelated pixels without a
+    // second allocation-heavy shadow copy of the tree.
+    debug_assert!(
+        ctx.ax_screenshot_coherent
+            || tree_snapshot.is_none_or(|snapshot| {
+                snapshot
+                    .nodes
+                    .iter()
+                    .chain(snapshot.semantic_nodes.iter())
+                    .all(|node| node.on_screen == Some(false))
+            })
+    );
+    let stored_tree_snapshot = tree_snapshot;
+    let pixel_tree_snapshot = tree_snapshot.filter(|_| ctx.ax_screenshot_coherent);
     let (app_name, window_name, browser_url, document_path) = if ctx.monitor_hosts_focus {
         (
             ctx.app_name,
@@ -299,7 +340,7 @@ pub async fn paired_capture(
                 || n.contains("warp")
         });
     let has_accessibility_text = !app_prefers_ocr
-        && tree_snapshot
+        && pixel_tree_snapshot
             .map(|s| !s.text_content.is_empty())
             .unwrap_or(false);
 
@@ -310,7 +351,7 @@ pub async fn paired_capture(
     // Meeting apps/URLs are deliberately no longer part of this check —
     // their forced OCR is gated on an actual detected meeting below (#5054).
     let a11y_is_thin_generic = has_accessibility_text
-        && tree_snapshot
+        && pixel_tree_snapshot
             .map(|s| a11y_content_is_thin(s, window_name, browser_url))
             .unwrap_or(false);
 
@@ -474,6 +515,7 @@ pub async fn paired_capture(
     // The raw crop-relative OCR output, cached into the gate at the commit
     // point so pixel-identical future captures can reuse it without OCR.
     let mut ocr_cache_payload: Option<(String, String)> = None;
+    let mut ocr_cache_hit = false;
     let (ocr_text, ocr_text_json) = if ocr_ran {
         // Gated captures OCR the padded union of the detected text regions
         // (#5054: measured 4-5.5x cheaper than full-frame on sparse
@@ -550,6 +592,7 @@ pub async fn paired_capture(
         // that text (json already re-mapped to the current crop position)
         // at zero OCR cost. Matters for surfaces whose ONLY text source is
         // OCR — terminals, no-a11y apps.
+        ocr_cache_hit = true;
         (cached_text, cached_json)
     } else {
         (String::new(), "[]".to_string())
@@ -585,7 +628,7 @@ pub async fn paired_capture(
             (None, None, None, None)
         }
     } else {
-        match tree_snapshot {
+        match stored_tree_snapshot {
             Some(snap) if !snap.text_content.is_empty() => {
                 let json = serde_json::to_string(&snap.nodes).ok();
                 (
@@ -611,9 +654,13 @@ pub async fn paired_capture(
         }
     };
 
-    // Determine text source: "accessibility" when tree nodes were available,
-    // "ocr" for fallback, "hybrid" when both ran (thin a11y supplemented by OCR)
-    let (final_text, text_source) = if let Some(ref text) = accessibility_text {
+    // An incoherent tree is retained as raw evidence, but must not enter the
+    // screenshot's FTS text. Otherwise a search for AX-only text would still
+    // return unrelated pixels even though every AX node is marked off-screen.
+    // OCR remains independently searchable for the screenshot.
+    let (final_text, text_source) = if !ctx.ax_screenshot_coherent {
+        (None, (!ocr_text.trim().is_empty()).then_some("ocr"))
+    } else if let Some(ref text) = accessibility_text {
         if text.is_empty() {
             (None, None)
         } else if tree_json.is_some() && a11y_is_thin && !ocr_text.is_empty() {
@@ -627,6 +674,14 @@ pub async fn paired_capture(
             // Text came from OCR fallback (no tree_json means no accessibility nodes)
             (Some(text.as_str()), Some("ocr"))
         }
+    } else {
+        (None, None)
+    };
+
+    // Never let a later coherent AX frame deduplicate against this detached
+    // tree and inherit its element reference or pixel identity.
+    let (content_hash, simhash) = if ctx.ax_screenshot_coherent {
+        (content_hash, simhash)
     } else {
         (None, None)
     };
@@ -686,7 +741,7 @@ pub async fn paired_capture(
             content_hash,
             simhash,
             ocr_data,
-            ctx.monitor_hosts_focus
+            (ctx.monitor_hosts_focus && ctx.ax_screenshot_coherent)
                 .then_some(ctx.elements_ref_frame_id)
                 .flatten(),
         )
@@ -729,6 +784,7 @@ pub async fn paired_capture(
         duration_ms,
         ocr_duration_ms,
         ocr_was_empty,
+        ocr_cache_hit,
         ocr_gate_decision,
         ocr_gate_detect_duration,
         app_name: app_name.map(String::from),
@@ -743,8 +799,35 @@ pub async fn paired_capture(
 ///
 /// This is a blocking operation that should be spawned on a blocking thread.
 pub fn walk_accessibility_tree(config: &TreeWalkerConfig) -> screenpipe_a11y::tree::TreeWalkResult {
+    #[cfg(target_os = "windows")]
+    {
+        thread_local! {
+            static CACHED_TREE_WALKER: RefCell<Option<Box<dyn TreeWalkerPlatform>>> =
+                RefCell::new(None);
+        }
+
+        return CACHED_TREE_WALKER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(create_tree_walker(config.clone()));
+            }
+            let walker = slot.as_mut().expect("cached walker initialized");
+            walker.update_config(config.clone());
+            run_accessibility_tree_walk(walker.as_ref())
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let walker = create_tree_walker(config.clone());
+        run_accessibility_tree_walk(walker.as_ref())
+    }
+}
+
+pub(crate) fn run_accessibility_tree_walk(
+    walker: &dyn TreeWalkerPlatform,
+) -> screenpipe_a11y::tree::TreeWalkResult {
     use screenpipe_a11y::tree::TreeWalkResult;
-    let walker = create_tree_walker(config.clone());
     match walker.walk_focused_window() {
         Ok(TreeWalkResult::Found(snapshot)) => {
             debug!(
@@ -1070,6 +1153,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1109,6 +1193,7 @@ mod tests {
             screenshot_disabled: true,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1152,6 +1237,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1223,6 +1309,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1366,6 +1453,72 @@ mod tests {
             max_depth_reached: 0,
             window_bounds: None,
         }
+    }
+
+    #[test]
+    fn mismatched_ax_tree_is_preserved_but_no_longer_claims_pixel_visibility() {
+        let mut snapshot = make_snap(vec![AccessibilityTreeNode {
+            role: "AXButton".into(),
+            text: "semantic label".into(),
+            on_screen: Some(true),
+            ..Default::default()
+        }]);
+        let original_text = snapshot.text_content.clone();
+
+        detach_tree_from_pixels(&mut snapshot);
+
+        assert_eq!(snapshot.text_content, original_text);
+        assert_eq!(snapshot.nodes[0].text, "semantic label");
+        assert_eq!(snapshot.nodes[0].on_screen, Some(false));
+    }
+
+    #[tokio::test]
+    async fn mismatched_ax_tree_is_durable_but_not_indexed_as_screenshot_text() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let mut snapshot = make_snap(vec![AccessibilityTreeNode {
+            role: "AXStaticText".into(),
+            text: "fried chicken".into(),
+            on_screen: Some(true),
+            ..Default::default()
+        }]);
+        detach_tree_from_pixels(&mut snapshot);
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("Codex"),
+            window_name: None,
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "focus_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: true,
+            in_meeting: false,
+            monitor_hosts_focus: true,
+            ax_screenshot_coherent: false,
+            focused_window_bounds: None,
+        };
+
+        let result = paired_capture(&ctx, Some(&snapshot), None).await.unwrap();
+        let (indexed_text, tree_json) = db
+            .get_frame_accessibility_data(result.frame_id)
+            .await
+            .unwrap();
+
+        assert!(indexed_text.is_none());
+        let tree_json = tree_json.expect("raw AX tree should remain durable");
+        assert!(tree_json.contains("fried chicken"));
+        assert!(tree_json.contains("\"on_screen\":false"));
     }
 
     #[test]
@@ -1682,6 +1835,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
@@ -1726,6 +1880,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
@@ -1736,6 +1891,10 @@ mod tests {
         assert!(
             result.ocr_duration_ms.is_none(),
             "gate must skip OCR when no text regions are detected"
+        );
+        assert!(
+            !result.ocr_cache_hit,
+            "a no-text gate skip has no cached OCR payload to reuse"
         );
         // The frame is still stored with its accessibility text.
         assert_eq!(result.text_source.as_deref(), Some("accessibility"));
@@ -1767,6 +1926,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
@@ -1817,6 +1977,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: false,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let mut gate = OcrGate::new();
@@ -1885,6 +2046,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let mut gate = OcrGate::new();
@@ -1895,6 +2057,7 @@ mod tests {
             result.ocr_duration_ms.is_some(),
             "new text crop must run OCR"
         );
+        assert!(!result.ocr_cache_hit, "a real OCR run is a cache miss");
         // Gate telemetry travels out with the result for PipelineMetrics.
         assert_eq!(result.ocr_gate_decision, Some(OcrGateDecision::CropOcr));
         assert!(
@@ -1908,6 +2071,10 @@ mod tests {
         assert!(
             result2.ocr_duration_ms.is_none(),
             "unchanged text crop must not re-run OCR"
+        );
+        assert!(
+            result2.ocr_cache_hit,
+            "unchanged indexed text must reuse the cached OCR payload"
         );
         assert_eq!(result2.ocr_gate_decision, Some(OcrGateDecision::Skip));
         assert!(
@@ -1979,6 +2146,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: bounds,
         };
 
@@ -2037,6 +2205,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: Some(bounds),
         };
 
@@ -2074,6 +2243,10 @@ mod tests {
         );
         assert_eq!(moved.ocr_gate_decision, Some(OcrGateDecision::Skip));
         assert!(
+            moved.ocr_cache_hit,
+            "moved identical content must reuse the remapped cached OCR payload"
+        );
+        assert!(
             moved.ocr_gate_detect_duration.is_some(),
             "detect ran (interval elapsed) and produced the skip"
         );
@@ -2108,6 +2281,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -2133,6 +2307,10 @@ mod tests {
             retried.ocr_duration_ms.is_some(),
             "layout unpersisted by the failed insert must be retried"
         );
+        assert!(
+            !retried.ocr_cache_hit,
+            "retrying uncommitted OCR work is not a cache hit"
+        );
 
         // Now durably stored: the identical frame skips OCR.
         let settled = paired_capture(&ctx_ok, None, Some(&mut gate))
@@ -2141,6 +2319,10 @@ mod tests {
         assert!(
             settled.ocr_duration_ms.is_none(),
             "persisted layout must not re-OCR"
+        );
+        assert!(
+            settled.ocr_cache_hit,
+            "the settled identical frame must reuse the persisted OCR payload"
         );
     }
 

@@ -53,7 +53,8 @@ export type FirstRunLearningPhase =
 
 /**
  * Why the window closed without a summary. Mirrors the engine's `data_status`
- * so the UI can say what is actually wrong instead of a generic "nothing yet".
+ * for telemetry and capture diagnosis. It is intentionally not product copy:
+ * an evidence threshold miss is not a task the user asked to inspect.
  */
 export type FirstRunEmptyReason =
   | "not_recording"
@@ -72,6 +73,7 @@ export type FirstRunEmptyReason =
 export type FirstRunCapturedApp = {
   name: string;
   frameCount: number;
+  activeMinutes?: number;
   lastSeenAt: number;
 };
 
@@ -79,9 +81,28 @@ export type FirstRunLearningState = {
   phase: FirstRunLearningPhase;
   /** ISO timestamp the window opened; also the summary's lower time bound. */
   startedAt: string | null;
+  /**
+   * Whether waiting/writing progress belongs in the foreground.
+   *
+   * Immediate post-setup work is expected because setup just handed the user
+   * here. A late retry is useful background work, but surfacing its spinner
+   * hours after setup makes it look like a random onboarding regression.
+   * Ready summaries are visible regardless; empty outcomes are never visible.
+   */
+  showProgress: boolean;
   /** Set once a summary lands, so a reload cannot re-seed a second chat. */
   seededAt: string | null;
   chatId: string | null;
+  /**
+   * Set after the user opens the summary.
+   *
+   * Opening the result is not the same as finishing setup. Keeping this
+   * separate lets Home collapse the large result card into a durable setup
+   * dock while the summary conversation remains usable underneath it.
+   */
+  summaryOpenedAt: string | null;
+  /** Set only after /notify accepts the one-shot ready notification. */
+  notificationSentAt: string | null;
   emptyReason: FirstRunEmptyReason | null;
   /**
    * Set when a window is settled by rehydration rather than by the ceiling
@@ -90,6 +111,8 @@ export type FirstRunLearningState = {
    * times the banner remounts.
    */
   pendingEmptyReport: boolean;
+  /** Prevents an expired first attempt from reopening on every app launch. */
+  lateRetryUsed: boolean;
   /** Live-only, never persisted: rehydrating these would show stale apps. */
   capturedApps: FirstRunCapturedApp[];
 };
@@ -169,10 +192,14 @@ export const MAX_TRACKED_APPS = 5;
 const EMPTY_STATE: FirstRunLearningState = {
   phase: "idle",
   startedAt: null,
+  showProgress: false,
   seededAt: null,
   chatId: null,
+  summaryOpenedAt: null,
+  notificationSentAt: null,
   emptyReason: null,
   pendingEmptyReport: false,
+  lateRetryUsed: false,
   capturedApps: [],
 };
 
@@ -203,7 +230,7 @@ export type ActivityWindow = {
  * is why the summary reads like a real observation instead of a window list.
  */
 export type ActivitySnippet = {
-  /** "screen" | "audio" */
+  /** "parsed" | "screen" (accessibility fallback) | "audio" */
   source?: string;
   text?: string;
   app_name?: string | null;
@@ -214,6 +241,7 @@ export type ActivitySnapshot = {
   data_status?: string;
   total_frames?: number;
   total_active_minutes?: number;
+  parsed_context_count?: number;
   apps?: ActivityApp[] | null;
   windows?: ActivityWindow[] | null;
   edited_files?: ActivityEditedFile[] | null;
@@ -285,6 +313,7 @@ export function capturedAppsFrom(
     .map((app) => ({
       name: app.name.trim(),
       frameCount: Number.isFinite(app.frame_count) ? Number(app.frame_count) : 0,
+      activeMinutes: Number.isFinite(app.minutes) ? Number(app.minutes) : 0,
       lastSeenAt: now,
     }))
     .sort((left, right) => right.frameCount - left.frameCount)
@@ -305,6 +334,18 @@ export function hasEnoughEvidence(activity: ActivitySnapshot): boolean {
   const appCount = capturedAppsFrom(activity, 0).length;
   const audioSegments = Number(activity.audio_summary?.segment_count ?? 0);
   const activeMinutes = Number(activity.total_active_minutes ?? 0);
+  const parsedContexts = Number(activity.parsed_context_count ?? 0);
+
+  // Parsed records say what happened inside the app, so one sustained app is
+  // enough when at least one parser projection exists. This is the important
+  // low-tier path: it does not depend on screenshots, Timeline, or pixels.
+  if (
+    appCount >= 1 &&
+    parsedContexts > 0 &&
+    activeMinutes >= MIN_EVIDENCE_ACTIVE_MINUTES
+  ) {
+    return true;
+  }
 
   // Several apps over real observed time, with no frame floor beside it.
   //
@@ -563,13 +604,13 @@ function normalize(value: unknown): FirstRunLearningState {
         ...EMPTY_STATE,
         phase: "empty",
         startedAt,
+        showProgress: state.showProgress === true,
         // Deliberately still `unknown`, not a new reason. The hook re-derives
         // the real engine reason from `pendingEmptyReport` below, exactly as
-        // the ceiling effect would have. Inventing a user-visible "timed out
-        // while closed" state here replaced an actionable reason with a
-        // shrug, which is the opposite of why these reasons exist.
+        // the ceiling effect would have, so diagnostics keep their fidelity.
         emptyReason: "unknown",
         pendingEmptyReport: true,
+        lateRetryUsed: state.lateRetryUsed === true,
       };
     }
   }
@@ -577,18 +618,28 @@ function normalize(value: unknown): FirstRunLearningState {
   // `writing` cannot survive the process that was doing the writing. The model
   // call died with it, and the seed claim is already spent, so nothing will
   // pick the work back up. Resume to whatever actually landed: the chat if it
-  // was seeded before the app went away, otherwise a settled empty state with
-  // a dismiss button. Leaving it as `writing` would restore a spinner that can
-  // never finish, which is the failure this phase exists to remove.
+  // was seeded before the app went away, otherwise a silent settled state.
+  // Leaving it as `writing` would restore a spinner that can never finish,
+  // which is the failure this phase exists to remove.
   if (phase === "writing") {
     if (typeof state.chatId === "string" && state.chatId) {
       return {
         phase: "ready",
         startedAt,
+        showProgress: state.showProgress === true,
         seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
         chatId: state.chatId,
+        summaryOpenedAt:
+          typeof state.summaryOpenedAt === "string"
+            ? state.summaryOpenedAt
+            : null,
+        notificationSentAt:
+          typeof state.notificationSentAt === "string"
+            ? state.notificationSentAt
+            : null,
         emptyReason: null,
         pendingEmptyReport: false,
+        lateRetryUsed: state.lateRetryUsed === true,
         capturedApps: [],
       };
     }
@@ -596,6 +647,7 @@ function normalize(value: unknown): FirstRunLearningState {
       ...EMPTY_STATE,
       phase: "empty",
       startedAt,
+      showProgress: state.showProgress === true,
       emptyReason: "unknown",
       // NOT flagged for reporting, unlike the expired-learning path above. A
       // `writing` window that lost its process may still have an in-flight
@@ -603,16 +655,30 @@ function normalize(value: unknown): FirstRunLearningState {
       // from here races it and can clear the chat id out from under a summary
       // that actually landed.
       pendingEmptyReport: false,
+      lateRetryUsed: state.lateRetryUsed === true,
     };
   }
 
   return {
     phase,
     startedAt,
+    // Old persisted windows predate this field. Fail quiet on upgrade: an
+    // unknown in-flight window is more likely a late/restored run than the
+    // setup handoff that explicitly opts into progress below.
+    showProgress: state.showProgress === true,
     seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
     chatId: typeof state.chatId === "string" ? state.chatId : null,
+    summaryOpenedAt:
+      typeof state.summaryOpenedAt === "string"
+        ? state.summaryOpenedAt
+        : null,
+    notificationSentAt:
+      typeof state.notificationSentAt === "string"
+        ? state.notificationSentAt
+        : null,
     emptyReason: state.emptyReason ?? null,
     pendingEmptyReport: state.pendingEmptyReport === true,
+    lateRetryUsed: state.lateRetryUsed === true,
     // Always live; see the type comment.
     capturedApps: [],
   };
@@ -638,11 +704,17 @@ function writeLearningWindow(state: FirstRunLearningState): FirstRunLearningStat
   return state;
 }
 
-export function beginLearningWindow(startedAt = new Date().toISOString()) {
+export function beginLearningWindow(
+  startedAt = new Date().toISOString(),
+  showProgress = true,
+  lateRetryUsed = false,
+) {
   return writeLearningWindow({
     ...EMPTY_STATE,
     phase: "learning",
     startedAt,
+    showProgress,
+    lateRetryUsed,
   });
 }
 
@@ -691,6 +763,35 @@ export function markLearningReady(chatId: string): FirstRunLearningState {
   return writeLearningWindow({ ...current, phase: "ready", chatId });
 }
 
+/**
+ * Remember that the result was opened without retiring its setup controls.
+ *
+ * This is deliberately a no-op outside `ready`: a stale click or duplicate
+ * event must not revive onboarding after the user explicitly finished it.
+ */
+export function markLearningSummaryOpened(
+  openedAt = new Date().toISOString(),
+): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (current.phase !== "ready") return current;
+  return writeLearningWindow({ ...current, summaryOpenedAt: openedAt });
+}
+
+/**
+ * Latch the ready notification after the local app server accepts it.
+ *
+ * The /notify payload also has a deterministic id, which closes the tiny race
+ * between two mounted Home windows. This persisted latch prevents fresh
+ * requests after reload and lets a failed request retry on the next mount.
+ */
+export function markLearningNotificationSent(
+  sentAt = new Date().toISOString(),
+): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (current.phase !== "ready" || !current.chatId) return current;
+  return writeLearningWindow({ ...current, notificationSentAt: sentAt });
+}
+
 export function markLearningEmpty(
   reason: FirstRunEmptyReason,
 ): FirstRunLearningState {
@@ -726,22 +827,15 @@ export function markLearningDone(): FirstRunLearningState {
 }
 
 /**
- * Broadcast that every webview must drop its learning-window state.
+ * Tell the mounted lifecycle owner to drop its learning-window state.
  *
- * `resetLearningWindow` can only clear the partition it runs in, and this
- * state is not single-partition: the banner renders inside `StandaloneChat`,
- * which is mounted from both `/home` (the `home` webview) and `/chat` (the
- * `chat` webview), while Reset Onboarding is clicked in Settings — which
- * `show.rs` maps onto `home`. So the reset wiped home's copy and left chat's
- * untouched, still holding `phase: "done"` and a spent seed claim. The opening
- * effect bails on `phase !== "idle"`, so that webview's banner was dead for
- * good and no amount of resetting brought it back.
- *
- * Same reasoning the module already applies to `completedAt`, which is read
- * from a fact Rust owns precisely because partitions do not share. Reset needs
- * the same treatment; an event is the cheaper half of it.
+ * Reset Onboarding and the lifecycle both live in Home's storage partition,
+ * but clearing localStorage does not update an already-mounted hook. The event
+ * closes that state-observation gap immediately; a later remount reads the
+ * already-cleared storage and reaches the same result.
  */
 export const LEARNING_WINDOW_RESET_EVENT = "first-run-learning-window-reset";
+export const LEARNING_SUMMARY_OPENED_EVENT = "first-run-summary-opened";
 
 export function resetLearningWindow(): void {
   if (typeof window === "undefined") return;

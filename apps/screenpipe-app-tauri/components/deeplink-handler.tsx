@@ -25,6 +25,16 @@ import { localFetch } from "@/lib/api";
 import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
 import { settingsSectionFromDeepLink } from "@/lib/utils/settings-deep-link";
 import posthog from "posthog-js";
+import { handleExternalDeepLink } from "@/lib/external-deeplink";
+import {
+  handoffTargetById,
+  performAgentHandoff,
+} from "@/lib/first-run/agent-handoff";
+import {
+  LEARNING_SUMMARY_OPENED_EVENT,
+  markLearningSummaryOpened,
+  readLearningWindow,
+} from "@/lib/first-run/learning-window";
 
 const DEEPLINK_RECENT_TTL_MS = 1_000;
 const activeDeepLinks = new Set<string>();
@@ -80,6 +90,71 @@ export function DeeplinkHandler() {
     // and the custom Tauri event from single-instance handoff.
     const processDeepLinkUrl = async (url: string) => {
       const parsedUrl = new URL(url);
+
+      if (
+        parsedUrl.host === "first-run-summary" ||
+        parsedUrl.pathname === "first-run-summary"
+      ) {
+        const learning = readLearningWindow();
+        if (learning.phase !== "ready" || !learning.chatId) return;
+        await commands.showWindowActivated({ Home: { page: "home" } });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await emit("chat-load-conversation", {
+          conversationId: learning.chatId,
+          targetWindow: "home",
+        });
+        markLearningSummaryOpened();
+        await emit(LEARNING_SUMMARY_OPENED_EVENT);
+        posthog.capture("first_run_summary_opened", {
+          source: "notification",
+        });
+        return;
+      }
+
+      if (
+        parsedUrl.host === "first-run-agent" ||
+        parsedUrl.pathname === "first-run-agent"
+      ) {
+        const target = handoffTargetById(parsedUrl.searchParams.get("target"));
+        if (!target) return;
+        await commands.showWindowActivated({ Home: { page: "home" } });
+        const result = await performAgentHandoff(target, {
+          copyText: async (text) => {
+            const copied = await commands.copyTextToClipboard(text);
+            if (copied.status === "error") throw new Error(copied.error);
+          },
+          openUrl: async (targetUrl) => {
+            const { openUrl } = await import("@tauri-apps/plugin-opener");
+            await openUrl(targetUrl);
+          },
+        });
+        if (!result.copied) {
+          posthog.capture("first_run_agent_handoff_failed", {
+            agent: target.id,
+            stage: "clipboard",
+            source: "notification",
+          });
+        }
+        if (result.failedStage) {
+          posthog.capture("first_run_agent_handoff_failed", {
+            agent: target.id,
+            stage: result.failedStage,
+            source: "notification",
+          });
+        }
+        if (result.prefilled || result.copied) {
+          posthog.capture("first_run_agent_handoff_clicked", {
+            agent: target.id,
+            opened: result.launched,
+            prefilled: result.prefilled,
+            replayed: result.replayed,
+            copy_only: !result.prefilled,
+            clipboard_copied: result.copied,
+            source: "notification",
+          });
+        }
+        return;
+      }
 
       if (
         parsedUrl.host === "database-recovery" ||
@@ -242,6 +317,13 @@ export function DeeplinkHandler() {
         await openSettingsWindow(settingsSectionFromDeepLink(parsedUrl));
       }
 
+      if (
+        parsedUrl.host === "activity" ||
+        parsedUrl.pathname === "/activity"
+      ) {
+        await commands.showWindowActivated({ Home: { page: "activity" } });
+      }
+
       // A Live View follow-up notification points directly at the dashboard
       // created during onboarding. Persisting the selection before opening
       // Home also covers a cold-started Settings window.
@@ -338,6 +420,10 @@ export function DeeplinkHandler() {
       //   screenpipe://chat/<conversationId>?message=<messageId>
       //   screenpipe://chat?conversation=<conversationId>&message=<messageId>
       if (parsedUrl.host === "chat" || parsedUrl.pathname?.startsWith("/chat/")) {
+        // Public prompt links may only prefill an editable composer. They can
+        // never inject hidden context or auto-send a model request.
+        if (await handleExternalDeepLink(parsedUrl)) return;
+
         const pathId =
           parsedUrl.host === "chat"
             ? parsedUrl.pathname.replace(/^\/+/, "").split("/")[0]
@@ -354,6 +440,13 @@ export function DeeplinkHandler() {
             ...(messageId ? { focusMessageId: decodeURIComponent(messageId) } : {}),
           });
         }
+      }
+
+      // Public pipe links only navigate to an already-installed pipe. Install,
+      // enable, edit, and run remain explicit in-app actions.
+      if (parsedUrl.host === "pipe") {
+        await handleExternalDeepLink(parsedUrl);
+        return;
       }
 
       // Handle in-app file viewer: screenpipe://view?path=<encoded-path>

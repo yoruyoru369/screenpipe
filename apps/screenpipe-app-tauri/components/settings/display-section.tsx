@@ -36,7 +36,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Shortcut Reminder", keywords: ["overlay", "pill", "pin", "drag", "position"] },
   { label: "Timeline / rewind", keywords: ["rewind", "timeline", "backend"] },
   { label: "Overlay Size" },
-  { label: "Show Overlay in Screen Recording", keywords: ["capture", "obs", "screen share"] },
+  { label: "Hide from screen recordings", keywords: ["capture", "obs", "screen share", "overlay"] },
   { label: "Sidebar translucency", keywords: ["vibrancy", "translucent"] },
   { label: "Meetings in Sidebar", keywords: ["meeting", "meetings", "sidebar", "toolbar", "nav", "navigation", "icon", "reorder", "customize"] },
 ];
@@ -327,38 +327,31 @@ export function DisplaySection() {
                 <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
                   <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
-                    Show Overlay in Screen Recording
-                    <HelpTooltip text="When enabled, the screenpipe overlay can appear in OBS or Screen Studio. The broader 'Hide screenpipe from screen capture' preference in Audio & meetings takes priority." />
+                    Hide from screen recordings
+                    <HelpTooltip text="When enabled, only the screenpipe overlay is hidden from OBS, Screen Studio, screenshots, and screen sharing. Other screenpipe windows remain visible." />
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    {(settings?.hideAppInScreenShare ?? true)
-                      ? "Global screen-share privacy is on in Audio & meetings"
-                      : "Let OBS or Screen Studio capture the overlay"}
+                    Hide the overlay from OBS, Screen Studio, and screen sharing
                   </p>
                 </div>
               </div>
               <Switch
-                checked={
-                  !(settings?.hideAppInScreenShare ?? true) &&
-                  (settings?.showOverlayInScreenRecording ?? false)
-                }
-                disabled={settings?.hideAppInScreenShare ?? true}
-                onCheckedChange={async (checked) => {
+                data-testid="hide-overlay-in-screen-recording-toggle"
+                checked={settings?.hideOverlayInScreenRecording ?? false}
+                onCheckedChange={async (hidden) => {
                   try {
-                    await updateSettings({ showOverlayInScreenRecording: checked });
-                    const result = await commands.setAppScreenCaptureProtection(
-                      settings?.hideAppInScreenShare ?? true,
-                    );
+                    await updateSettings({ hideOverlayInScreenRecording: hidden });
+                    const result = await commands.setAppScreenCaptureProtection(hidden);
                     if (result.status === "error") {
                       throw new Error(result.error);
                     }
                     await commands.resetMainWindow().catch(() => {});
                     toast({
-                      title: checked ? "overlay visible to screen recorders" : "overlay hidden from screen recorders",
+                      title: hidden ? "overlay hidden from screen recordings" : "overlay visible in screen recordings",
                       description: "press the shortcut to open the overlay with the new setting.",
                     });
                   } catch (error) {
-                    await updateSettings({ showOverlayInScreenRecording: !checked });
+                    await updateSettings({ hideOverlayInScreenRecording: !hidden });
                     toast({
                       title: "could not update overlay capture visibility",
                       description: error instanceof Error ? error.message : String(error),
@@ -556,9 +549,6 @@ export function DisplaySection() {
             opens the timeline — hide the whole section when the timeline is off. */}
         {!(settings?.disableTimeline ?? false) && (
         <>
-        {/* The overlay ships unhideable because it carries recording health,
-            live meeting state and meeting alerts. `overlay-hiding-control`
-            hands the switch back remotely if that proves too strict. */}
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -566,32 +556,30 @@ export function DisplaySection() {
                 <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
                   <h3 className="text-sm font-medium text-foreground">Shortcut Reminder</h3>
-                  {/* Only the "always on screen" claim depends on the flag.
-                      The drag hint is true either way and is the only place
-                      pinning is discoverable, so it stays in both. */}
                   <p className="text-xs text-muted-foreground">
-                    {settings?.allowHidingShortcutOverlay
-                      ? "Carries recording health, live meeting state and meeting alerts. Drag it to pin it to any corner or edge."
-                      : "Always on screen. It carries recording health, live meeting state and meeting alerts. Drag it to pin it to any corner or edge."}
+                    Show the floating shortcut bar. Recording problems can still surface temporarily.
                   </p>
                 </div>
               </div>
-              {settings?.allowHidingShortcutOverlay && (
-                <Switch
-                  id="shortcut-overlay"
-                  checked={settings?.showShortcutOverlay ?? true}
-                  onCheckedChange={async (checked) => {
-                    handleSettingsChange({ showShortcutOverlay: checked });
-                    try {
-                      if (checked) {
-                        await commands.showShortcutReminder(settings.showScreenpipeShortcut);
-                      } else {
-                        await commands.hideShortcutReminder();
-                      }
-                    } catch (e) {}
-                  }}
-                />
-              )}
+              <Switch
+                id="shortcut-overlay"
+                checked={settings?.showShortcutOverlay ?? true}
+                onCheckedChange={async (checked) => {
+                  await updateSettings({
+                    showShortcutOverlay: checked,
+                    shortcutOverlaySnoozedUntil: null,
+                  });
+                  try {
+                    if (checked) {
+                      await commands.showShortcutReminder(settings.showScreenpipeShortcut);
+                    } else {
+                      await commands.hideShortcutReminder();
+                    }
+                  } catch (error) {
+                    console.warn("failed to update shortcut reminder visibility", error);
+                  }
+                }}
+              />
             </div>
           </CardContent>
         </Card>

@@ -78,6 +78,14 @@ export type AcpAgentPresetConfig = {
 	args?: string[];
 	/** Empty values mean "inherit this variable from the app environment". */
 	env?: Record<string, string>;
+	/** Session option defaults advertised by the selected adapter. */
+	config?: Record<string, string>;
+	/** Session mode default advertised by the selected adapter. */
+	modeId?: string | null;
+	/** Screenpipe-owned ACP permission response policy. */
+	approvalMode?: "ask" | "allow-all" | null;
+	/** True when this ACP agent's model calls use Screenpipe Cloud allowance. */
+	useScreenpipeCloud?: boolean | null;
 };
 
 export type EmbeddedLLMConfig = {
@@ -131,13 +139,15 @@ export type AIPreset = {
 	  }
 );
 
-export type UpdateChannel = "stable" | "beta";
+export type UpdateChannel = "stable" | "pre-release";
 
 // Chat history types
 export interface ChatMessage {
 	id: string;
 	role: "user" | "assistant";
 	content: string;
+	/** Local history source for messages copied from another agent client. */
+	importedFrom?: "claude-code" | "codex";
 	intent?: "steer";
 	turnIntentId?: string;
 	timestamp: number;
@@ -185,6 +195,9 @@ export interface ChatMessage {
  *                    rather than "Recents". */
 export type ConversationKind = "chat" | "pipe-watch" | "pipe-run";
 
+/** The client surface that hosted an imported agent conversation. */
+export type AgentHarness = "terminal" | "cursor" | "github-copilot" | "screenpipe";
+
 /** Pipe-specific context attached to `pipe-watch` / `pipe-run`
  *  conversations. Drives the in-panel banner and the sidebar
  *  grouping. */
@@ -200,6 +213,14 @@ export interface ChatConversation {
 	messages: ChatMessage[];
 	createdAt: number;
 	updatedAt: number;
+	/** Provenance for an explicitly imported local agent conversation. */
+	importedFrom?: {
+		source: "claude-code" | "codex";
+		sourceId: string;
+		importedAt: number;
+		/** Optional when the transcript exposes which client hosted the run. */
+		harness?: AgentHarness;
+	};
 	/** User pinned this conversation in the chat sidebar — keeps it at the top.
 	 *  Persists across app restarts via the on-disk conversation file. */
 	pinned?: boolean;
@@ -231,6 +252,12 @@ export interface ChatConversation {
 	 *  "branch in new chat". Exempts the branch from first-user-message
 	 *  dedup — it deliberately shares its parent's opening message. */
 	branchedFrom?: string;
+	/** Monotonic write counter, bumped by `saveConversationFile` on every
+	 *  persist. Drives compare-and-swap: a writer whose `rev` is behind the
+	 *  on-disk copy lost a race, so its save merges instead of overwriting.
+	 *  Absent on files written before CAS landed — treated as 0, which makes
+	 *  legacy writers merge rather than clobber. */
+	rev?: number;
 	/** Last URL the agent navigated the embedded browser sidebar to.
 	 *  Drives the right-side `<BrowserSidebar />` panel: when the user
 	 *  re-opens this conversation the panel restores to this URL.
@@ -266,6 +293,14 @@ export interface ChatHistoryStore {
 
 // Extend SettingsStore with fields added before Rust types are regenerated
 export type Settings = SettingsStore & {
+	/** Enable automatic Activities generation. Default false. */
+	activitiesEnabled?: boolean;
+	/** Native Activity generation cadence in minutes. Default 15. */
+	activitiesIntervalMinutes?: number;
+	/** AI preset used by native Activity generation. */
+	activitiesAiPresetId?: string;
+	/** Next native Activity generation run as an ISO timestamp. */
+	activitiesNextRunAt?: string;
 	/** Goal used to prioritize the Home cards. Persisted in store.bin. */
 	userGoalCategory?: UserGoalCategory;
 	/** Where the user says they found screenpipe, answered once during setup.
@@ -360,8 +395,9 @@ export type Settings = SettingsStore & {
 	powerMode?: "auto" | "performance" | "battery_saver";
 	/** Show restart notifications when audio/vision capture stalls (default: false for now) */
 	showRestartNotifications?: boolean;
-	/** Hide screenpipe windows from screenshots and screen-sharing viewers while
-	 * keeping them visible locally. Defaults on. */
+	/** Hide only overlay windows from screen recordings and sharing. Default false. */
+	hideOverlayInScreenRecording?: boolean;
+	/** @deprecated Retained for settings compatibility. */
 	hideAppInScreenShare?: boolean;
 	/** Pause all screen capture when a DRM-protected streaming app (Netflix, Disney+, etc.) or a remote-desktop client (Omnissa/VMware Horizon) is focused — they blank their windows during screen recording */
 	pauseOnDrmContent?: boolean;
@@ -449,6 +485,9 @@ export type Settings = SettingsStore & {
 		captureStalls: boolean;
 		appUpdates: boolean;
 		pipeNotifications: boolean;
+		/** In-app /notify before background scheduled tasks burn most of hosted-AI allowance.
+		 *  Default true; still gated by master notifications and pipe notifications. */
+		pipeAllowanceWarnings?: boolean;
 		/** Toast when a monitor is plugged, unplugged, or switched (clamshell, dock). Default true. */
 		displayChanges?: boolean;
 		/** Live-note prompt when a meeting is detected. Default true. */
@@ -670,6 +709,8 @@ const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 };
 
 let DEFAULT_SETTINGS: Settings = {
+			activitiesEnabled: false,
+			activitiesIntervalMinutes: 15,
 			aiPresets: makeDefaultPresets(false) as any,
 			userGoalCategory: DEFAULT_USER_GOAL_CATEGORY,
 			deviceId: crypto.randomUUID(),
@@ -770,6 +811,7 @@ let DEFAULT_SETTINGS: Settings = {
 			},
 			overlayMode: "fullscreen",
 			showOverlayInScreenRecording: false,
+			hideOverlayInScreenRecording: false,
 			hideAppInScreenShare: true,
 			disableTimeline: false,
 			firstRunGuideDone: false,
@@ -783,6 +825,7 @@ let DEFAULT_SETTINGS: Settings = {
 			enableSidebarCustomization: false,
 			allowHidingShortcutOverlay: false,
 			showShortcutOverlay: true,
+			shortcutOverlaySnoozedUntil: null,
 			sidebarNavLayout: { ...DEFAULT_SIDEBAR_NAV_LAYOUT },
 			ignoreIncognitoWindows: true,
 			enhancedIncognitoDetection: false,

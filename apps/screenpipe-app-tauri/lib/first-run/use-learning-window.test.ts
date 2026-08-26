@@ -12,7 +12,7 @@ const { capture, getOnboardingStatus, listen, emitted } = vi.hoisted(() => {
   return {
     capture: vi.fn(),
     getOnboardingStatus: vi.fn(),
-    // Captures the reset handler so a test can fire the cross-webview
+    // Captures the reset handler so a test can fire the mounted-state
     // broadcast without a real Tauri runtime.
     // Name-aware on purpose. A mock that collects every handler regardless of
     // event name makes the reset test pass even when the hook listens for the
@@ -49,6 +49,7 @@ import {
   LEARNING_WINDOW_CEILING_MS,
   LEARNING_WINDOW_GRACE_MS,
   MIN_LEARNING_MS,
+  beginLearningWindow,
   markLearningDone,
   readLearningWindow,
   resetLearningWindow,
@@ -104,6 +105,7 @@ describe("useLearningWindow opening", () => {
 
     await waitFor(() => expect(result.current.phase).toBe("learning"));
     expect(result.current.startedAt).toBe(completedAt);
+    expect(result.current.showProgress).toBe(true);
     expect(startedEvents()).toHaveLength(1);
     expect(startedEvents()[0][1]).toEqual({ opening: "immediate" });
   });
@@ -111,7 +113,7 @@ describe("useLearningWindow opening", () => {
   it("still opens for someone who closed the app and came back hours later", async () => {
     // The regression. Previously anything past the 5 minute ceiling returned
     // early, so finishing setup and closing the app meant the first summary
-    // never happened — no banner, no empty state, no event, permanently.
+    // never happened — no summary and no event, permanently.
     getOnboardingStatus.mockResolvedValue(
       okStatus(completedAgo(3 * 60 * 60 * 1_000)),
     );
@@ -119,6 +121,7 @@ describe("useLearningWindow opening", () => {
     const { result } = renderHook(() => useLearningWindow());
 
     await waitFor(() => expect(result.current.phase).toBe("learning"));
+    expect(result.current.showProgress).toBe(false);
     expect(startedEvents()[0][1]).toEqual({ opening: "late" });
   });
 
@@ -132,6 +135,7 @@ describe("useLearningWindow opening", () => {
 
     await waitFor(() => expect(result.current.phase).toBe("learning"));
     expect(result.current.startedAt).not.toBe(completedAt);
+    expect(result.current.showProgress).toBe(false);
     const anchoredMs = Date.parse(result.current.startedAt!);
     expect(Date.now() - anchoredMs).toBeLessThan(LEARNING_WINDOW_CEILING_MS);
   });
@@ -167,6 +171,20 @@ describe("useLearningWindow opening", () => {
     await waitFor(() => expect(getOnboardingStatus).toHaveBeenCalled());
     expect(result.current.phase).toBe("idle");
     expect(startedEvents()).toHaveLength(0);
+  });
+
+  it("starts a fresh window after setup is completed again with stale webview state", async () => {
+    beginLearningWindow(completedAgo(10 * 60_000));
+    markLearningDone();
+    const completedAt = completedAgo(30_000);
+    getOnboardingStatus.mockResolvedValue(okStatus(completedAt));
+
+    const { result } = renderHook(() => useLearningWindow());
+
+    await waitFor(() => expect(result.current.phase).toBe("learning"));
+    expect(result.current.startedAt).toBe(completedAt);
+    expect(result.current.showProgress).toBe(true);
+    expect(startedEvents()).toHaveLength(1);
   });
 });
 
@@ -272,13 +290,10 @@ describe("useLearningWindow writing phase", () => {
   });
 });
 
-describe("useLearningWindow cross-webview reset", () => {
-  // The reported bug. `resetLearningWindow` in Settings clears only the `home`
-  // partition, but the banner also renders in the separate `chat` webview.
-  // That copy kept a terminal phase and a spent seed claim, and the opening
-  // effect returns immediately unless the phase is `idle` — so resetting
-  // onboarding never brought the banner back in that window.
-  it("returns a settled window to idle when another webview resets", async () => {
+describe("useLearningWindow reset", () => {
+  // Settings and the first-summary owner share Home's storage partition. The
+  // event is still required to move the already-mounted hook back to idle.
+  it("returns a settled mounted window to idle when onboarding resets", async () => {
     getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(30_000)));
 
     const { result } = renderHook(() => useLearningWindow());
@@ -297,7 +312,7 @@ describe("useLearningWindow cross-webview reset", () => {
     // reopens on the spot and the test is asserting the wrong thing.
     getOnboardingStatus.mockResolvedValue(okStatus(null));
 
-    // The broadcast a reset in another webview would deliver here.
+    // The broadcast the Settings action delivers to the mounted Home hook.
     act(() => {
       for (const handler of emitted) handler({ payload: null });
     });
@@ -308,8 +323,8 @@ describe("useLearningWindow cross-webview reset", () => {
   });
 });
 
-describe("useLearningWindow reports a window that expired unmounted", () => {
-  const seedExpiredLearning = () => {
+describe("useLearningWindow recovers a window that expired unmounted", () => {
+  const seedExpiredLearning = (lateRetryUsed = false) => {
     window.localStorage.setItem(
       "screenpipe.first-run.learning-window.v1",
       JSON.stringify({
@@ -320,6 +335,7 @@ describe("useLearningWindow reports a window that expired unmounted", () => {
         seededAt: null,
         chatId: null,
         emptyReason: null,
+        lateRetryUsed,
       }),
     );
   };
@@ -327,37 +343,27 @@ describe("useLearningWindow reports a window that expired unmounted", () => {
   const emptyEvents = () =>
     capture.mock.calls.filter(([name]) => name === "first_run_learning_empty");
 
-  it("emits first_run_learning_empty on mount, tagged as a rehydrate settle", async () => {
-    // Before this, a window that expired while the banner was unmounted — the
-    // common case, because sending one chat message used to unmount it —
-    // produced no event at all.
+  it("starts one quiet recovery window instead of permanently settling", async () => {
     seedExpiredLearning();
     getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
 
-    renderHook(() => useLearningWindow());
+    const { result } = renderHook(() => useLearningWindow());
 
+    await waitFor(() => expect(result.current.phase).toBe("learning"));
+    expect(result.current.showProgress).toBe(false);
+    expect(result.current.lateRetryUsed).toBe(true);
+    expect(emptyEvents()).toHaveLength(0);
+    expect(startedEvents().at(-1)?.[1]).toEqual({ opening: "recovery" });
+  });
+
+  it("settles after the one recovery has also expired", async () => {
+    seedExpiredLearning(true);
+    getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
+
+    renderHook(() => useLearningWindow());
     await waitFor(() => expect(emptyEvents()).toHaveLength(1));
     const [, props] = emptyEvents()[0] as [string, Record<string, unknown>];
     expect(props.settled_by).toBe("rehydrate");
-    // A real engine-derived reason, same as the ceiling effect produces. The
-    // rehydrated window must not report a second-class reason.
-    expect(props.reason).not.toBe("");
-    expect(typeof props.data_status).toBe("string");
-  });
-
-  it("reports once, not once per mount", async () => {
-    seedExpiredLearning();
-    getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
-
-    const first = renderHook(() => useLearningWindow());
-    await waitFor(() => expect(emptyEvents()).toHaveLength(1));
-    first.unmount();
-
-    renderHook(() => useLearningWindow());
-    // Remounting must not double-count: the flag is cleared durably, not in
-    // component state.
-    await waitFor(() => expect(readLearningWindow().pendingEmptyReport).toBe(false));
-    expect(emptyEvents()).toHaveLength(1);
   });
 
   it("stays quiet for a window that never expired", async () => {

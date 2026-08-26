@@ -13,8 +13,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
@@ -311,6 +309,26 @@ function normalizePipe(raw: any): any {
   };
 }
 
+function getPipeStoreList(data: unknown): any[] {
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== "object") {
+    throw new Error("invalid pipe store response");
+  }
+
+  const payload = data as { data?: unknown; pipes?: unknown; error?: unknown };
+  if (payload.error) {
+    throw new Error(
+      typeof payload.error === "string" ? payload.error : "pipe store request failed"
+    );
+  }
+
+  const list = payload.data ?? payload.pipes;
+  if (!Array.isArray(list)) {
+    throw new Error("invalid pipe store response");
+  }
+  return list;
+}
+
 export function PipeStoreView() {
   // Track installed pipe count to auto-switch to Discover for new users
   const [installedCount, setInstalledCount] = useState<number | null>(null);
@@ -361,7 +379,7 @@ export function PipeStoreView() {
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         {activeTab === "discover"
-          ? "browse, install, and review community scheduled tasks"
+          ? "browse, install, and review community automations"
           : "Run tasks on a schedule, after meetings, or when events happen."}
       </p>
 
@@ -410,6 +428,7 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
   // Browse state
   const [pipes, setPipes] = useState<StorePipe[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
 
@@ -447,7 +466,6 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
   // Install state
   const [installing, setInstalling] = useState<string | null>(null);
   const [pendingInstall, setPendingInstall] = useState<StorePipe | PipeDetail | null>(null);
-  const [installRiskAcknowledged, setInstallRiskAcknowledged] = useState(false);
 
   // Review state
   const [reviewExpanded, setReviewExpanded] = useState(false);
@@ -540,6 +558,7 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
     if (debouncedQuery) params.set("q", debouncedQuery);
     if (sort) params.set("sort", sort);
     const cacheKey = `pipes/store?${params}`;
+    setLoadError(false);
 
     // Show cached data immediately if available
     const cached = apiCache.getStale<any[]>(cacheKey);
@@ -555,21 +574,22 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
     }
 
     // Fetch fresh data in background (10s timeout to avoid infinite skeletons)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10_000);
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10_000);
       const res = await localFetch(`/pipes/store?${params}`, { signal: controller.signal });
-      clearTimeout(timeoutId);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const list = data.data || data.pipes || (Array.isArray(data) ? data : []);
+      const list = getPipeStoreList(data);
       const normalized = list.map(normalizePipe);
       apiCache.set(cacheKey, normalized, 5 * 60_000); // 5 min TTL
       setPipes(normalized);
     } catch (err) {
       console.error("failed to fetch pipe store:", err);
+      setLoadError(true);
       if (!cached) setPipes([]);
     } finally {
+      clearTimeout(timeoutId);
       setLoading(false);
     }
   }, [debouncedQuery, sort]);
@@ -631,7 +651,6 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
       return;
     }
     setPendingInstall(pipe);
-    setInstallRiskAcknowledged(false);
   };
 
   // Update an already-installed store pipe in place. Unlike install, this
@@ -670,13 +689,10 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
 
   const closeInstallGate = () => {
     setPendingInstall(null);
-    setInstallRiskAcknowledged(false);
   };
 
   const confirmPendingInstall = () => {
     if (!pendingInstall) return;
-    const risk = getPipeInstallRisk(pendingInstall);
-    if (risk === "high" && !installRiskAcknowledged) return;
     const slug = pendingInstall.slug;
     closeInstallGate();
     void handleInstall(slug);
@@ -845,9 +861,6 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
             authorVerified={pendingInstall.author_verified}
             permissions={pendingInstall.permissions}
             onReviewSource={reviewPendingInstallSource}
-            acknowledgeId="pipe-risk-ack"
-            acknowledged={installRiskAcknowledged}
-            onAcknowledgedChange={setInstallRiskAcknowledged}
           />
         ) : null}
 
@@ -859,8 +872,7 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
             data-testid="pipe-risk-install-confirm"
             disabled={
               !pendingInstall ||
-              installing === pendingInstall.slug ||
-              (getPipeInstallRisk(pendingInstall) === "high" && !installRiskAcknowledged)
+              installing === pendingInstall.slug
             }
             onClick={confirmPendingInstall}
             >
@@ -1012,6 +1024,25 @@ function DiscoverView({ onInstalled }: { onInstalled?: () => void }) {
             </Card>
           ))}
         </div>
+      ) : loadError && pipes.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center text-muted-foreground">
+            <AlertTriangle className="mx-auto mb-3 h-5 w-5" />
+            <p className="text-sm text-foreground">couldn&apos;t load scheduled tasks</p>
+            <p className="mt-1.5 text-xs">the task catalog is temporarily unavailable</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-4"
+              onClick={() => {
+                apiCache.invalidatePrefix("pipes/store");
+                void fetchPipes();
+              }}
+            >
+              TRY AGAIN
+            </Button>
+          </CardContent>
+        </Card>
       ) : pipes.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
@@ -1604,18 +1635,12 @@ export function InstallRiskSummary({
   authorVerified,
   permissions,
   onReviewSource,
-  acknowledgeId,
-  acknowledged,
-  onAcknowledgedChange,
 }: {
   title: string;
   author?: string;
   authorVerified: boolean;
   permissions?: PipePermissions;
   onReviewSource?: () => void;
-  acknowledgeId?: string;
-  acknowledged?: boolean;
-  onAcknowledgedChange?: (checked: boolean) => void;
 }) {
   const risk = getPipeInstallRisk({
     permissions,
@@ -1661,20 +1686,6 @@ export function InstallRiskSummary({
             ))}
           </div>
         )}
-
-        {risk === "high" && acknowledgeId && onAcknowledgedChange ? (
-          <div className="flex items-start gap-2 pt-3 border-t border-border">
-            <Checkbox
-              id={acknowledgeId}
-              data-testid="pipe-risk-ack"
-              checked={acknowledged === true}
-              onCheckedChange={(value) => onAcknowledgedChange(value === true)}
-            />
-            <Label htmlFor={acknowledgeId} className="text-xs leading-relaxed">
-              I understand this scheduled task can access all my data.
-            </Label>
-          </div>
-        ) : null}
       </div>
     </div>
   );

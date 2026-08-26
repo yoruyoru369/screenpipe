@@ -8,9 +8,9 @@
 //! Borrows shared `Arc`s from `ServerCore` (DB, AudioManager, etc.)
 //! without taking ownership — the server stays alive across capture cycles.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use std::path::PathBuf;
 
 use screenpipe_audio::audio_manager::builder::AudioManagerOptions;
 use screenpipe_audio::core::device::resolve_audio_devices_for_capture;
@@ -87,9 +87,9 @@ impl CaptureSession {
         // On macOS 15+ SCShareableContent::current() (called by list_monitors inside
         // VisionManager::start) shows Apple's native TCC padlock dialog if the app has
         // not been granted Screen Recording access yet — even before onboarding runs.
-        // check_screen_recording_tauri() skips capture_probe on macOS 15+ (avoids the
-        // native TCC dialog CGWindowListCreateImage triggers). Skip vision entirely when not granted;
-        // spawn_screenpipe is called again from onboarding after the user grants access.
+        // The app-level check compares SkyLight's cached preflight with a direct
+        // TCC preflight. Skip vision unless both say this process may capture;
+        // spawn_screenpipe is called again after the user grants access.
         //
         // This gate deliberately does NOT consult
         // `permission_monitor::screen_enumeration_denied()`, unlike the UI-facing
@@ -102,7 +102,7 @@ impl CaptureSession {
         // and lifts the verdict, or re-confirms the loss within ~15s.
         #[cfg(target_os = "macos")]
         let screen_recording_permitted =
-            screenpipe_core::permissions::check_screen_recording_tauri().is_granted();
+            crate::permissions::screen_recording_permission_usable_in_process();
         #[cfg(not(target_os = "macos"))]
         let screen_recording_permitted = true;
 
@@ -155,14 +155,34 @@ impl CaptureSession {
                 None
             };
 
-            // A failed initial start() (e.g. 0 monitors while screen is locked at boot)
-            // is recoverable — the monitor watcher below retries on unlock/topology change.
-            // Don't propagate the error; keep the session alive so the watcher can run.
-            match vision_manager.start().await {
-                Ok(()) => info!("VisionManager started successfully"),
-                Err(e) => {
-                    warn!("VisionManager initial start failed ({e}); monitor watcher will retry");
-                    crate::health::set_recording_status(crate::health::RecordingStatus::Starting);
+            // Do not initialize ScreenCaptureKit while the login session is
+            // locked. A replacement process can launch while the lid is shut
+            // (for example after an auto-update); asking SCShareableContent for
+            // displays then can leave that process returning an empty display
+            // list even after the authoritative unlock notification arrives.
+            // The monitor watcher below waits on that notification and performs
+            // the first SCK call only after the session is unlocked.
+            #[cfg(target_os = "macos")]
+            let defer_vision_start = screenpipe_engine::sleep_monitor::screen_is_locked();
+            #[cfg(not(target_os = "macos"))]
+            let defer_vision_start = false;
+
+            if defer_vision_start {
+                info!("Screen locked at capture startup — deferring VisionManager until unlock");
+                crate::health::set_recording_status(crate::health::RecordingStatus::Starting);
+            } else {
+                // Other initial failures remain recoverable through the monitor
+                // watcher; keep the session alive so it can reconcile them.
+                match vision_manager.start().await {
+                    Ok(()) => info!("VisionManager started successfully"),
+                    Err(e) => {
+                        warn!(
+                            "VisionManager initial start failed ({e}); monitor watcher will retry"
+                        );
+                        crate::health::set_recording_status(
+                            crate::health::RecordingStatus::Starting,
+                        );
+                    }
                 }
             }
 

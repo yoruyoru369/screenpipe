@@ -12,7 +12,24 @@ import {
   MEETING_SHELL_CLASS,
   MeetingSummarySurface,
   MeetingWorkspaceTabs,
+  preferredMeetingWorkspaceTab,
 } from "./meeting-workspace";
+
+describe("preferred meeting workspace tab", () => {
+  it("opens a completed meeting on its saved outcome", () => {
+    expect(
+      preferredMeetingWorkspaceTab(
+        "## Notes\nPrivate context.\n\n## Summary\nDecision and next step.",
+      ),
+    ).toBe("summary");
+  });
+
+  it("keeps notes primary until a real summary exists", () => {
+    expect(preferredMeetingWorkspaceTab(null)).toBe("notes");
+    expect(preferredMeetingWorkspaceTab("## Summary\n\n")).toBe("notes");
+    expect(preferredMeetingWorkspaceTab("working note")).toBe("notes");
+  });
+});
 
 describe("meeting shell width contract", () => {
   // The header (title, chips, tabs) used to sit in max-w-5xl while the note
@@ -46,7 +63,9 @@ describe("secondary control treatment", () => {
   it("still resolves to full contrast on pointer and keyboard intent", () => {
     expect(MEETING_QUIET_CONTROL_CLASS).toMatch(/\btext-muted-foreground\b/);
     expect(MEETING_QUIET_CONTROL_CLASS).toMatch(/hover:text-foreground/);
-    expect(MEETING_QUIET_CONTROL_CLASS).toMatch(/focus-visible:text-foreground/);
+    expect(MEETING_QUIET_CONTROL_CLASS).toMatch(
+      /focus-visible:text-foreground/,
+    );
   });
 
   it("keeps the app's square geometry", () => {
@@ -197,9 +216,13 @@ describe("meeting summary surface", () => {
     expect(screen.getByTestId("meeting-summary-reading-column")).toHaveClass(
       "select-text",
     );
-    // The shell, not the reading column, bounds the selectable width now.
-    // Selection must still have a width-limited container to paint inside so
-    // it never renders as a full-window horizontal band.
+    const summaryProse = screen
+      .getByTestId("meeting-summary-reading-column")
+      .querySelector(".prose");
+    expect(summaryProse).toHaveClass("flex", "flex-col", "items-start");
+    // The shell bounds the overall reading width while the flex prose root
+    // shrink-wraps each text block. Both are required to keep selection paint
+    // from becoming a full-window horizontal band.
     expect(
       screen
         .getByTestId("meeting-summary-reading-column")
@@ -282,10 +305,32 @@ describe("meeting summary surface", () => {
     );
 
     expect(screen.getByText("Existing decision.")).toBeVisible();
-    expect(screen.getByRole("status")).toHaveTextContent("refreshing summary");
+    expect(screen.getByRole("status")).toHaveTextContent("writing summary");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "writing an updated summary",
+    );
   });
 
-  it("replaces the skeleton with the real summary as it streams", () => {
+  it("uses one calm placeholder before the first real section arrives", () => {
+    render(
+      <MeetingSummarySurface
+        note="notes only"
+        state="working"
+        detail="you can leave while this is written"
+        onGenerate={vi.fn()}
+        canGenerate
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("writing summary");
+    expect(screen.getByText("Draft will appear here")).toBeVisible();
+    expect(
+      screen.getByTestId("meeting-summary-writing-placeholder"),
+    ).toHaveClass("min-h-64");
+    expect(document.querySelectorAll(".animate-pulse")).toHaveLength(0);
+  });
+
+  it("replaces the placeholder with the real summary as it streams", () => {
     render(
       <MeetingSummarySurface
         note={"## Summary\nEarlier summary."}
@@ -307,5 +352,101 @@ describe("meeting summary surface", () => {
     expect(screen.queryByText("Earlier summary.")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("writing summary");
     expect(screen.getByTestId("meeting-summary-stream-cursor")).toBeVisible();
+  });
+
+  it("turns a terminal usage limit into explicit upgrade and model recovery", async () => {
+    const onGenerate = vi.fn();
+    const onUpgrade = vi.fn();
+    const onSelectModel = vi.fn();
+    const onManage = vi.fn();
+    render(
+      <MeetingSummarySurface
+        note="notes only"
+        state="attention"
+        detail="summary needs attention"
+        onGenerate={onGenerate}
+        canGenerate
+        recovery={{
+          title: "AI usage limit reached",
+          detail:
+            "The configured summary model has no usage left. Choose another model or upgrade.",
+          retryable: false,
+          upgrade: {
+            label: "upgrade to business",
+            onSelect: onUpgrade,
+          },
+          model: {
+            selectedId: "cloud",
+            selectedLabel: "screenpipe cloud · frontier",
+            saving: false,
+            options: [
+              {
+                id: "local",
+                label: "local",
+                detail: "ollama · llama 3.2",
+                onSelect: onSelectModel,
+              },
+            ],
+            onManage,
+          },
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("AI usage limit reached");
+    expect(alert).toHaveTextContent("configured summary model");
+    expect(
+      screen.getByText("Generation stopped before a summary was written."),
+    ).toBeVisible();
+    expect(screen.getAllByText(/configured summary model/i)).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "retry" })).toBeNull();
+    expect(screen.queryByText("no summary yet")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "upgrade to business" }),
+    );
+    expect(onUpgrade).toHaveBeenCalledOnce();
+
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: /change summary model/i }),
+      { key: "Enter" },
+    );
+    const localModel = (await screen.findByText("local")).closest(
+      '[role="menuitem"]',
+    );
+    expect(localModel).not.toBeNull();
+    fireEvent.click(localModel!);
+    expect(onSelectModel).toHaveBeenCalledOnce();
+
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: /change summary model/i }),
+      { key: "Enter" },
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "manage models & keys" }),
+    );
+    expect(onManage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps retry available for a temporary rate limit", () => {
+    const onGenerate = vi.fn();
+    render(
+      <MeetingSummarySurface
+        note="notes only"
+        state="attention"
+        detail="summary needs attention"
+        onGenerate={onGenerate}
+        canGenerate
+        recovery={{
+          title: "AI is temporarily rate-limited",
+          detail: "Retry in a moment.",
+          retryable: true,
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "retry" }));
+    expect(onGenerate).toHaveBeenCalledOnce();
   });
 });

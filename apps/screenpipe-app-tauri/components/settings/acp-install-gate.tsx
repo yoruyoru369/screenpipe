@@ -8,6 +8,7 @@ import { Download, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { commands, type AcpAgentInstallStatus } from "@/lib/utils/tauri";
 import { Button } from "@/components/ui/button";
+import { AcpSetupProgress } from "@/components/settings/acp-setup-progress";
 import { cn } from "@/lib/utils";
 
 /**
@@ -23,6 +24,7 @@ export function AcpInstallGate({
   agentName,
   onBlockedChange,
   onSwitchToDefault,
+  onInstalled,
   compact = false,
 }: {
   agentId: string;
@@ -32,6 +34,8 @@ export function AcpInstallGate({
    *  mid-chat (a running chat whose agent CLI is missing); the preset editor
    *  omits it — there you just pick a different agent. */
   onSwitchToDefault?: () => void;
+  /** Keeps the completed Install step visible when the preset probe takes over. */
+  onInstalled?: () => void;
   compact?: boolean;
 }) {
   const [status, setStatus] = useState<AcpAgentInstallStatus | null>(null);
@@ -39,6 +43,8 @@ export function AcpInstallGate({
   // Hold the retry spinner for a visible beat: the re-check is instant, so
   // without this it would flash and retry would feel dead.
   const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
   const checkTimerRef = useRef<number | null>(null);
   // Set when a retry finds the CLI still missing, so the card can say so
   // instead of looking unchanged. Mirrors the sign-in dialog's error line.
@@ -63,7 +69,33 @@ export function AcpInstallGate({
   useEffect(() => {
     wasRetryRef.current = false;
     setRetryFailed(false);
+    setInstallError(null);
   }, [agentId]);
+
+  const applyStatus = (result: AcpAgentInstallStatus) => {
+    setStatus(result);
+    onBlockedChange(result.requiresInstall && !result.installed);
+  };
+
+  const beginInstall = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      const result = await commands.piAcpAgentInstall(agentId);
+      if (result.status === "error") throw new Error(result.error);
+      applyStatus(result.data);
+      if (result.data.installed) onInstalled?.();
+      if (result.data.requiresInstall && !result.data.installed) {
+        setInstallError(
+          `the installer finished, but ${result.data.command ?? "the command"} is still unavailable.`,
+        );
+      }
+    } catch (error) {
+      setInstallError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -71,8 +103,7 @@ export function AcpInstallGate({
       try {
         const result = await commands.piAcpAgentInstallStatus(agentId);
         if (cancelled) return;
-        setStatus(result);
-        onBlockedChange(result.requiresInstall && !result.installed);
+        applyStatus(result);
         // Retry ran but the CLI still isn't there: flag it for the card.
         if (wasRetryRef.current && result.requiresInstall && !result.installed) {
           setRetryFailed(true);
@@ -95,8 +126,21 @@ export function AcpInstallGate({
   const blocked = Boolean(status && status.requiresInstall && !status.installed);
   if (!blocked) return null;
 
+  if (installing) {
+    return (
+      <AcpSetupProgress
+        agentName={agentName}
+        phase="installing"
+        includesInstall
+        installKind="install"
+        compact={compact}
+      />
+    );
+  }
+
   const command = status?.command;
   const url = status?.installUrl;
+  const canInstallAutomatically = status?.canInstallAutomatically;
 
   return (
     <div
@@ -108,7 +152,12 @@ export function AcpInstallGate({
         <div className="space-y-1">
           <p className={cn("font-medium", compact ? "text-xs" : "text-sm")}>Install {agentName}</p>
           <p className={cn("text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>
-            {command ? (
+            {canInstallAutomatically ? (
+              <>
+                Screenpipe installs the official{" "}
+                <code className="rounded bg-muted px-1">{command}</code> command in the background.
+              </>
+            ) : command ? (
               <>
                 Install the <code className="rounded bg-muted px-1">{command}</code> command, then retry.
               </>
@@ -133,17 +182,54 @@ export function AcpInstallGate({
           still not installed. finish the install, then retry.
         </div>
       )}
+      {installError && (
+        <div
+          role="alert"
+          data-testid="acp-install-gate-error"
+          className={cn(
+            "border-l-2 border-destructive bg-destructive/10 px-3 py-2 leading-5 text-destructive",
+            compact ? "text-[11px]" : "text-xs",
+          )}
+        >
+          {installError}
+        </div>
+      )}
       <div className="flex flex-wrap gap-2">
-        {url && (
+        {canInstallAutomatically && (
           <Button
             type="button"
             size="sm"
-            onClick={() => void openUrl(url).catch(() => window.open(url, "_blank"))}
+            disabled={installing}
+            onClick={() => void beginInstall()}
           >
-            <ExternalLink className="mr-1.5 h-3.5 w-3.5" /> install {agentName}
+            {installing ? (
+              <>
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> installing…
+              </>
+            ) : (
+              <>
+                <Download className="mr-1.5 h-3.5 w-3.5" /> install {agentName}
+              </>
+            )}
           </Button>
         )}
-        <Button type="button" size="sm" variant="outline" disabled={checking} onClick={beginRetry}>
+        {url && (!canInstallAutomatically || installError) && (
+          <Button
+            type="button"
+            size="sm"
+            variant={canInstallAutomatically ? "outline" : "default"}
+            onClick={() => void openUrl(url).catch(() => window.open(url, "_blank"))}
+          >
+            <ExternalLink className="mr-1.5 h-3.5 w-3.5" /> open official installer
+          </Button>
+        )}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={checking || installing}
+          onClick={beginRetry}
+        >
           {checking ? (
             <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> checking…</>
           ) : (

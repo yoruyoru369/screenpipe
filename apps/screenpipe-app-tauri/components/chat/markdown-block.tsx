@@ -7,6 +7,7 @@ import React from "react";
 import { emit } from "@tauri-apps/api/event";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
+import type { Options as ReactMarkdownOptions } from "react-markdown";
 import {
   MemoizedReactMarkdown,
   chatUrlTransform,
@@ -17,12 +18,29 @@ import {
 import { createCodeMarkdownComponents } from "@/components/markdown/code-block";
 import { timelineTimestampFromDeepLink } from "@/lib/timeline-deeplink";
 import { jumpToTimelineMoment } from "@/lib/timeline-navigation";
+import { routeNotificationDeeplink } from "@/lib/notifications/actions";
 import { commands } from "@/lib/utils/tauri";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { cn } from "@/lib/utils";
 import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
+import { LinkPreviewAnchor } from "@/components/chat/link-preview-anchor";
 
-interface MarkdownBlockProps {
+export interface MarkdownBlockOptions {
+  /** Extra parsing passes layered onto the main Chat Markdown pipeline. */
+  additionalRemarkPlugins?: ReactMarkdownOptions["remarkPlugins"];
+  /** Extend the main Chat URL allowlist for a bounded embedded surface. */
+  urlTransform?: ReactMarkdownOptions["urlTransform"];
+  /** Return a node for links owned by the embedding surface; undefined falls back to Chat. */
+  renderLink?: (input: {
+    href?: string;
+    children: React.ReactNode;
+  }) => React.ReactNode | undefined;
+  /** Text-only surfaces can retain Chat formatting without rendering media. */
+  suppressImages?: boolean;
+  className?: string;
+}
+
+interface MarkdownBlockProps extends MarkdownBlockOptions {
   text: string;
   isUser: boolean;
   onOpenViewerPath?: (path: string) => void;
@@ -37,6 +55,11 @@ export function MarkdownBlock({
   isUser,
   onOpenViewerPath,
   renderSpecialCodeBlock,
+  additionalRemarkPlugins,
+  urlTransform,
+  renderLink,
+  suppressImages = false,
+  className,
 }: MarkdownBlockProps) {
   const renderText = rewriteLocalMarkdownLinksForChat(
     isUser ? text : sanitizeToolCallXml(text),
@@ -47,9 +70,10 @@ export function MarkdownBlock({
       className={cn(
         "prose prose-sm max-w-full break-words overflow-hidden [word-break:break-word] flex flex-col items-start",
         isUser ? "text-foreground dark:prose-invert" : "dark:prose-invert",
+        className,
       )}
-      remarkPlugins={[remarkGfm]}
-      urlTransform={chatUrlTransform}
+      remarkPlugins={[remarkGfm, ...(additionalRemarkPlugins ?? [])]}
+      urlTransform={urlTransform ?? chatUrlTransform}
       rehypePlugins={[rehypeRaw]}
       components={{
         p({ children }) {
@@ -89,10 +113,14 @@ export function MarkdownBlock({
             </summary>
           );
         },
-        a({ href, children, ...props }) {
+        a({ href, children, node: _node, ...props }) {
+          const embeddedLink = renderLink?.({ href, children });
+          if (embeddedLink !== undefined) return <>{embeddedLink}</>;
+
           if (
             href?.startsWith("screenpipe://timeline") ||
             href?.startsWith("screenpipe://frame") ||
+            href?.startsWith("screenpipe://meeting") ||
             href?.startsWith("screenpipe://view")
           ) {
             const handleScreenpipeLinkClick = async (
@@ -121,6 +149,11 @@ export function MarkdownBlock({
                   return;
                 }
 
+                if (href.startsWith("screenpipe://meeting")) {
+                  await routeNotificationDeeplink(href);
+                  return;
+                }
+
                 const timestamp = timelineTimestampFromDeepLink(href);
                 if (timestamp) {
                   await jumpToTimelineMoment(timestamp);
@@ -142,6 +175,20 @@ export function MarkdownBlock({
             );
           }
 
+          if (href?.startsWith("http://") || href?.startsWith("https://")) {
+            return (
+              <LinkPreviewAnchor
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline underline-offset-2"
+                {...props}
+              >
+                {children}
+              </LinkPreviewAnchor>
+            );
+          }
+
           return (
             <a
               href={href}
@@ -154,6 +201,13 @@ export function MarkdownBlock({
             </a>
           );
         },
+        ...(suppressImages
+          ? {
+              img() {
+                return null;
+              },
+            }
+          : {}),
         // Shared, theme-aware code rendering (block + inline + pre passthrough)
         // so a fenced block looks identical in the chat and the file-preview
         // sidebar, and stays readable in light and dark mode.

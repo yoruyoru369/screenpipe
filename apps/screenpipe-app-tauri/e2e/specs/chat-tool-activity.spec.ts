@@ -121,7 +121,7 @@ describe("Chat tool activity progressive disclosure", function () {
           toolCall: {
             id: "read-skill",
             toolName: "read",
-            args: { path: "/private/workspace/SKILL.md" },
+            args: { path: "/private/workspace/skills/pdf/SKILL.md" },
             result: "private instructions",
             isRunning: false,
             startedAtMs,
@@ -215,7 +215,7 @@ describe("Chat tool activity progressive disclosure", function () {
     const list = await $('[data-testid="tool-activity-list"]');
     await list.waitForExist({ timeout: t(5_000) });
     const listText = await list.getText();
-    expect(listText).toContain("Reviewed instructions");
+    expect(listText).toContain("Loaded PDF skill");
     expect(listText).toContain("Checked available automations");
     expect(listText).toContain("Analyzed information");
     expect(listText).toContain("Checking the work");
@@ -225,6 +225,9 @@ describe("Chat tool activity progressive disclosure", function () {
     expect(body).not.toContain("node -e");
     expect(body).not.toContain(RAW_PYTHON_MARKER);
     expect(body).not.toContain(RAW_JAVASCRIPT_MARKER);
+
+    const skillIcon = await list.$('[data-activity-kind="skill"]');
+    expect(await skillIcon.isDisplayed()).toBe(true);
 
     await browser.pause(500);
     const filepath = await saveScreenshot("chat-tool-activity-running-expanded");
@@ -338,6 +341,56 @@ describe("Chat tool activity progressive disclosure", function () {
 
     await browser.pause(300);
     const filepath = await saveScreenshot("chat-tool-activity-completed");
+    expect(existsSync(filepath)).toBe(true);
+  });
+
+  it("keeps MCP startup health out of the chat transcript", async () => {
+    const startup = (
+      server: string,
+      state: "connecting" | "connected" | "auth" | "error",
+    ) => ({
+      type: "tool",
+      toolCall: {
+        id: `startup-${server}`,
+        toolName: `mcp__${server}__startup`,
+        args: {},
+        isRunning: state === "connecting",
+        isError: state === "auth" || state === "error",
+        result:
+          state === "auth"
+            ? `MCP server \`${server}\` failed to start: Not logged in. Run \`codex mcp login ${server}\`.`
+            : state === "error"
+              ? `MCP server \`${server}\` failed to start: HTTP 404: No workspace here`
+              : undefined,
+      },
+    });
+
+    await seedConversation(randomUUID(), "Configure my fallback order.", {
+      content: "I configured the fallback order.",
+      contentBlocks: [
+        startup("screenpipe", "connected"),
+        startup("linear", "connecting"),
+        startup("notion", "auth"),
+        startup("n8n", "error"),
+        { type: "text", text: "I configured the fallback order." },
+      ],
+    });
+
+    await browser.waitUntil(
+      async () => (await visibleBodyText()).includes("I configured the fallback order."),
+      { timeout: t(5_000), timeoutMsg: "assistant answer never appeared" },
+    );
+
+    expect((await $$('[data-testid="mcp-startup-status"]')).length).toBe(0);
+    expect((await $$('[data-testid="tool-activity-summary"]')).length).toBe(0);
+    const body = await visibleBodyText();
+    expect(body).toContain("I configured the fallback order.");
+    expect(body).not.toContain("MCP connections");
+    expect(body).not.toContain("Sign in required");
+    expect(body).not.toContain("Needs attention");
+    expect(body).not.toContain("No workspace here");
+
+    const filepath = await saveScreenshot("chat-mcp-startup-hidden");
     expect(existsSync(filepath)).toBe(true);
   });
 

@@ -530,6 +530,33 @@ struct HealthCheckResponse {
     schedule_paused: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct OcrUnavailableLatch {
+    unavailable: bool,
+}
+
+impl OcrUnavailableLatch {
+    /// Returns true only on a transition into deterministic OCR unavailability.
+    /// `None` is an older engine with no such reason and resets the latch.
+    fn observe(&mut self, vision_reason: Option<&str>) -> bool {
+        let unavailable = vision_reason == Some("ocr_unavailable");
+        let entered = unavailable && !self.unavailable;
+        self.unavailable = unavailable;
+        entered
+    }
+}
+
+fn ocr_unavailable_notification_payload() -> serde_json::Value {
+    serde_json::json!({
+        "id": "ocr_unavailable",
+        "type": "ocr_unavailable",
+        "title": "screen text capture unavailable",
+        "body": "screenpipe is recording screenshots without searchable text. update or reinstall screenpipe; on Debian/Ubuntu, run `sudo apt install tesseract-ocr`, then restart screenpipe.",
+        "actions": [],
+        "autoDismissMs": 0
+    })
+}
+
 fn audio_capture_status_from_health(
     health_result: &Result<HealthCheckResponse>,
 ) -> Option<AudioCaptureStatus> {
@@ -551,6 +578,10 @@ struct CaptureFailureSignals {
     audio: bool,
     vision: bool,
     persistence: bool,
+    /// ScreenCaptureKit exhausted its process-wide native worker budget.
+    /// Fallback frames may still arrive, but a recorder-only restart cannot
+    /// release workers whose native callbacks remain blocked.
+    vision_process_exhausted: bool,
 }
 
 fn capture_failure_signals(
@@ -594,6 +625,7 @@ fn capture_failure_signals(
         persistence: health.write_queue_degraded
             && (health.write_queue_consecutive_fatal >= WRITE_QUEUE_FAILURE_THRESHOLD
                 || health.write_queue_consecutive_contention >= WRITE_QUEUE_FAILURE_THRESHOLD),
+        vision_process_exhausted: false,
     }
 }
 
@@ -710,6 +742,9 @@ fn overlay_failure_detail(
     if simulated_break {
         return "simulated recording failure";
     }
+    if failures.vision_process_exhausted {
+        return crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL;
+    }
 
     match (failures.audio, failures.vision, failures.persistence) {
         (true, true, false) => "audio and screen capture are not updating",
@@ -739,6 +774,8 @@ pub(crate) fn overlay_failure_subsystem(detail: &str) -> &'static str {
     match detail {
         "audio capture is not updating" => "audio",
         "screen capture is not updating" => "screen",
+        crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL
+        | crate::overlay_health::MANUAL_PERMISSION_RECOVERY_DETAIL => "screen",
         // "audio and screen capture are not updating", "multiple recording
         // errors detected", persistence, engine start/stop, simulated breaks,
         // and anything unrecognized stay generic on purpose.
@@ -764,7 +801,10 @@ fn overlay_tick_decision(
         && !recently_woke
         && (status == RecordingStatus::Error
             || (status == RecordingStatus::Stopped && ever_connected));
-    let confirmed_failure = failures.audio || failures.vision || failures.persistence;
+    let confirmed_failure = failures.audio
+        || failures.vision
+        || failures.persistence
+        || failures.vision_process_exhausted;
     let failure_suppressed = start_in_progress || recently_woke || intentionally_paused;
     let broken = simulated_break || (!failure_suppressed && (engine_down || confirmed_failure));
     let healthy = !intentionally_paused
@@ -1317,6 +1357,7 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
     // the notification setting (which defaults off).
     let mut stall_reported = false;
     let mut vision_progress = VisionProgressTracker::default();
+    let mut ocr_unavailable_latch = OcrUnavailableLatch::default();
     let mut last_audio_notification: Option<Instant> = None;
     let mut last_vision_notification: Option<Instant> = None;
     let mut wake_reset_done = false;
@@ -1343,6 +1384,14 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
 
             let theme = dark_light::detect().unwrap_or(Mode::Dark);
             let health_result = check_health(&app, &client).await;
+
+            if matches!(
+                &health_result,
+                Ok(health) if ocr_unavailable_latch.observe(health.vision_reason.as_deref())
+            ) {
+                warn!("screen text capture unavailable, showing OCR capability notification");
+                let _ = show_ocr_unavailable_notification(&app).await;
+            }
 
             // Track consecutive failures (connection errors) and unhealthy responses separately.
             // Connection errors = server unreachable (crash, restart, port conflict).
@@ -1718,13 +1767,17 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
             let in_restart_grace = last_restart_triggered
                 .map(|t| t.elapsed() < NOTIFICATION_COOLDOWN)
                 .unwrap_or(false);
-            let failure_signals = match &health_result {
+            let mut failure_signals = match &health_result {
                 Ok(health) => capture_failure_signals(health, &mut vision_progress),
                 Err(_) => {
                     vision_progress.observe(None);
                     CaptureFailureSignals::default()
                 }
             };
+            // Native SCK process state is authoritative even when `/health`
+            // is unavailable or a CoreGraphics fallback makes it look green.
+            failure_signals.vision_process_exhausted =
+                screenpipe_screen::screencapturekit_process_exhausted();
             let capture_health_confirmed = match &health_result {
                 Ok(health) => health_confirms_recording(health),
                 Err(_) => false,
@@ -1953,6 +2006,7 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
                     audio: stall_confirmed(consecutive_audio_stall),
                     vision: stall_confirmed(consecutive_vision_stall) || stale_tier.confirmed(),
                     persistence: failure_signals.persistence,
+                    vision_process_exhausted: failure_signals.vision_process_exhausted,
                 },
                 sim_break,
             );
@@ -2048,6 +2102,15 @@ async fn show_capture_stall_notification(app: &tauri::AppHandle, system: &str) -
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+async fn show_ocr_unavailable_notification(app: &tauri::AppHandle) -> Result<()> {
+    crate::commands::show_notification_panel(
+        app.clone(),
+        ocr_unavailable_notification_payload().to_string(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// Checks the health of the sidecar by making a request to its health endpoint.
 /// Returns an error if the sidecar is not running or not responding.
 async fn check_health(
@@ -2092,6 +2155,29 @@ async fn check_health(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ocr_unavailable_alert_emits_on_entry_and_reentry_only() {
+        let mut latch = OcrUnavailableLatch::default();
+        assert!(!latch.observe(None));
+        assert!(!latch.observe(Some("future_reason")));
+        assert!(latch.observe(Some("ocr_unavailable")));
+        assert!(!latch.observe(Some("ocr_unavailable")));
+        assert!(!latch.observe(Some("ok")));
+        assert!(latch.observe(Some("ocr_unavailable")));
+    }
+
+    #[test]
+    fn ocr_unavailable_alert_is_persistent_actionable_and_has_no_restart_action() {
+        let payload = ocr_unavailable_notification_payload();
+        assert_eq!(payload["id"], "ocr_unavailable");
+        assert_eq!(payload["autoDismissMs"], 0);
+        assert_eq!(payload["actions"], serde_json::json!([]));
+        let body = payload["body"].as_str().unwrap();
+        assert!(body.contains("sudo apt install tesseract-ocr"));
+        assert!(body.contains("restart screenpipe"));
+        assert!(!payload.to_string().contains("restart_recording"));
+    }
 
     #[test]
     fn cpu_compat_mode_round_trips_through_snapshot() {
@@ -2177,6 +2263,20 @@ mod tests {
 
     fn healthy_health() -> HealthCheckResponse {
         make_healthy_response().expect("healthy fixture")
+    }
+
+    #[test]
+    fn ocr_unavailable_does_not_enter_capture_restart_signals() {
+        let mut health = healthy_health();
+        health.status = "degraded".to_string();
+        health.frame_status = Some("ok".to_string());
+        health.audio_status = Some("ok".to_string());
+        health.vision_reason = Some("ocr_unavailable".to_string());
+
+        let signals = capture_failure_signals(&health, &mut VisionProgressTracker::default());
+        assert!(!signals.vision);
+        assert!(!signals.audio);
+        assert!(!signals.persistence);
     }
 
     #[test]
@@ -2811,6 +2911,39 @@ mod tests {
         );
     }
 
+    /// Escaped regression: the native SCK breaker hit its hard 32-worker
+    /// ceiling, then CoreGraphics returned a fallback frame and `/health`
+    /// looked green long enough for the overlay to claim recovery. Native
+    /// process state must outrank fresh fallback data.
+    #[test]
+    fn terminal_sck_worker_leak_cannot_be_masked_by_green_health() {
+        let decision = overlay_tick_decision(
+            RecordingStatus::Recording,
+            true,
+            true,
+            true,
+            false,
+            true,
+            false,
+            false,
+            CaptureFailureSignals {
+                vision_process_exhausted: true,
+                ..CaptureFailureSignals::default()
+            },
+            false,
+        );
+
+        assert_eq!(
+            decision,
+            OverlayTickDecision {
+                broken: true,
+                healthy: false,
+                failure_detail: crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL,
+            }
+        );
+        assert_eq!(overlay_failure_subsystem(decision.failure_detail), "screen");
+    }
+
     #[test]
     fn overlay_preserves_real_failure_and_transient_guards() {
         let failures = CaptureFailureSignals {
@@ -2898,6 +3031,15 @@ mod tests {
                 },
                 false,
                 "screen capture is not updating",
+            ),
+            (
+                RecordingStatus::Recording,
+                CaptureFailureSignals {
+                    vision_process_exhausted: true,
+                    ..CaptureFailureSignals::default()
+                },
+                false,
+                crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL,
             ),
             (
                 RecordingStatus::Recording,
@@ -3016,6 +3158,7 @@ mod tests {
                                     audio,
                                     vision,
                                     persistence,
+                                    vision_process_exhausted: false,
                                 },
                                 simulated,
                             );
@@ -3047,7 +3190,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_decision_exhaustively_checks_12288_state_combinations() {
+    fn overlay_decision_exhaustively_checks_24576_state_combinations() {
         let statuses = [
             RecordingStatus::Starting,
             RecordingStatus::Recording,
@@ -3058,11 +3201,11 @@ mod tests {
         ];
         let mut checked = 0usize;
 
-        // Eleven independent booleans x six recording states. This covers
-        // 12,288 combinations of response quality, capture intent, lifecycle
-        // guards, three failure classes, and the QA simulation path.
+        // Twelve independent booleans x six recording states. This covers
+        // 24,576 combinations of response quality, capture intent, lifecycle
+        // guards, four failure classes, and the QA simulation path.
         for status in statuses {
-            for bits in 0u16..(1 << 11) {
+            for bits in 0u16..(1 << 12) {
                 let health_response_received = bits & (1 << 0) != 0;
                 let health_confirmed = bits & (1 << 1) != 0;
                 let capture_intended = bits & (1 << 2) != 0;
@@ -3075,8 +3218,9 @@ mod tests {
                     audio: bits & (1 << 7) != 0,
                     vision: bits & (1 << 8) != 0,
                     persistence: bits & (1 << 9) != 0,
+                    vision_process_exhausted: bits & (1 << 10) != 0,
                 };
-                let simulated_break = bits & (1 << 10) != 0;
+                let simulated_break = bits & (1 << 11) != 0;
 
                 let decision = overlay_tick_decision(
                     status,
@@ -3092,7 +3236,10 @@ mod tests {
                 );
 
                 let failure_suppressed = start_in_progress || recently_woke || intentionally_paused;
-                let confirmed_failure = failures.audio || failures.vision || failures.persistence;
+                let confirmed_failure = failures.audio
+                    || failures.vision
+                    || failures.persistence
+                    || failures.vision_process_exhausted;
                 let engine_down = capture_intended
                     && !start_in_progress
                     && !recently_woke
@@ -3116,7 +3263,7 @@ mod tests {
                     },
                 };
 
-                assert_eq!(decision, expected, "status={status:?}, bits={bits:011b}");
+                assert_eq!(decision, expected, "status={status:?}, bits={bits:012b}");
                 assert!(
                     !(decision.broken && decision.healthy),
                     "failure and recovery must be mutually exclusive"
@@ -3134,7 +3281,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 12_288);
+        assert_eq!(checked, 24_576);
     }
 
     // Helper: call decide_status with thresholds exceeded (no debouncing active)

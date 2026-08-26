@@ -19,16 +19,16 @@ import {
   PanelLeft,
   Pin,
   PinOff,
+  Power,
   RotateCw,
   Search,
-  Settings,
   Square,
   X,
 } from "lucide-react";
 import { useOverlayData } from "./use-overlay-data";
 import { useMeetingOverlay } from "./use-meeting-overlay";
 import { AudioEqualizer } from "./audio-equalizer";
-import { formatShortcut } from "./format-shortcut";
+import { formatShortcut, type ShortcutPlatform } from "./format-shortcut";
 import { DragStage } from "./drag-stage";
 import { useOverlayDrag } from "./use-overlay-drag";
 import {
@@ -48,7 +48,12 @@ type ReminderSettings = {
   searchShortcut?: string;
 };
 
-type RecordingHealthState = "normal" | "failure" | "fixing" | "recovered";
+type RecordingHealthState =
+  | "normal"
+  | "failure"
+  | "recovering"
+  | "fixing"
+  | "recovered";
 
 // Mirrors the Rust store defaults (`store.rs`). A settings object written
 // before one of these keys existed reads back blank, and a blank chord used to
@@ -63,16 +68,25 @@ const DEFAULT_SHORTCUTS = {
 
 const COLLAPSED_SIZE = { width: 22, height: 16 };
 const EXPANDED_SIZE = { width: 160, height: 62 };
+const SETTINGS_MENU_SIZE = { width: 164, height: 96 };
 const INCIDENT_SIZE = { width: 160, height: 40 };
 const MEETING_SIZE = { width: 280, height: 80 };
 
 export default function ShortcutReminderPage() {
-  const { isMac, isLoading } = usePlatform();
+  const { isMac, isWindows, isLoading } = usePlatform();
+  const shortcutPlatform: ShortcutPlatform = isMac
+    ? "macos"
+    : isWindows
+      ? "windows"
+      : "linux";
   const [healthState, setHealthState] = useState<RecordingHealthState>("normal");
   const [healthDetail, setHealthDetail] = useState("");
   // "audio" | "screen" | "" — empty when the cause spans subsystems or could
   // not be attributed, which keeps the pill on its generic wording (#6126).
   const [healthSubsystem, setHealthSubsystem] = useState("");
+  // Explicit wire behavior. Never infer whether a click is safe from the
+  // human-readable detail string.
+  const [healthAction, setHealthAction] = useState("");
   const [overlayShortcut, setOverlayShortcut] = useState<string | null>(null);
   const [chatShortcut, setChatShortcut] = useState<string | null>(null);
   const [searchShortcut, setSearchShortcut] = useState<string | null>(null);
@@ -85,6 +99,7 @@ export default function ShortcutReminderPage() {
   const [hoverMeetingId, setHoverMeetingId] = useState<number | null>(null);
   const [pinnedMeetingId, setPinnedMeetingId] = useState<number | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [hoveredControl, setHoveredControl] = useState<string | null>(null);
   const [overlayScale, setOverlayScale] = useState(1);
   const [anchor, setAnchor] = useState<OverlayAnchor>(DEFAULT_OVERLAY_ANCHOR);
@@ -96,6 +111,8 @@ export default function ShortcutReminderPage() {
   const appliedSizeRef = useRef<{ width: number; height: number } | null>(null);
   const isMacRef = useRef(isMac);
   isMacRef.current = isMac;
+  const platformRef = useRef<ShortcutPlatform>(shortcutPlatform);
+  platformRef.current = shortcutPlatform;
   const anchorRef = useRef(anchor);
   anchorRef.current = anchor;
 
@@ -118,7 +135,7 @@ export default function ShortcutReminderPage() {
           : isMacRef.current
             ? fallback.mac
             : fallback.other;
-      return formatShortcut(raw, isMacRef.current);
+      return formatShortcut(raw, platformRef.current);
     };
 
     setOverlayShortcut(
@@ -186,7 +203,7 @@ export default function ShortcutReminderPage() {
       // Reached when there is no settings object at all (fresh profile, or the
       // read threw); `applyReminderSettings` covers the partially-filled case.
       const fallback = (d: { mac: string; other: string }) =>
-        formatShortcut(isMac ? d.mac : d.other, isMac);
+        formatShortcut(isMac ? d.mac : d.other, shortcutPlatform);
       setOverlayShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.overlay));
       setChatShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.chat));
       setSearchShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.search));
@@ -213,7 +230,7 @@ export default function ShortcutReminderPage() {
       if (reloadTimer) clearTimeout(reloadTimer);
       unlistenStore?.();
     };
-  }, [isLoading, isMac, loadShortcutsFromFile]);
+  }, [isLoading, isMac, loadShortcutsFromFile, shortcutPlatform]);
 
   useEffect(() => {
     // Listen for explicit shortcut-reminder-update event (from Rust side)
@@ -238,14 +255,14 @@ export default function ShortcutReminderPage() {
   // current via the event.
   useEffect(() => {
     let mounted = true;
-    // Payload is "state", "state|detail", or "state|detail|subsystem" —
-    // detail is a failure reason (or the boot phase label while fixing), and
-    // subsystem names what failed when the engine could attribute it to one.
+    // Payload is "state", "state|detail", "state|detail|subsystem", or the
+    // same with an explicit fourth action field.
     const apply = (payload: string) => {
-      const [state, detail = "", subsystem = ""] = payload.split("|");
+      const [state, detail = "", subsystem = "", action = ""] = payload.split("|");
       setHealthState(state as RecordingHealthState);
       setHealthDetail(detail);
       setHealthSubsystem(subsystem);
+      setHealthAction(action);
     };
     commands
       .getRecordingHealthState()
@@ -354,6 +371,8 @@ export default function ShortcutReminderPage() {
       resizeOverlay(INCIDENT_SIZE);
     } else if (meetingOverlay.active && meetingCardOpen) {
       resizeOverlay(MEETING_SIZE);
+    } else if (settingsOpen) {
+      resizeOverlay(SETTINGS_MENU_SIZE);
     } else if (expanded) {
       resizeOverlay(EXPANDED_SIZE);
     } else {
@@ -366,6 +385,7 @@ export default function ShortcutReminderPage() {
     meetingCardOpen,
     meetingOverlay.active,
     resizeOverlay,
+    settingsOpen,
   ]);
 
   const handleRestartRecording = useCallback(async (e: React.MouseEvent) => {
@@ -409,8 +429,27 @@ export default function ShortcutReminderPage() {
   const handleOpenSettings = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    setSettingsOpen(false);
     posthog.capture("shortcut_reminder_overlay_settings_clicked");
     void commands.showWindow({ Home: { page: "display" } });
+  }, []);
+
+  const handleHourSnooze = useCallback(async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Close immediately so a slow encrypted-store write cannot close a menu
+    // the user reopened while the reminder is still animating away.
+    setSettingsOpen(false);
+    try {
+      const result = await commands.snoozeShortcutReminderForHour();
+      if (result.status === "error") throw new Error(result.error);
+      posthog.capture("shortcut_reminder_dismissed", {
+        dismiss_scope: "hour",
+        snooze_hours: 1,
+      });
+    } catch (error) {
+      console.error("Failed to snooze shortcut reminder:", error);
+    }
   }, []);
 
   // Size tokens are scaled inline instead of via CSS `transform: scale()` so
@@ -424,6 +463,7 @@ export default function ShortcutReminderPage() {
   const smIconPx = 10 * overlayScale;
   const dotPx = Math.max(5 * overlayScale, 5);
   const failureReason = healthDetail || "recording stopped unexpectedly";
+  const manualRecoveryRequired = healthAction === "manual-reopen";
   // Name the subsystem the engine identified. Anything else — both failed, a
   // persistence error, an unattributable stop — keeps the generic wording.
   // Must stay in sync with `healthHeadline` in
@@ -471,16 +511,20 @@ export default function ShortcutReminderPage() {
           className="select-none w-full h-full border border-red-500/40 flex flex-col"
           style={{ background: "rgba(0, 0, 0, 0.88)", cursor: "grab" }}
         >
-          {/* The message row itself restarts — users click the thing that
-              says "recording needs help" expecting the fix. */}
+          {/* The message row itself restarts recoverable failures. A terminal
+              native failure is advisory only: never turn a health signal into
+              an app-exit action. */}
           <button
             onClick={handleRestartRecording}
+            disabled={manualRecoveryRequired}
             onMouseDown={(e) => e.stopPropagation()}
             onPointerDown={(e) => e.stopPropagation()}
-            className="flex items-center justify-center flex-1 min-h-0 hover:bg-white/10 transition-colors cursor-pointer"
+            className={`flex items-center justify-center flex-1 min-h-0 transition-colors ${manualRecoveryRequired ? "cursor-default" : "hover:bg-white/10 cursor-pointer"}`}
             style={{ gap: `${gap * 2}px`, padding: `${padY}px ${padX}px`, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             title={failureReason}
-            aria-label={`${failureHeadlineSentence}: ${failureReason}. Restart recording`}
+            aria-label={manualRecoveryRequired
+              ? `${failureHeadlineSentence}: ${failureReason}`
+              : `${failureHeadlineSentence}: ${failureReason}. Restart recording`}
           >
             <div
               className="rounded-full bg-red-500 animate-pulse shrink-0"
@@ -495,19 +539,32 @@ export default function ShortcutReminderPage() {
           </button>
           <div className="bg-white/15" style={{ height: "1px" }} />
           <div className="flex items-stretch justify-center flex-1 min-h-0">
-            <button
-              onClick={handleRestartRecording}
-              onMouseDown={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
-              className="flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer text-white/90 flex-1"
-              style={{ gap: `${gap}px`, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-              title={`Restart recording — ${failureReason}`}
-            >
-              <RotateCw style={{ width: `${smIconPx}px`, height: `${smIconPx}px` }} className="shrink-0" />
-              <span className="font-mono font-bold" style={{ fontSize: `${fontPx}px` }}>
-                restart
-              </span>
-            </button>
+            {manualRecoveryRequired ? (
+              <div
+                className="flex items-center justify-center text-white/90 flex-1"
+                style={{ gap: `${gap}px` }}
+                title={failureReason}
+              >
+                <Power style={{ width: `${smIconPx}px`, height: `${smIconPx}px` }} className="shrink-0" />
+                <span className="font-mono font-bold" style={{ fontSize: `${fontPx}px` }}>
+                  quit &amp; reopen
+                </span>
+              </div>
+            ) : (
+              <button
+                onClick={handleRestartRecording}
+                onMouseDown={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+                className="flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer text-white/90 flex-1"
+                style={{ gap: `${gap}px`, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                title={`Restart recording — ${failureReason}`}
+              >
+                <RotateCw style={{ width: `${smIconPx}px`, height: `${smIconPx}px` }} className="shrink-0" />
+                <span className="font-mono font-bold" style={{ fontSize: `${fontPx}px` }}>
+                  restart
+                </span>
+              </button>
+            )}
             <div className="bg-white/15" style={{ width: "1px" }} />
             <button
               onClick={handleDismissIncident}
@@ -525,7 +582,7 @@ export default function ShortcutReminderPage() {
     );
   }
 
-  if (healthState === "fixing") {
+  if (healthState === "fixing" || healthState === "recovering") {
     return (
       <div
         className="w-full h-full flex items-center justify-center"
@@ -548,7 +605,11 @@ export default function ShortcutReminderPage() {
             className="font-mono text-white/90 whitespace-nowrap truncate"
             style={{ fontSize: `${fontPx}px` }}
           >
-            {healthDetail ? `fixing — ${healthDetail}...` : "fixing recording..."}
+            {healthState === "recovering"
+              ? "checking recovery..."
+              : healthDetail
+                ? `fixing — ${healthDetail}...`
+                : "fixing recording..."}
           </span>
         </div>
       </div>
@@ -665,6 +726,8 @@ export default function ShortcutReminderPage() {
 
   const disclosure = hoveredControl === "search"
     ? ["search", searchShortcut]
+    : hoveredControl === "brand"
+      ? ["screenpipe", "right-click"]
     : hoveredControl === "chat"
       ? ["ask chat", chatShortcut]
       : hoveredControl === "timeline"
@@ -761,6 +824,7 @@ export default function ShortcutReminderPage() {
       }}
       onMouseLeave={() => {
         setExpanded(false);
+        setSettingsOpen(false);
         setHoveredControl(null);
       }}
     >
@@ -828,26 +892,72 @@ export default function ShortcutReminderPage() {
         </div>
         <div className="my-1 bg-white/25" style={{ width: "1px" }} />
         <button
-          title="Overlay settings"
+          title="screenpipe — right-click for options"
+          aria-label="screenpipe — open timeline; right-click for options"
           className={dockButtonClass}
           style={dockButtonStyle}
-          onMouseEnter={() => setHoveredControl("settings")}
+          onMouseEnter={() => setHoveredControl("brand")}
           onMouseDown={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
-          onClick={handleOpenSettings}
+          onClick={openTimeline}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setSettingsOpen(true);
+          }}
         >
-          <Settings style={{ width: `${12 * overlayScale}px`, height: `${12 * overlayScale}px` }} />
+          <span
+            aria-hidden="true"
+            className="bg-contain bg-center bg-no-repeat"
+            style={{
+              width: `${12 * overlayScale}px`,
+              height: `${12 * overlayScale}px`,
+              backgroundImage: "url('/32x32.png')",
+            }}
+          />
         </button>
       </div>
 
-      {/* The label row only exists while a control is hovered. The native panel
+      {settingsOpen ? (
+        <div
+          role="menu"
+          aria-label="Shortcut reminder options"
+          className="flex w-full min-h-0 flex-1 flex-col overflow-hidden border border-white/40 font-mono text-white/85"
+          style={{
+            marginTop: dockAbove ? `${4 * overlayScale}px` : 0,
+            marginBottom: dockAbove ? 0 : `${4 * overlayScale}px`,
+            background: "rgba(0, 0, 0, 0.96)",
+            borderRadius: `${4 * overlayScale}px`,
+            fontSize: `${fontPx}px`,
+          }}
+        >
+          <button
+            role="menuitem"
+            className="flex-1 px-2 text-left hover:bg-white/15"
+            title="Hide for 1 hour"
+            onClick={(e) => void handleHourSnooze(e)}
+          >
+            hide for 1 hour
+          </button>
+          <div className="mx-2 bg-white/20" style={{ height: "1px" }} />
+          <button
+            role="menuitem"
+            className="flex-1 px-2 text-left hover:bg-white/15"
+            title="Open overlay settings"
+            onClick={handleOpenSettings}
+          >
+            settings…
+          </button>
+        </div>
+      ) : (
+        /* The label row only exists while a control is hovered. The native panel
           keeps this area transparent (`Color.clear`) and floats the label under
           the hovered icon; painting it unconditionally left an empty black bar
           hanging under the dock whenever the pointer sat between icons. The
-          reserved height stays either way so the dock never shifts. */}
-      <div
-        className="flex w-full min-h-0 flex-1 items-center justify-center overflow-hidden font-mono text-white/75"
-        style={{
+          reserved height stays either way so the dock never shifts. */
+        <div
+          className="flex w-full min-h-0 flex-1 items-center justify-center overflow-hidden font-mono text-white/75"
+          style={{
           maxHeight: `${26 * overlayScale}px`,
           // The gap belongs between the two rows, and `column-reverse` does not
           // flip which physical side a margin lands on. Keeping it on `top`
@@ -859,15 +969,16 @@ export default function ShortcutReminderPage() {
           border: `1px solid ${disclosure ? "rgba(255, 255, 255, 0.25)" : "transparent"}`,
           borderRadius: `${4 * overlayScale}px`,
           fontSize: `${fontPx}px`,
-        }}
-      >
-        {disclosure ? (
-          <span className="truncate px-1">
-            {disclosure[0]}
-            {disclosure[1] ? `  ${disclosure[1]}` : ""}
-          </span>
-        ) : null}
-      </div>
+          }}
+        >
+          {disclosure ? (
+            <span className="truncate px-1">
+              {disclosure[0]}
+              {disclosure[1] ? `  ${disclosure[1]}` : ""}
+            </span>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

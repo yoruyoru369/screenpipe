@@ -15,8 +15,10 @@ use tracing::{debug, error, info};
 
 use crate::{
     analytics,
+    history_access::HistoryAccessPolicy,
     hot_frame_cache::HotFrameCache,
     routes::{
+        activity_ledger::get_activity_ledger,
         activity_summary::get_activity_summary,
         artifacts::{
             delete_artifact_handler, list_artifacts_handler, register_artifact_handler,
@@ -37,8 +39,9 @@ use crate::{
         },
         elements::{get_frame_elements, search_elements},
         frames::{
-            get_frame_context, get_frame_data, get_frame_metadata, get_frame_text_data,
-            get_frame_thumbnail, get_next_valid_frame, run_frame_ocr, FrameThumbnailCache,
+            get_frame_context, get_frame_data, get_frame_metadata, get_frame_preview_media,
+            get_frame_preview_samples, get_frame_text_data, get_frame_thumbnail,
+            get_next_valid_frame, run_frame_ocr, FrameThumbnailCache,
         },
         health::{
             api_list_monitors, api_vision_status, audio_metrics_handler, health_check,
@@ -48,8 +51,8 @@ use crate::{
             bulk_delete_meetings_handler, delete_meeting_handler, export_handler,
             get_meeting_handler, get_meeting_summary_status_handler,
             get_meeting_transcript_handler, list_meetings_handler, meeting_status_handler,
-            merge_meetings_handler, split_meeting_handler, start_meeting_handler,
-            stop_meeting_handler, update_meeting_handler,
+            merge_meetings_handler, save_meeting_summary_handler, split_meeting_handler,
+            start_meeting_handler, stop_meeting_handler, update_meeting_handler,
         },
         memories::{
             create_memory_handler, delete_memory_handler, get_memory_handler,
@@ -158,6 +161,7 @@ fn search_query_concurrency(read_pool_max: u32) -> usize {
 
 pub struct AppState {
     pub db: Arc<DatabaseManager>,
+    pub history_access: HistoryAccessPolicy,
     pub audio_manager: Arc<AudioManager>,
     pub app_start_time: DateTime<Utc>,
     pub screenpipe_dir: PathBuf,
@@ -250,6 +254,9 @@ pub struct AppState {
 
 pub struct SCServer {
     db: Arc<DatabaseManager>,
+    /// Rolling history policy. Standalone/headless construction is unrestricted;
+    /// the consumer desktop app explicitly supplies its live account policy.
+    pub history_access: HistoryAccessPolicy,
     addr: SocketAddr,
     audio_manager: Arc<AudioManager>,
     screenpipe_dir: PathBuf,
@@ -381,6 +388,7 @@ impl SCServer {
         let audio_metrics = audio_manager.metrics.clone();
         SCServer {
             db,
+            history_access: HistoryAccessPolicy::unrestricted(),
             addr,
             screenpipe_dir,
             vision_disabled,
@@ -613,6 +621,13 @@ impl SCServer {
             std::time::Instant::now(),
         );
 
+        // Engine-owned backstop for meeting summaries: reconciles completed
+        // meeting-summary runs against the meeting record and requeues runs a
+        // restart interrupted. Spawned here because both entrypoints (engine
+        // binary and the desktop's embedded server) build their router through
+        // this path; the finalizer itself is once-per-process.
+        crate::meeting_summary::spawn_meeting_summary_finalizer(self.db.clone());
+
         if analytics_enabled {
             // Spawn periodic API usage reporter (every 5 minutes)
             let counter_clone = api_request_count.clone();
@@ -764,6 +779,7 @@ impl SCServer {
 
         let app_state = Arc::new(AppState {
             db: self.db.clone(),
+            history_access: self.history_access.clone(),
             audio_manager: self.audio_manager.clone(),
             app_start_time: Utc::now(),
             screenpipe_dir: self.screenpipe_dir.clone(),
@@ -891,6 +907,11 @@ impl SCServer {
             .post("/tags/vision/batch", get_tags_batch)
             .post("/tags/:content_type/:id", add_tags)
             .delete("/tags/:content_type/:id", remove_tags)
+            .get("/frames/preview-samples", get_frame_preview_samples)
+            .get(
+                "/frames/preview-media/:video_chunk_id",
+                get_frame_preview_media,
+            )
             .get("/frames/:frame_id", get_frame_data)
             .get("/frames/:frame_id/thumbnail", get_frame_thumbnail)
             .get("/frames/:frame_id/text", get_frame_text_data)
@@ -926,6 +947,7 @@ impl SCServer {
                 "/meetings/:id/summary-status",
                 get_meeting_summary_status_handler,
             )
+            .post("/meetings/:id/summary", save_meeting_summary_handler)
             .get("/meetings/:id", get_meeting_handler)
             .delete("/meetings/:id", delete_meeting_handler)
             .put("/meetings/:id", update_meeting_handler)
@@ -968,6 +990,27 @@ impl SCServer {
             .get("/elements", search_elements)
             .get("/frames/:frame_id/elements", get_frame_elements)
             .get("/activity-summary", get_activity_summary)
+            .get("/activity-ledger", get_activity_ledger)
+            .get(
+                "/cloud-agents/status",
+                crate::routes::cloud_agents::cloud_agent_status,
+            )
+            .post(
+                "/cloud-agents/:provider/connect",
+                crate::routes::cloud_agents::connect_cloud_agent,
+            )
+            .get(
+                "/cloud-agents/cursor-agents",
+                crate::routes::cloud_agents::list_cursor_cloud_agents,
+            )
+            .get(
+                "/cloud-agents/:provider/codebases",
+                crate::routes::cloud_agents::list_cloud_agent_codebases,
+            )
+            .put(
+                "/cloud-agents/cursor-key",
+                crate::routes::cloud_agents::set_cursor_cloud_key,
+            )
             // Vault routes
             .get("/vault/status", crate::routes::vault::vault_status)
             .post("/vault/lock", crate::routes::vault::vault_lock)
@@ -978,6 +1021,7 @@ impl SCServer {
             .get("/sync/status", sync_api::sync_status)
             .post("/sync/trigger", sync_api::sync_trigger)
             .post("/sync/lock", sync_api::sync_lock)
+            .post("/sync/reset-account", sync_api::sync_reset_account)
             .post("/sync/download", sync_api::sync_download)
             .post("/sync/pipes/push", sync_api::sync_pipes_push)
             .post("/sync/pipes/pull", sync_api::sync_pipes_pull)
@@ -1019,6 +1063,21 @@ impl SCServer {
         // Build the main router with all routes
         let router = Router::new()
             .merge(server.into_router())
+            // Agent self-improvement lives behind one validated local API so
+            // native Pi and ACP share profile safety, prompt rendering, skill
+            // provenance, optimistic concurrency, and bundled protection.
+            .route(
+                "/agent/skills/manage",
+                axum::routing::post(crate::agent_skills::manage_agent_skill_handler),
+            )
+            .route(
+                "/agent/profile/manage",
+                axum::routing::post(crate::agent_profile::manage_profile_handler),
+            )
+            .route(
+                "/agent/self-improvement/context",
+                axum::routing::get(crate::agent_profile::self_improvement_context_handler),
+            )
             // Renderer-agnostic structured outputs are deliberately outside
             // the public OpenAPI surface for now. Consumers define targets;
             // authenticated pipes can discover and fill only their bindings.

@@ -52,6 +52,12 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { PipeTriggerPicker } from "./pipe-trigger-picker";
+import { PipePresetChain } from "./pipe-preset-chain";
+import { ProviderAutomationsPanel } from "./provider-automations-panel";
+import {
+  CloudAgentRunner,
+  type CloudAgentConfig,
+} from "./cloud-agent-runner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select,
@@ -82,6 +88,7 @@ import {
   shouldShowInMyPipes,
 } from "@/lib/utils/pipe-visibility";
 import { CloudPipesTab } from "./cloud-pipes-tab";
+import { useCloudAgentRunnerRolloutEnabled } from "@/lib/cloud-agent-rollout";
 import {
   writeTextFile,
   readTextFile,
@@ -115,11 +122,15 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useSettings } from "@/lib/hooks/use-settings";
-import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import { useToast } from "@/components/ui/use-toast";
 import { useQueryState } from "nuqs";
 import { parseEnterpriseManagedVersion } from "@/lib/hooks/use-enterprise-pipes";
 import { HelpTooltip } from "@/components/ui/help-tooltip";
+import {
+  clearPendingPipeDeepLink,
+  OPEN_PIPE_DEEPLINK_EVENT,
+  readPendingPipeDeepLink,
+} from "@/lib/external-deeplink";
 import {
   deleteConversationFile,
   loadConversationFile,
@@ -141,7 +152,7 @@ import {
 } from "@/components/ui/dialog";
 import { PostInstallConnectionsModal } from "@/components/post-install-connections-modal";
 import posthog from "posthog-js";
-import { MemoizedReactMarkdown } from "@/components/markdown";
+import { MarkdownBlock } from "@/components/chat/markdown-block";
 import { useDeviceMonitor } from "@/lib/hooks/use-device-monitor";
 import { Monitor, Wifi, WifiOff, ScanSearch, Lock } from "lucide-react";
 import { requestPipeStop } from "@/lib/pipe-stop";
@@ -170,6 +181,38 @@ export function shouldFetchPipesForApi(
   currentApiBase: string,
 ): boolean {
   return requestApiBase === currentApiBase;
+}
+
+export function ScheduledTasksRefreshButton({
+  refreshing,
+  onRefresh,
+}: {
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <Button
+      variant="outline"
+      size="icon"
+      className={cn(
+        "h-8 w-8",
+        refreshing &&
+          "hover:bg-background hover:text-foreground disabled:bg-background disabled:text-foreground disabled:opacity-100",
+      )}
+      onClick={onRefresh}
+      disabled={refreshing}
+      aria-busy={refreshing}
+      aria-label={
+        refreshing ? "refreshing scheduled tasks" : "refresh scheduled tasks"
+      }
+    >
+      {refreshing ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+      ) : (
+        <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+      )}
+    </Button>
+  );
 }
 
 export class ApiRequestSequence {
@@ -427,6 +470,8 @@ function buildForkPrompt(pipeName: string): string {
 // parsePipeError moved to @/lib/pipe-errors (shared with the global pipe-advisory
 // watcher so both surface the same friendly message). Imported at the top.
 
+type PipeEffort = "low" | "medium" | "high";
+
 interface PipeConfig {
   name: string;
   schedule: string;
@@ -437,6 +482,8 @@ interface PipeConfig {
   agent: string;
   model: string;
   provider?: string;
+  cloud_agent?: CloudAgentConfig | null;
+  effort?: PipeEffort;
   preset?: string | string[];
   enterprise_managed?: boolean;
   history?: boolean;
@@ -1041,7 +1088,7 @@ function errorTypeBadge(errorType: string | null) {
   );
 }
 
-/** Primary + fallback AI preset selector for a pipe. */
+/** Ordered model fallback selector for a locally-run pipe. */
 function PipePresetSelector({
   pipe,
   setPipes,
@@ -1055,22 +1102,8 @@ function PipePresetSelector({
   pendingConfigSaves: React.MutableRefObject<Record<string, Promise<void>>>;
   apiBase: string;
 }) {
-  const presetList: string[] = Array.isArray(pipe.config.preset)
-    ? pipe.config.preset
-    : pipe.config.preset
-      ? [pipe.config.preset]
-      : [];
-
-  // "auto" is a legacy/special value meaning "use default" — treat as no selection
-  const primaryPreset = presetList[0] && presetList[0] !== "auto" ? presetList[0] : null;
-  const fallbackPreset = presetList[1] && presetList[1] !== "auto" ? presetList[1] : null;
-  const [showFallback, setShowFallback] = useState(!!fallbackPreset);
-
-  const savePresets = (primary: string | null, fallback: string | null) => {
+  const savePresets = (presetValue: string | string[] | null) => {
     const pipeName = pipe.config.name;
-    const newList = [primary, fallback].filter(Boolean) as string[];
-    const presetValue: string | string[] | null =
-      newList.length === 0 ? null : newList.length === 1 ? newList[0] : newList;
 
     setPipes((prev: any[]) =>
       prev.map((p: any) =>
@@ -1099,59 +1132,7 @@ function PipePresetSelector({
   };
 
   return (
-    <div className="space-y-2">
-      <div>
-        <Label className="text-xs">primary ai preset</Label>
-        <AIPresetsSelector
-          compact
-          allowNone
-          includeAgentPresets={false}
-          controlledPresetId={primaryPreset}
-          onControlledSelect={(preset) =>
-            savePresets(preset?.id ?? null, fallbackPreset)
-          }
-        />
-      </div>
-
-      {showFallback ? (
-        <div>
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">fallback ai preset</Label>
-            <button
-              className="text-[10px] text-muted-foreground hover:text-foreground"
-              onClick={() => {
-                setShowFallback(false);
-                savePresets(primaryPreset, null);
-              }}
-            >
-              remove
-            </button>
-          </div>
-          <AIPresetsSelector
-            compact
-            allowNone
-            includeAgentPresets={false}
-            controlledPresetId={fallbackPreset}
-            onControlledSelect={(preset) =>
-              savePresets(primaryPreset, preset?.id ?? null)
-            }
-          />
-          <p className="text-[10px] text-muted-foreground mt-1">
-            used when primary hits rate limit
-          </p>
-        </div>
-      ) : (
-        <button
-          className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-          onClick={() => setShowFallback(true)}
-        >
-          + add fallback preset
-        </button>
-      )}
-      <p className="text-[10px] text-muted-foreground">
-        coding-agent presets are available in chat; scheduled pipes currently use raw Pi presets
-      </p>
-    </div>
+    <PipePresetChain preset={pipe.config.preset} onChange={savePresets} />
   );
 }
 
@@ -1213,6 +1194,7 @@ export function PipesSection() {
     Record<string, "clearing" | "cleared" | "error">
   >({});
   const [refreshing, setRefreshing] = useState(false);
+  const [providerRefreshToken, setProviderRefreshToken] = useState(0);
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingSaves = useRef<Record<string, string>>({});
   // Track in-flight config saves so runPipe can await them
@@ -1226,6 +1208,9 @@ export function PipesSection() {
   const [pipeTypeFilter, setPipeTypeFilter] = useState<"local" | "cloud">("local");
   // "cloud" (the org's cloud runner) is a managed-deployment-only surface.
   const { isManagedDeployment } = useManagedPolicy();
+  // The user-owned cloud-agent runner is an early rollout. Fail closed while
+  // PostHog is unresolved so the normal on-device runner remains the default.
+  const cloudAgentRunnerEnabled = useCloudAgentRunnerRolloutEnabled();
   // Favorites — per-machine preference persisted via /pipes/favorites.
   // `showOnly` toggles a filter that hides non-starred pipes.
   const pipeFavorites = usePipeFavorites();
@@ -1290,6 +1275,7 @@ export function PipesSection() {
 
   const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
   const isRemote = !!selectedDevice;
+  const composioToken = isRemote ? undefined : settings.user?.token;
   currentApiBase.current = apiBase;
   const displayedPipes = pipesForApi(pipes, pipesApiBase, apiBase);
   const displayedLogs = pipesForApi(logs, logsApiBase, apiBase);
@@ -1446,7 +1432,7 @@ export function PipesSection() {
         ? `timed out connecting to ${apiBase}`
         : e instanceof Error
           ? e.message
-          : "failed to fetch pipes";
+          : "failed to fetch scheduled tasks";
       if (isCurrentRequest()) setLoadError(message);
       return false;
     } finally {
@@ -1596,10 +1582,14 @@ export function PipesSection() {
 
   const fetchConnections = useCallback(async () => {
     try {
-      const next = await fetchAvailablePipeConnections(apiBase, availableConnections);
+      const next = await fetchAvailablePipeConnections(
+        apiBase,
+        availableConnections,
+        composioToken
+      );
       setAvailableConnections(next);
     } catch { /* server may not be running */ }
-  }, [apiBase, availableConnections]);
+  }, [apiBase, availableConnections, composioToken]);
 
   const checkForUpdates = useCallback(async () => {
     try {
@@ -1896,7 +1886,7 @@ export function PipesSection() {
         title: existing ? `update pushed (v${version})` : "shared with team",
         description: existing
           ? "teammates' copies will update automatically"
-          : "teammates can turn it on from their Scheduled page",
+          : "teammates can turn it on from their Automations page",
       });
     } catch (err: any) {
       toast({
@@ -2294,7 +2284,7 @@ export function PipesSection() {
       if (!res.ok || data?.error || data?.success === false) {
         throw new Error(
           data?.error ||
-          `failed to ${enabled ? "enable" : "disable"} pipe "${name}"`
+          `failed to ${enabled ? "enable" : "disable"} scheduled task "${name}"`
         );
       }
     } catch {
@@ -2466,6 +2456,40 @@ export function PipesSection() {
     if (expanded === name) return;
     toggleExpand(name);
   };
+
+  // A public deep link may select an installed pipe for review, but never run
+  // or mutate it. localStorage covers a cold mount; the event covers a Pipes
+  // view that was already open when the link arrived.
+  useEffect(() => {
+    const openInstalledPipe = (pipeName: string) => {
+      if (!isSafePipeName(pipeName)) return;
+      if (!pipes.some((pipe) => pipe.config.name === pipeName)) {
+        if (!loading && pipesApiBase !== null) clearPendingPipeDeepLink();
+        return;
+      }
+      clearPendingPipeDeepLink();
+      setCreating(false);
+      if (expanded !== pipeName) {
+        setExpanded(pipeName);
+        expandedRef.current = pipeName;
+        fetchLogs(pipeName);
+        fetchExecutions(pipeName);
+      }
+    };
+
+    const pending = readPendingPipeDeepLink();
+    if (pending) openInstalledPipe(pending);
+
+    const unlisten = listen<{ pipeName?: string }>(
+      OPEN_PIPE_DEEPLINK_EVENT,
+      (event) => {
+        if (event.payload?.pipeName) openInstalledPipe(event.payload.pipeName);
+      },
+    );
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [expanded, loading, pipes, pipesApiBase]);
 
   const savePipeContent = useCallback(async (name: string, content: string) => {
     const pipe = pipes.find((candidate) => candidate.config.name === name);
@@ -2707,17 +2731,18 @@ export function PipesSection() {
               )}
             />
           </Button>
-          <Button variant="outline" size="icon" className={`h-8 w-8 ${refreshing ? "pointer-events-none opacity-70" : ""}`} onClick={async () => {
-            if (refreshing) return;
-            setRefreshing(true);
-            await Promise.all([
-              fetchPipes(),
-              new Promise((r) => setTimeout(r, 2000)),
-            ]);
-            setRefreshing(false);
-          }}>
-            {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <RefreshCw className="h-3.5 w-3.5" />}
-          </Button>
+          <ScheduledTasksRefreshButton
+            refreshing={refreshing}
+            onRefresh={async () => {
+              setRefreshing(true);
+              setProviderRefreshToken((value) => value + 1);
+              await Promise.all([
+                fetchPipes(),
+                new Promise((resolve) => setTimeout(resolve, 2000)),
+              ]);
+              setRefreshing(false);
+            }}
+          />
           {/* Creating is an action you take, not a form that sits on the page.
               Only offered when the two-pane list exists to open it into. */}
           {filteredPipes.length > 0 && (
@@ -2793,6 +2818,22 @@ export function PipesSection() {
         <div className="flex items-start gap-2 border border-destructive/40 px-3 py-2 text-xs text-destructive" data-testid="teach-mode-error">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           {teachError}
+        </div>
+      )}
+
+      {pipeTypeFilter === "local" && !selectMode && (
+        <ProviderAutomationsPanel
+          searchQuery={searchQuery}
+          refreshToken={providerRefreshToken}
+        />
+      )}
+
+      {pipeTypeFilter === "local" && !selectMode && (
+        <div className="flex items-baseline gap-2 px-1 pt-1">
+          <h3 className="text-sm font-medium">scheduled tasks</h3>
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {filteredPipes.length} total
+          </span>
         </div>
       )}
 
@@ -2880,9 +2921,9 @@ export function PipesSection() {
             ) : (
               <div className="space-y-4">
                 <div>
-                  <p className="text-foreground font-medium text-base">no scheduled tasks installed yet</p>
+                  <p className="text-foreground font-medium text-base">no scheduled tasks yet</p>
                   <p className="text-sm mt-1">
-                    scheduled tasks are AI agents that run over your screen data — they summarize your day, track your time, sync your notes, and more.
+                    scheduled tasks run locally over your screen data — they can summarize your day, track your time, sync your notes, and more.
                   </p>
                 </div>
                 <div className="space-y-2 max-w-md mx-auto text-left">
@@ -3597,7 +3638,11 @@ export function PipesSection() {
                             .map((p) => ({ name: p.config.name }))}
                           availableConnections={availableConnections}
                           refreshConnections={async () => {
-                            const next = await fetchAvailablePipeConnections(apiBase, availableConnections);
+                            const next = await fetchAvailablePipeConnections(
+                              apiBase,
+                              availableConnections,
+                              composioToken
+                            );
                             setAvailableConnections(next);
                             return next;
                           }}
@@ -3708,16 +3753,47 @@ export function PipesSection() {
                           </div>
                         </div>
 
-
-                        {/* Model — secondary; most pipes run fine on the default */}
                         <div className="p-4">
-                        <PipePresetSelector
-                          pipe={pipe}
-                          setPipes={setPipes}
-                          fetchPipes={fetchPipes}
-                          pendingConfigSaves={pendingConfigSaves}
-                          apiBase={apiBase}
-                        />
+                          <div className="divide-y divide-border border border-border">
+                            {cloudAgentRunnerEnabled && (
+                              <CloudAgentRunner
+                                pipeName={pipe.config.name}
+                                agent={pipe.config.agent}
+                                cloudAgent={pipe.config.cloud_agent}
+                                apiBase={apiBase}
+                                onSaved={(agent, cloudAgent) => {
+                                  setPipes((previous) =>
+                                    previous.map((candidate) =>
+                                      candidate.config.name === pipe.config.name
+                                        ? {
+                                            ...candidate,
+                                            is_bundled_builtin: false,
+                                            config: {
+                                              ...candidate.config,
+                                              agent,
+                                              cloud_agent: cloudAgent,
+                                            },
+                                          }
+                                        : candidate,
+                                    ),
+                                  );
+                                }}
+                              />
+                            )}
+
+                            {/* Keep the normal on-device controls available when
+                                the cloud-agent rollout is disabled. */}
+                            {(!cloudAgentRunnerEnabled ||
+                              pipe.config.agent !== "cloud-agent") && (
+                              <PipePresetSelector
+                                pipe={pipe}
+                                setPipes={setPipes}
+                                fetchPipes={fetchPipes}
+                                pendingConfigSaves={pendingConfigSaves}
+                                apiBase={apiBase}
+                              />
+                            )}
+                          </div>
                         </div>
 
                           </div>
@@ -3801,7 +3877,12 @@ export function PipesSection() {
                                 {exec.error_message && !pipeExecutionCompletedBeforeContinueError(exec) && <p className="text-xs text-muted-foreground">{exec.error_message}</p>}
                                 {pipeExecutionDisplayStatus(exec) === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
                                   <div>
-                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide"><MemoizedReactMarkdown className="prose prose-xs dark:prose-invert max-w-none break-words text-xs [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_p]:text-xs [&_li]:text-xs [&_code]:text-[10px]">{cleanPipeStdout(exec.stdout)}</MemoizedReactMarkdown></div>
+                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide [&_.prose]:text-xs [&_.prose]:max-w-none [&_.prose_h1]:text-sm [&_.prose_h2]:text-xs [&_.prose_h3]:text-xs [&_.prose_p]:text-xs [&_.prose_li]:text-xs [&_.prose_code]:text-[10px]">
+                                      <MarkdownBlock
+                                        text={cleanPipeStdout(exec.stdout)}
+                                        isUser={false}
+                                      />
+                                    </div>
                                   </div>
                                 )}
                                 {pipeExecutionDisplayStatus(exec) === "failed" && exec.stderr && !exec.error_message && (
@@ -3862,7 +3943,12 @@ export function PipesSection() {
                                     >
                                       {copiedExecId === -(i + 1) ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
                                     </button>
-                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide"><MemoizedReactMarkdown className="prose prose-xs dark:prose-invert max-w-none break-words text-xs [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_p]:text-xs [&_li]:text-xs [&_code]:text-[10px]">{cleanPipeStdout(log.stdout)}</MemoizedReactMarkdown></div>
+                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide [&_.prose]:text-xs [&_.prose]:max-w-none [&_.prose_h1]:text-sm [&_.prose_h2]:text-xs [&_.prose_h3]:text-xs [&_.prose_p]:text-xs [&_.prose_li]:text-xs [&_.prose_code]:text-[10px]">
+                                      <MarkdownBlock
+                                        text={cleanPipeStdout(log.stdout)}
+                                        isUser={false}
+                                      />
+                                    </div>
                                   </div>
                                 )}
                                 {!log.success && log.stderr && (
@@ -3924,7 +4010,7 @@ export function PipesSection() {
                       <div className="px-4 py-3">
                         <p className="text-sm font-medium">runtime</p>
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
-                          control external notifications and execution limits.
+                          control reasoning, external notifications, and execution limits.
                         </p>
                       </div>
                       {/* Notification API permission */}
@@ -3939,6 +4025,54 @@ export function PipesSection() {
                           checked={!isNotificationsDenied(promptDrafts[pipe.config.name] ?? pipe.raw_content)}
                           onCheckedChange={(checked) => toggleNotifications(pipe.config.name, checked)}
                         />
+                      </div>
+
+                      {/* Reasoning effort */}
+                      <div className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_11rem] sm:items-center">
+                        <div>
+                          <Label className="text-xs font-medium">reasoning effort</Label>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            low uses fewer reasoning tokens. raise it only for tasks that need deeper analysis; unsupported models may ignore it.
+                          </p>
+                        </div>
+                        <Select
+                          disabled={enterpriseManaged}
+                          value={pipe.config.effort ?? "low"}
+                          onValueChange={(value) => {
+                            const pipeName = pipe.config.name;
+                            const effort = value as PipeEffort;
+                            setPipes((prev) =>
+                              prev.map((p) =>
+                                p.config.name === pipeName
+                                  ? { ...p, config: { ...p.config, effort } }
+                                  : p
+                              )
+                            );
+                            const savePromise = fetch(`${apiBase}/pipes/${encodeURIComponent(pipeName)}/config`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ effort }),
+                            }).then(() => {
+                              delete pendingConfigSaves.current[pipeName];
+                              fetchPipes();
+                            }).catch(() => {
+                              delete pendingConfigSaves.current[pipeName];
+                            });
+                            pendingConfigSaves.current[pipeName] = savePromise;
+                          }}
+                        >
+                          <SelectTrigger
+                            className="h-8 w-full text-xs"
+                            data-testid={`pipe-effort-select-${pipe.config.name}`}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="low">low (recommended)</SelectItem>
+                            <SelectItem value="medium">medium</SelectItem>
+                            <SelectItem value="high">high</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
 
                       {/* Timeout */}
@@ -4099,7 +4233,7 @@ export function PipesSection() {
                       <section className="border border-border">
                       <div className="flex items-center gap-2 border-b border-border px-4 py-3">
                         <Label className="text-sm font-medium">task definition</Label>
-                        <span className="font-mono text-[11px] text-muted-foreground">pipe.md</span>
+                        <span className="text-[11px] text-muted-foreground">task configuration</span>
                         <div className="ml-auto flex items-center gap-2">
                         {saveStatus[pipe.config.name] === "saving" && (
                           <span className="text-[11px] text-muted-foreground flex items-center gap-1">
@@ -4394,7 +4528,8 @@ export function PipesSection() {
               try {
                 latestConnections = await fetchAvailablePipeConnections(
                   apiBase,
-                  availableConnections
+                  availableConnections,
+                  composioToken
                 );
               } catch {
                 // Fall back to current in-memory state if fetch fails.
@@ -4518,7 +4653,7 @@ export function PipesSection() {
             <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />
             <p className="text-sm text-muted-foreground">
               you have local edits to this scheduled task. updating will overwrite your prompt changes.
-              a backup will be saved as <code className="text-xs">pipe.md.bak</code>.
+              a local backup will be saved before updating.
               your schedule, model, and enabled state will be preserved.
             </p>
           </div>

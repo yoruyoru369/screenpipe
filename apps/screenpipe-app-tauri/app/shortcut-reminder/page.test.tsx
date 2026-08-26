@@ -16,10 +16,12 @@ import { formatShortcut } from "./format-shortcut";
 
 const mocks = vi.hoisted(() => ({
   getRecordingHealthState: vi.fn(),
+  overlayRestartRecording: vi.fn(),
   listen: vi.fn(),
   storeGet: vi.fn(),
   storeSet: vi.fn(),
   hideShortcutReminder: vi.fn(),
+  snoozeShortcutReminderForHour: vi.fn(),
   showWindow: vi.fn(),
   setSize: vi.fn(),
   setPosition: vi.fn(),
@@ -100,7 +102,7 @@ vi.mock("posthog-js", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-platform", () => ({
-  usePlatform: () => ({ isMac: true, isLoading: false }),
+  usePlatform: () => ({ isMac: true, isWindows: false, isLoading: false }),
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -115,9 +117,10 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     getRecordingHealthState: mocks.getRecordingHealthState,
-    overlayRestartRecording: vi.fn(),
+    overlayRestartRecording: mocks.overlayRestartRecording,
     overlayDismissIncident: vi.fn(),
     hideShortcutReminder: mocks.hideShortcutReminder,
+    snoozeShortcutReminderForHour: mocks.snoozeShortcutReminderForHour,
     showWindow: mocks.showWindow,
     setShortcutOverlayAnchor: mocks.setShortcutOverlayAnchor,
   },
@@ -153,8 +156,11 @@ describe("recording health hover detail", () => {
     mocks.meetingOverlayState.stopping = false;
     mocks.meetingOverlayState.stopError = null;
     mocks.stopMeeting.mockReset();
+    mocks.overlayRestartRecording.mockReset();
     mocks.storeSet.mockReset();
     mocks.hideShortcutReminder.mockReset();
+    mocks.snoozeShortcutReminderForHour.mockReset();
+    mocks.snoozeShortcutReminderForHour.mockResolvedValue({ status: "ok", data: null });
     mocks.showWindow.mockReset();
     mocks.setSize.mockReset();
     mocks.setPosition.mockReset();
@@ -175,6 +181,51 @@ describe("recording health hover detail", () => {
       "title",
       "screen capture is not updating",
     );
+  });
+
+  it("keeps terminal native recovery advisory and never invokes a restart action", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "failure|quit and reopen screenpipe to restore screen capture|screen|manual-reopen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    const failureButton = await screen.findByRole("button", {
+      name: "Screen capture needs help: quit and reopen screenpipe to restore screen capture",
+    });
+    expect(failureButton).toBeDisabled();
+    expect(screen.getByText("quit & reopen")).toBeVisible();
+
+    fireEvent.click(failureButton);
+    expect(mocks.overlayRestartRecording).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /restart recording/i })).toBeNull();
+  });
+
+  it("does not infer recovery behavior from user-facing wording", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "failure|quit and reopen screenpipe wording without an action|screen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    const failureButton = await screen.findByRole("button", {
+      name: /restart recording/i,
+    });
+    expect(failureButton).toBeEnabled();
+    fireEvent.click(failureButton);
+    await waitFor(() => expect(mocks.overlayRestartRecording).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows recovery confirmation instead of a broken or restart state", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "recovering|screen capture is not updating|screen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    expect(await screen.findByText("checking recovery...")).toBeVisible();
+    expect(screen.queryByText("screen capture needs help")).toBeNull();
+    expect(screen.queryByRole("button", { name: /restart/i })).toBeNull();
   });
 
   // #6126: the pill read as a total product failure whatever broke, so routine
@@ -306,22 +357,31 @@ describe("recording health hover detail", () => {
     expect(meetingDot.className).toContain("pointer-events-none");
   });
 
-  it("cannot be hidden from the gear — it opens Display settings instead", async () => {
+  it("keeps the brand mark expanded and opens its options on right-click", async () => {
     mocks.getRecordingHealthState.mockResolvedValue("normal");
     mocks.storeGet.mockResolvedValue({});
 
     render(<ShortcutReminderPage />);
 
     fireEvent.mouseEnter(await screen.findByTestId("shortcut-reminder-root"));
-    fireEvent.click(await screen.findByTitle("Overlay settings"));
+    const brand = await screen.findByTitle("screenpipe — right-click for options");
+    expect(brand).toBeVisible();
+    expect(brand.parentElement?.lastElementChild).toBe(brand);
+    fireEvent.contextMenu(brand);
 
-    // The gear never hides the pill. Even when `overlay-hiding-control` grants
-    // the capability back, the switch lives in Display settings, not here.
-    expect(screen.queryByTitle("Hide for today")).toBeNull();
-    expect(screen.queryByTitle("Hide for a week")).toBeNull();
-    expect(mocks.hideShortcutReminder).not.toHaveBeenCalled();
-    expect(mocks.storeSet).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu", { name: "Shortcut reminder options" })).toBeVisible();
+    fireEvent.click(screen.getByTitle("Hide for 1 hour"));
+
+    await waitFor(() =>
+      expect(mocks.snoozeShortcutReminderForHour).toHaveBeenCalledTimes(1),
+    );
+
+    fireEvent.mouseEnter(screen.getByTestId("shortcut-reminder-root"));
+    fireEvent.contextMenu(screen.getByTitle("screenpipe — right-click for options"));
+    fireEvent.click(screen.getByTitle("Open overlay settings"));
     expect(mocks.showWindow).toHaveBeenCalledWith({ Home: { page: "display" } });
+    expect(screen.queryByRole("menu", { name: "Shortcut reminder options" })).toBeNull();
+    expect(screen.queryByTitle("Overlay settings")).toBeNull();
   });
 
   it("keeps a pinned transcript open after the pointer leaves", async () => {
@@ -410,7 +470,7 @@ describe("recording health hover detail", () => {
     fireEvent.mouseEnter(screen.getByTitle("Open timeline"));
 
     expect(
-      await screen.findByText(formatShortcut("Super+Ctrl+S", true), {
+      await screen.findByText(formatShortcut("Super+Ctrl+S", "macos"), {
         exact: false,
       }),
     ).toBeVisible();
@@ -452,12 +512,15 @@ describe("recording health hover detail", () => {
 });
 
 describe("shortcut display ordering", () => {
-  it("renders modifiers in a stable platform order", () => {
-    expect(formatShortcut("Control+Super+s", true)).toBe("⌘⌃S");
-    expect(formatShortcut("Control+Super+s", false)).toBe("Win+Ctrl+S");
-    expect(formatShortcut("Shift+Alt+Control+Super+k", false)).toBe(
-      "Win+Ctrl+Alt+Shift+K",
+  it("renders familiar modifier notation in a stable platform order", () => {
+    expect(formatShortcut("Control+Super+s", "macos")).toBe("⌘⌃S");
+    expect(formatShortcut("Control+Super+s", "windows")).toBe("⊞+Ctrl+S");
+    expect(formatShortcut("Control+Super+s", "linux")).toBe("Super+Ctrl+S");
+    expect(formatShortcut("Shift+Alt+Control+Super+k", "windows")).toBe(
+      "⊞+Ctrl+Alt+Shift+K",
     );
+    expect(formatShortcut("⊞+Ctrl+S", "windows")).toBe("⊞+Ctrl+S");
+    expect(formatShortcut("Super+Ctrl+S", "linux")).toBe("Super+Ctrl+S");
   });
 });
 

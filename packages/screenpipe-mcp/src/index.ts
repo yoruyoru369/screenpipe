@@ -33,11 +33,13 @@ import {
 import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
 import { PKG_VERSION } from "./version";
 import { formatForElementPurpose } from "./element-format";
+import { buildActivitySummaryResult } from "./activity-summary-tool";
 import {
   localContextDayStarts,
   normalizeTime,
   normalizeTimeFields,
 } from "./time-normalization";
+import { resolveScreenpipeApiBase } from "./api-base";
 
 initMcpTelemetry({ transport: "stdio" });
 
@@ -66,14 +68,11 @@ for (let i = 0; i < args.length; i++) {
 // screenpipe (e.g. an agent on a VPS reading a synced copy of your data),
 // not just localhost. Priority:
 //   1. --screenpipe-url / --screenpipe-api-url flag
-//   2. SCREENPIPE_API_URL env (set by `screenpipe agent setup --api-url`)
-//   3. --screenpipe-host (+ --port) → http://host:port
-//   4. default http://localhost:<port>
-const SCREENPIPE_API = (
-  baseOverride ||
-  process.env.SCREENPIPE_API_URL ||
-  `http://${host}:${port}`
-).replace(/\/+$/, "");
+//   2. SCREENPIPE_LOCAL_API_URL / PORT from the launching desktop instance
+//   3. SCREENPIPE_API_URL env (set by `screenpipe agent setup --api-url`)
+//   4. --screenpipe-host (+ --port) → http://host:port
+//   5. default http://localhost:<port>
+const SCREENPIPE_API = resolveScreenpipeApiBase({ baseOverride, host, port });
 
 // Discover the local API key, in priority order:
 //
@@ -396,7 +395,7 @@ const TOOLS: Tool[] = [
       properties: {
         q: {
           type: "string",
-          description: "Full-text search query. Omit to return all content in time range. Avoid for audio — transcriptions are noisy, q filters too aggressively.",
+          description: "Full-text search query. Omit to return all content in time range. Avoid for audio — transcriptions are noisy, q filters too aggressively. For an attached activity episode, its generated title/summary are labels, not query terms: use the exact time range and artifact anchors with q omitted.",
         },
         content_type: {
           type: "string",
@@ -470,9 +469,10 @@ const TOOLS: Tool[] = [
   {
     name: "activity-summary",
     description:
-      "Rich activity overview: app usage, window/tab titles with URLs and time spent, key text per context, audio transcriptions. " +
+      "Rich activity overview: authoritative active minutes, app/window time, edited document paths, key text, and audio transcriptions, with optional parsed task context when available. " +
       "USE WHEN: any broad question about what the user did — 'what was I doing?', 'how long on X?', 'which apps?', 'recap my morning'. " +
       "This is almost always the right first call for time-range questions — usually sufficient without follow-up searches. " +
+      "Use parsed/path evidence to identify tasks, but only active-minute fields for duration; frame and row counts are never time. " +
       "DO NOT USE for: finding a specific keyword (use keyword-search) or a specific UI control (use search-elements).",
     annotations: { title: "Activity Summary", readOnlyHint: true, openWorldHint: false, idempotentHint: true },
     inputSchema: {
@@ -481,6 +481,19 @@ const TOOLS: Tool[] = [
         start_time: { type: "string", description: "ISO 8601, relative (e.g. '3h ago'), or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
         end_time: { type: "string", description: "ISO 8601, relative (e.g. 'now'), or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
         app_name: { type: "string", description: "Optional app name filter to focus on one app" },
+        include_parsed_context: {
+          type: "boolean",
+          description:
+            "Optionally include a bounded parsed-context sample for identifying projects and tasks. Parsed capture is experimental and may be disabled or unsupported. Context only; never use row counts as duration.",
+          default: false,
+        },
+        parsed_context_limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 20,
+          description: "Maximum parsed-context rows (default 10, max 20).",
+          default: 10,
+        },
       },
       required: ["start_time", "end_time"],
     },
@@ -631,7 +644,7 @@ const TOOLS: Tool[] = [
         priority: {
           type: "string",
           enum: ["high", "normal", "low"],
-          description: "High interrupts and appears in the focused Priority view. Normal (default) and low remain available in All without interrupting.",
+          description: "Every priority appears in the top-right panel. High also appears in the focused Priority view, normal (default) stays in All, and low is toast-only by default.",
           default: "normal",
         },
         timeout_secs: { type: "integer", description: "Auto-dismiss after N seconds (default 20). Use 0 for persistent.", default: 20 },
@@ -1287,6 +1300,7 @@ async function fetchAPI(
       headers: {
         "Content-Type": "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        "x-screenpipe-client": "mcp",
         ...options.headers,
       },
     });
@@ -1682,94 +1696,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "activity-summary": {
-        const normalized = normalizeTimeFields(args);
-        const params = new URLSearchParams();
-        for (const [key, value] of Object.entries(normalized)) {
-          if (value !== null && value !== undefined) {
-            params.append(key, String(value));
-          }
-        }
-
-        const response = await callAPI(`/activity-summary?${params.toString()}`);
-
-        const data = await response.json();
-
-        if (
-          (data.total_frames ?? 0) > 0 ||
-          (data.audio_summary?.segment_count ?? 0) > 0 ||
-          (data.apps?.length ?? 0) > 0
-        ) {
+        const result = await buildActivitySummaryResult(args, callAPI);
+        if (result.hasArtifact) {
           qualifiedValue.artifactResult();
         }
-
-        const appsLines = (data.apps || []).map(
-          (a: {
-            name: string;
-            frame_count: number;
-            minutes: number;
-            first_seen?: string;
-            last_seen?: string;
-          }) => {
-            const timeSpan =
-              a.first_seen && a.last_seen
-                ? `, ${a.first_seen.slice(11, 16)}–${a.last_seen.slice(11, 16)}${zoneSuffix(a.first_seen)}`
-                : "";
-            return `  ${a.name}: ${a.minutes} min (${a.frame_count} frames${timeSpan})`;
-          }
-        );
-
-        // Window/tab activity — what pages/documents were open
-        const windowLines = (data.windows || []).map(
-          (w: {
-            app_name: string;
-            window_name: string;
-            browser_url: string;
-            minutes: number;
-            frame_count: number;
-          }) => {
-            const url = w.browser_url ? ` (${w.browser_url})` : "";
-            return `  [${w.app_name}] ${w.window_name}${url} — ${w.minutes} min`;
-          }
-        );
-
-        const speakerLines = (data.audio_summary?.speakers || []).map(
-          (s: { name: string; segment_count: number }) =>
-            `  ${s.name}: ${s.segment_count} segments`
-        );
-
-        // Actual audio transcriptions (not just counts)
-        const transcriptLines = (data.audio_summary?.top_transcriptions || []).map(
-          (t: { transcription: string; speaker: string; device: string; timestamp: string }) =>
-            `  [${t.speaker}, ${t.timestamp.slice(11, 19)}] ${t.transcription}`
-        );
-
-        // Key text content sampled across the time range
-        const textLines = (data.key_texts || data.recent_texts || []).map(
-          (t: { text: string; app_name: string; window_name?: string; timestamp: string }) => {
-            const win = t.window_name ? ` | ${t.window_name}` : "";
-            return `  [${t.app_name}${win}, ${t.timestamp.slice(11, 19)}] ${t.text}`;
-          }
-        );
-
-        const summary = [
-          `Activity Summary (${data.time_range?.start} → ${data.time_range?.end})`,
-          `Total frames: ${data.total_frames}`,
-          "",
-          "Apps:",
-          ...(appsLines.length ? appsLines : ["  (none)"]),
-          "",
-          "Windows & Tabs:",
-          ...(windowLines.length ? windowLines.slice(0, 20) : ["  (none)"]),
-          "",
-          `Audio: ${data.audio_summary?.segment_count || 0} segments`,
-          ...(speakerLines.length ? speakerLines : []),
-          ...(transcriptLines.length ? ["", "Audio transcriptions:", ...transcriptLines.slice(0, 15)] : []),
-          "",
-          "Key content (sampled across time range):",
-          ...(textLines.length ? textLines.slice(0, 20) : ["  (none)"]),
-        ].join("\n");
-
-        return { content: [{ type: "text", text: summary }] };
+        return { content: [{ type: "text", text: result.text }] };
       }
 
       case "search-elements": {

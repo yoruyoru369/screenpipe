@@ -16,6 +16,7 @@ export const searchIndex: SettingsField[] = [
   { label: "sync scheduled tasks across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
   { label: "memories sync across devices", keywords: ["memories sync", "sync", "facts"] },
   { label: "connection sync across devices", keywords: ["connection sync", "sync", "slack", "notion"] },
+  { label: "restart remote sync", keywords: ["reset sync", "older key", "new device", "decryption"] },
 ];
 import { Button } from "@/components/ui/button";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -25,6 +26,7 @@ import {
   Sparkles,
   RefreshCw,
   Lock,
+  ShieldCheck,
 } from "lucide-react";
 import { toast } from "@/components/ui/use-toast";
 import { commands } from "@/lib/utils/tauri";
@@ -65,6 +67,10 @@ import {
   accountPlanForEntitlement,
   type PlanPurchase,
 } from "./account-plan-options";
+import {
+  isLegacySyncKeyMismatch,
+  SyncKeyRecovery,
+} from "./sync-key-recovery";
 
 const ACCOUNT_URL = screenpipeWebUrl("/account", "https://screenpipe.com");
 const BILLING_URL = screenpipeWebUrl("/account/billing", "https://screenpipe.com");
@@ -138,6 +144,7 @@ export function AccountSection() {
   const [pipeSyncing, setPipeSyncing] = useState(false);
   const [memoriesSyncing, setMemoriesSyncing] = useState(false);
   const [connectionsSyncing, setConnectionsSyncing] = useState(false);
+  const [showSyncKeyRecovery, setShowSyncKeyRecovery] = useState(false);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [upgradeSource, setUpgradeSource] = useState("app-account-section");
   const upgradeCardRef = useRef<HTMLDivElement>(null);
@@ -462,7 +469,18 @@ export function AccountSection() {
   // Consumer build collapses org/license-derived team/enterprise → "Business";
   // only the enterprise build shows the real org label. Mirrors plan_display_name
   // in src-tauri/src/tray.rs.
-  const { isManagedDeployment } = useManagedPolicy();
+  const { isManagedDeployment, isManagedAuthenticated, policy } = useManagedPolicy();
+
+  const reportSyncFailure = (error: unknown) => {
+    if (isLegacySyncKeyMismatch(error)) {
+      setShowSyncKeyRecovery(true);
+    }
+    toast({
+      title: "sync failed",
+      description: syncErrorDescription(error),
+      variant: "destructive",
+    });
+  };
 
   return (
     <div className="space-y-6">
@@ -471,7 +489,11 @@ export function AccountSection() {
         <p className="text-sm text-muted-foreground" data-testid="account-login-status">
           {settings.user?.token
             ? `logged in as ${settings.user.email}`
-            : "not logged in"}
+            : isManagedDeployment
+              ? isManagedAuthenticated
+                ? "enterprise device access active"
+                : "enterprise access verification required"
+              : "not logged in"}
         </p>
         <div className="flex gap-2">
           {settings.user?.token ? (
@@ -521,7 +543,27 @@ export function AccountSection() {
       {/* Subscribed view — requires a session token, not just cloud_subscribed,
           so a token-hydration failure can't render this "active" card under a
           "not logged in" header (see isSignedInCloudSubscriber). */}
-      {isSignedInBusinessSubscriber ? (
+      {isManagedDeployment ? (
+        <Card className="p-5" data-testid="account-enterprise-managed-card">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-5 w-5 text-primary" />
+            <h3 className="text-lg font-semibold">Screenpipe Enterprise</h3>
+            <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">
+              {isManagedAuthenticated ? "active" : "verification required"}
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground mt-2">
+            {policy.orgName
+              ? `${policy.orgName} manages this deployment and its recording policy.`
+              : "Your organization manages this deployment and its recording policy."}
+          </p>
+          <p className="text-xs text-muted-foreground mt-3">
+            {isManagedAuthenticated
+              ? "Enterprise access has been verified for this session."
+              : "Verify the enterprise key or sign in with an authorized organization account to enable recording."}
+          </p>
+        </Card>
+      ) : isSignedInBusinessSubscriber ? (
         <>
           <Card className="p-5" data-testid="account-cloud-active-card">
           <div className="flex items-center justify-between mb-4">
@@ -611,11 +653,7 @@ export function AccountSection() {
                         await syncFetchOrThrow("/sync/pipes/push", { method: "POST" });
                         toast({ title: "scheduled tasks synced" });
                       } catch (e) {
-                        toast({
-                          title: "sync failed",
-                          description: syncErrorDescription(e),
-                          variant: "destructive",
-                        });
+                        reportSyncFailure(e);
                       } finally {
                         setPipeSyncing(false);
                       }
@@ -676,11 +714,7 @@ export function AccountSection() {
                         await syncFetchOrThrow("/sync/memories/push", { method: "POST" });
                         toast({ title: "memories synced" });
                       } catch (e) {
-                        toast({
-                          title: "sync failed",
-                          description: syncErrorDescription(e),
-                          variant: "destructive",
-                        });
+                        reportSyncFailure(e);
                       } finally {
                         setMemoriesSyncing(false);
                       }
@@ -744,11 +778,7 @@ export function AccountSection() {
                         await syncFetchOrThrow("/sync/connections/push", { method: "POST" });
                         toast({ title: "connections synced" });
                       } catch (e) {
-                        toast({
-                          title: "sync failed",
-                          description: syncErrorDescription(e),
-                          variant: "destructive",
-                        });
+                        reportSyncFailure(e);
                       } finally {
                         setConnectionsSyncing(false);
                       }
@@ -762,6 +792,10 @@ export function AccountSection() {
             </div>
           </div>
           </Card>
+          <SyncKeyRecovery
+            visible={showSyncKeyRecovery}
+            onRecovered={() => setShowSyncKeyRecovery(false)}
+          />
           {hasExpiringProfilePlan && (
             <div ref={upgradeCardRef}>
               <BusinessUpgradeCard

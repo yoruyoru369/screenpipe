@@ -12,7 +12,9 @@ import { commands } from "@/lib/utils/tauri";
 import {
   LEARNING_POLL_INTERVAL_MS,
   LEARNING_WINDOW_CEILING_MS,
+  LEARNING_WINDOW_GRACE_MS,
   LEARNING_WINDOW_RESET_EVENT,
+  LEARNING_SUMMARY_OPENED_EVENT,
   beginLearningWindow,
   buildLearningSummary,
   canResolveYet,
@@ -25,6 +27,8 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningNotificationSent,
+  markLearningSummaryOpened,
   markLearningWriting,
   releaseLearningSeed,
   resetLearningWindow,
@@ -44,7 +48,9 @@ import type { AIPreset } from "@/lib/utils/tauri";
 
 export type LearningWindowView = FirstRunLearningState & {
   remainingMs: number;
-  dismiss: (options?: { opened?: boolean }) => void;
+  markSummaryOpened: () => void;
+  markNotificationSent: () => void;
+  dismiss: () => void;
 };
 
 export type LearningWindowOptions = {
@@ -93,7 +99,7 @@ export function useLearningWindow(
   // cutoff stays exactly right because `completedAt` IS the moment setup
   // ended — everything summarized was captured after it.
   useEffect(() => {
-    if (state.phase !== "idle") return;
+    if (state.phase === "learning" || state.phase === "writing") return;
     let cancelled = false;
     void (async () => {
       try {
@@ -101,12 +107,34 @@ export function useLearningWindow(
         if (cancelled || result.status !== "ok") return;
         const opening = learningWindowOpening(result.data.completedAt);
         if (opening.kind === "none") return;
-        if (readLearningWindow().phase !== "idle") return;
+        const stored = readLearningWindow();
+        const completedMs = Date.parse(result.data.completedAt ?? "");
+        const startedMs = Date.parse(stored.startedAt ?? "");
+        const isFreshCompletion =
+          stored.phase === "idle" ||
+          !Number.isFinite(startedMs) ||
+          (Number.isFinite(completedMs) && completedMs > startedMs);
+        if (!isFreshCompletion) return;
+
+        // `~/.screenpipe` is not the WebView storage partition. A manual data
+        // reset can therefore leave an old empty/done result in localStorage
+        // even though setup just wrote a brand-new completion. The fresh
+        // backend timestamp is authoritative: retire the stale lifecycle and
+        // start this setup's learning window.
+        if (stored.phase !== "idle") resetLearningWindow();
         // The only signal that a window ever opened. Without it an absent
         // outcome is indistinguishable from a window that never started, and
         // "never started" was by far the most common outcome.
         posthog.capture("first_run_learning_started", { opening: opening.kind });
-        setState(beginLearningWindow(opening.anchor));
+        // A same-session handoff can explain its short wait because setup just
+        // caused it. A retry on a later visit runs silently and only surfaces
+        // if it produces a summary worth opening.
+        setState(
+          beginLearningWindow(
+            opening.anchor,
+            opening.kind === "immediate",
+          ),
+        );
       } catch {
         // Without a status read there is no window; the app is unaffected.
       }
@@ -124,13 +152,9 @@ export function useLearningWindow(
   // lives in claimLearningSeed(); this only avoids a redundant round trip.
   const seedingRef = useRef(false);
 
-  // Drop this webview's copy when any webview resets onboarding.
-  //
-  // `resetLearningWindow` in Settings clears only the `home` partition. The
-  // banner also renders in the separate `chat` webview, whose copy kept its
-  // terminal phase and spent seed claim — and the opening effect above returns
-  // immediately unless the phase is `idle`, so that banner never came back no
-  // matter how many times setup was replayed.
+  // Reset the mounted Home owner when Settings resets onboarding. The storage
+  // write and this hook share a webview, but React state still needs the event
+  // to observe the external reset without waiting for a remount.
   useEffect(() => {
     const unlisten = listen(LEARNING_WINDOW_RESET_EVENT, () => {
       resetLearningWindow();
@@ -138,6 +162,18 @@ export function useLearningWindow(
       setCapturedApps([]);
       // Back to `idle`, which re-arms the opening effect above. It will only
       // actually open once setup writes a fresh `completedAt`.
+      setState(readLearningWindow());
+    });
+    return () => {
+      void unlisten.then((off) => off()).catch(() => {});
+    };
+  }, []);
+
+  // A notification deep link can open the summary outside this component.
+  // Re-read the persisted state so the ready card collapses just as it does
+  // for its own button, without relying on a reload.
+  useEffect(() => {
+    const unlisten = listen(LEARNING_SUMMARY_OPENED_EVENT, () => {
       setState(readLearningWindow());
     });
     return () => {
@@ -195,7 +231,12 @@ export function useLearningWindow(
       // costs the account its only AI-written summary, permanently, for a
       // reason that resolves itself a moment later. The ceiling still settles
       // the window if settings somehow never arrive.
-      if (aiRef.current.aiSettingsLoaded === false) return;
+      if (
+        aiRef.current.aiSettingsLoaded === false &&
+        learningWindowRemainingMs(startedAt) > 0
+      ) {
+        return;
+      }
       if (seedingRef.current || !claimLearningSeed()) return;
       seedingRef.current = true;
       // Leave `learning` the moment the evidence gate is satisfied, before the
@@ -259,8 +300,8 @@ export function useLearningWindow(
       }
 
       if (!chatId) {
-        // Fall back to the visible empty state rather than a dead "done" the
-        // user cannot act on.
+        // Settle without surfacing an internal write failure. The event and
+        // stored reason preserve diagnosis; there is no result to offer.
         setState(markLearningEmpty("unknown"));
         return;
       }
@@ -307,10 +348,38 @@ export function useLearningWindow(
   // Ceiling: settle honestly if evidence never arrived.
   useEffect(() => {
     if (!isLearning || !startedAt) return;
+    let cancelled = false;
 
     const settle = async () => {
       if (seedingRef.current) return;
-      const activity = await fetchRecentActivity(startedAt);
+      let activity: Awaited<ReturnType<typeof fetchRecentActivity>> = null;
+      // Engine startup and WebView handoff can transiently miss the local API
+      // exactly when the deadline fires. Retry briefly instead of turning a
+      // transport race into a permanent empty first run.
+      for (let attempt = 0; attempt < 3 && !activity && !cancelled; attempt += 1) {
+        activity = await fetchRecentActivity(startedAt);
+        if (!activity && attempt < 2) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, LEARNING_POLL_INTERVAL_MS),
+          );
+        }
+      }
+      if (cancelled || seedingRef.current) return;
+
+      if (!activity && !state.lateRetryUsed) {
+        posthog.capture("first_run_learning_started", {
+          opening: "recovery",
+        });
+        setState(beginLearningWindow(new Date().toISOString(), false, true));
+        return;
+      }
+
+      // The deadline and the regular poll can finish in either order. Valid
+      // evidence must win; leaving the phase live gives the poll one final
+      // turn to claim and write the summary instead of racing it to `empty`.
+      if (activity && hasEnoughEvidence(activity) && canResolveYet(startedAt)) {
+        return;
+      }
       const reason = classifyEmptyReason(activity);
       posthog.capture("first_run_learning_empty", {
         reason,
@@ -329,8 +398,11 @@ export function useLearningWindow(
       return;
     }
     const timer = setTimeout(() => void settle(), remaining);
-    return () => clearTimeout(timer);
-  }, [isLearning, startedAt]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isLearning, startedAt, state.lateRetryUsed]);
 
   // Report a window that rehydration settled. That path is the one settle with
   // no telemetry: the ceiling effect above is gated on `learning`, and
@@ -340,11 +412,25 @@ export function useLearningWindow(
   // finished setup" in PostHog.
   const pendingEmptyReport = state.pendingEmptyReport;
   const pendingStartedAt = state.startedAt;
+  const lateRetryUsed = state.lateRetryUsed;
   useEffect(() => {
     if (!pendingEmptyReport) return;
     let cancelled = false;
 
     void (async () => {
+      const startedMs = Date.parse(pendingStartedAt ?? "");
+      if (
+        !lateRetryUsed &&
+        Number.isFinite(startedMs) &&
+        Date.now() - startedMs <= LEARNING_WINDOW_GRACE_MS
+      ) {
+        posthog.capture("first_run_learning_started", {
+          opening: "recovery",
+        });
+        setState(beginLearningWindow(new Date().toISOString(), false, true));
+        return;
+      }
+
       // Ask the engine the same question the ceiling effect would have, so the
       // user sees a reason they can act on rather than the `unknown` shrug
       // rehydration parked there. Reporting a real reason is the whole point
@@ -370,21 +456,36 @@ export function useLearningWindow(
     return () => {
       cancelled = true;
     };
-  }, [pendingEmptyReport, pendingStartedAt]);
+  }, [lateRetryUsed, pendingEmptyReport, pendingStartedAt]);
+
+  const markSummaryOpened = useCallback(() => {
+    setState(markLearningSummaryOpened());
+  }, []);
+
+  const markNotificationSent = useCallback(() => {
+    setState(markLearningNotificationSent());
+  }, []);
 
   const dismiss = useCallback(
-    (options: { opened?: boolean } = {}) => {
+    () => {
       posthog.capture("first_run_learning_dismissed", {
         phase: state.phase,
-        // Opening the summary also closes the banner. Without this the two
-        // exits are indistinguishable and "reached ready but never looked" —
-        // the failure worth knowing about — cannot be counted.
-        opened: Boolean(options.opened),
+        // Opening the summary no longer destroys setup. This persisted fact
+        // keeps the analytics distinction when the user eventually finishes
+        // or hides the optional setup dock.
+        opened: Boolean(state.summaryOpenedAt),
       });
       setState(markLearningDone());
     },
-    [state.phase],
+    [state.phase, state.summaryOpenedAt],
   );
 
-  return { ...state, capturedApps, remainingMs, dismiss };
+  return {
+    ...state,
+    capturedApps,
+    remainingMs,
+    markSummaryOpened,
+    markNotificationSent,
+    dismiss,
+  };
 }

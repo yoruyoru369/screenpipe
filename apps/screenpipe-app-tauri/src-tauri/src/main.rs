@@ -39,7 +39,7 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
-mod acp_runtime;
+mod activity_history;
 mod analytics;
 mod auth_session;
 #[allow(deprecated)]
@@ -51,12 +51,14 @@ mod auth_token;
 mod brain_views;
 mod calendar;
 mod capture_session;
+mod chat_control;
 mod chatgpt_oauth;
 #[allow(deprecated)]
 mod commands;
 mod db_recovery_notifications;
 mod db_relaunch;
 mod db_self_heal;
+mod deep_link;
 mod dev_isolation;
 mod diagnostic_logs;
 mod disk_usage;
@@ -77,6 +79,7 @@ mod enterprise_config_file;
 mod enterprise_host_identity;
 mod enterprise_install_metadata;
 mod enterprise_policy;
+mod enterprise_recording_access;
 mod enterprise_sync;
 mod events;
 mod feedback_redact;
@@ -87,6 +90,7 @@ mod ics_calendar;
 mod livetext;
 #[cfg(target_os = "macos")]
 mod livetext_ffi;
+mod enterprise_persistence;
 mod meeting_export;
 mod meeting_live_notes;
 mod meeting_stall_notifications;
@@ -105,7 +109,9 @@ mod permissions;
 mod pi;
 mod pi_command_queue;
 mod power_awake;
+mod port_conflict;
 mod process_exit;
+mod provider_automations;
 mod recording;
 mod remote_support_logs;
 mod remote_sync_commands;
@@ -160,6 +166,7 @@ pub use enterprise_install_metadata::get_enterprise_install_metadata;
 pub use enterprise_host_identity::get_enterprise_host_identity;
 pub use enterprise_policy::set_enterprise_policy;
 pub use enterprise_policy::set_sync_streams;
+pub use enterprise_recording_access::set_enterprise_recording_authorized;
 pub use permissions::do_permissions_check;
 pub use permissions::open_permission_settings;
 pub use permissions::request_permission;
@@ -173,6 +180,7 @@ mod log_files;
 mod media_commands;
 mod native_notification;
 mod native_shortcut_reminder;
+mod native_timeline;
 #[cfg(target_os = "windows")]
 mod native_overlay_win;
 mod notifications;
@@ -409,6 +417,7 @@ macro_rules! define_specta_builder {
             .typ::<enterprise_install_metadata::EnterpriseInstallMetadata>()
             .typ::<enterprise_host_identity::EnterpriseHostIdentity>()
             .typ::<chatgpt_oauth::ChatGptOAuthStatus>()
+            .typ::<provider_automations::ProviderAutomation>()
             .typ::<oauth::OAuthStatus>()
             .typ::<events::JobEvent>()
             .typ::<events::ExportEvent>()
@@ -422,38 +431,19 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
-    if acp_runtime::is_process_guard_mode() {
-        let exit_code = match acp_runtime::run_process_guard() {
-            Ok(exit_code) => exit_code,
-            Err(error) => {
-                eprintln!("[acp-process-guard] {error}");
-                1
-            }
-        };
+    // Handle private ACP subprocess modes before Tauri initializes. The
+    // protocol host lives in core; desktop contributes only schedule projection.
+    if let Some(exit_code) = screenpipe_core::agents::acp::run_hidden_mode(Arc::new(
+        provider_automations::ProviderAutomationObserver,
+    ))
+    .await
+    {
         std::process::exit(exit_code);
     }
 
-    // ACP runs in a hidden mode of this same executable. Keeping the protocol
-    // runtime in Rust avoids shipping a second sidecar while ensuring this path
-    // exits before any Tauri, database, or recording initialization.
-    if acp_runtime::is_runtime_mode() {
-        let exit_code = match acp_runtime::run_from_env().await {
-            Ok(()) => 0,
-            Err(error) => {
-                use std::io::Write as _;
-                let mut stdout = std::io::stdout().lock();
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::json!({ "type": "acp_fatal", "error": error })
-                );
-                let _ = stdout.flush();
-                eprintln!("[acp-runtime] {error}");
-                1
-            }
-        };
-        std::process::exit(exit_code);
-    }
+    // The packaged updater E2E latches whether the replacement process began
+    // before macOS finished releasing the previous app's SCK/TCC state.
+    process_exit::latch_e2e_sck_relaunch_race();
 
     // Point debug builds at their own data dir and ports so `bun tauri dev`
     // can't hand off to (or kill) an installed production app. Must run before
@@ -588,10 +578,10 @@ async fn main() {
     // zbus/tokio conflict) and acts as a fallback on macOS/Windows.
     {
         let args: Vec<String> = std::env::args().collect();
-        let deep_link_url = args
-            .iter()
-            .find(|a| a.starts_with("screenpipe://"))
-            .cloned();
+        let deep_link_url = deep_link::url_from_args(&args);
+        let launch_exe = std::env::current_exe()
+            .ok()
+            .map(|path| path.to_string_lossy().to_string());
 
         let focus_port: u16 = std::env::var("SCREENPIPE_FOCUS_PORT")
             .ok()
@@ -603,6 +593,7 @@ async fn main() {
             .json(&serde_json::json!({
                 "args": args,
                 "deep_link_url": deep_link_url,
+                "launch_exe": launch_exe,
             }))
             .send()
             .await
@@ -610,6 +601,11 @@ async fn main() {
             if resp.status().is_success() {
                 eprintln!("screenpipe: another instance is already running — focused existing window, exiting.");
                 std::process::exit(0);
+            } else if resp.status() == reqwest::StatusCode::CONFLICT {
+                // The control endpoint answered with Screenpipe's explicit
+                // cross-install rejection. Preserve that healthy instance;
+                // the bind path will report it instead of reclaiming its port.
+                crate::port_conflict::mark_healthy_control_server_present();
             }
         }
     }
@@ -918,6 +914,7 @@ async fn main() {
         wants_recording: Arc::new(AtomicBool::new(false)),
         interrupted_meeting: Arc::new(tokio::sync::Mutex::new(None)),
         cloud_token: Arc::new(arc_swap::ArcSwap::new(Arc::new(initial_cloud_token))),
+        history_access: screenpipe_engine::history_access::HistoryAccessPolicy::unrestricted(),
         db_wedge_breaker: recording::new_db_wedge_breaker(),
     };
     let pi_state = pi::PiState(Arc::new(tokio::sync::Mutex::new(pi::PiPool::new())));
@@ -1073,9 +1070,11 @@ async fn main() {
         let app_for_closure = app.clone();
         let args_clone = args.clone();
         let _ = app.run_on_main_thread(move || {
+            let deep_link_url = deep_link::url_from_args(&args_clone);
             // A second app launch is usually the Windows taskbar/dock entry point.
-            // Open the Home app window here; `show_main_window` intentionally
-            // opens the timeline overlay for the global shortcut/tray timeline.
+            // Deep links use route-specific foregrounding: auth returns through
+            // the app-entry gate, explicit timeline links open Timeline, and
+            // every other route starts from Home.
             // macOS can start both the main-app login item and the retained
             // legacy LaunchAgent at once. The plugin's exact --autostart flag
             // always stays background-only. If legacy won the primary race,
@@ -1083,14 +1082,24 @@ async fn main() {
             // during setup; normal subsequent launches retain Home behavior.
             let login_duplicate = should_suppress_startup_handoff(&args_clone);
             if !crate::enterprise_policy::is_app_ui_hidden() && !login_duplicate {
-                let _ = ShowRewindWindow::Home { page: None }.show(&app_for_closure);
+                match deep_link::handoff_window(deep_link_url.as_deref()) {
+                    deep_link::HandoffWindow::AppEntry => {
+                        let _ = ShowRewindWindow::Onboarding.show(&app_for_closure);
+                    }
+                    deep_link::HandoffWindow::Home => {
+                        let _ = ShowRewindWindow::Home { page: None }.show(&app_for_closure);
+                    }
+                    deep_link::HandoffWindow::Timeline => {
+                        commands::show_main_window(app_for_closure.clone());
+                    }
+                }
             } else if login_duplicate {
                 info!("autostart: ignored duplicate login LaunchAgent handoff");
             }
 
             // Forward deep-link URL from args
-            if let Some(url) = args_clone.iter().find(|a| a.starts_with("screenpipe://")) {
-                let _ = app_for_closure.emit("deep-link-received", url.clone());
+            if let Some(url) = deep_link_url {
+                let _ = app_for_closure.emit("deep-link-received", url);
             }
 
             // Forward CLI args
@@ -1120,6 +1129,7 @@ async fn main() {
     let sync_scheduler = screenpipe_connect::sync_scheduler::SyncScheduler::new();
 
     let app = app.manage(recording_state)
+        .manage(activity_history::ActivityHistoryState::default())
         .manage(disk_pressure_notifications::DiskPressureNotificationState::default())
         .manage(pi_state)
         .manage(suggestions_state)
@@ -1132,12 +1142,28 @@ async fn main() {
             // reason parameter) is still the current Apple event.
             let from_autostart = launched_from_autostart();
 
-            #[cfg(any(windows, target_os = "linux"))]
+            #[cfg(windows)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 app.deep_link().register_all()?;
             }
+            #[cfg(target_os = "linux")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // Minimal Linux installs may not provide
+                // `update-desktop-database`. Deep-link registration is useful
+                // integration, but it must not make the recorder fail startup.
+                if let Err(error) = app.deep_link().register_all() {
+                    eprintln!("deep-link registration skipped: {error}");
+                }
+            }
             let app_handle = app.handle();
+
+            // The embedded and overlay native timelines can mount before the
+            // optional shortcut reminder. Install their event bridge eagerly
+            // so attachment never depends on reminder timing or preferences.
+            #[cfg(target_os = "macos")]
+            commands::install_native_timeline_bridge(app_handle);
 
             // Go non-activating before the first window exists. Tauri defaults to
             // `Regular`, and a launching Regular app is activated by macOS — which
@@ -1366,6 +1392,10 @@ async fn main() {
             e2e::seeds::apply_settings(app.handle(), &mut store);
 
             app.manage(store.clone());
+            crate::recording::refresh_history_access_policy(
+                &app.state::<RecordingState>().history_access,
+                &store,
+            );
 
             // Set Chinese HuggingFace mirror early — before any model downloads
             if store.recording.use_chinese_mirror {
@@ -1601,12 +1631,11 @@ async fn main() {
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
 
-            // The old connection slide blocked onboarding on work that can be
-            // done safely and idempotently by Rust. During first-run setup,
-            // wire detected local AI tools in the background; after onboarding
-            // completes this no longer runs, so an explicit Settings removal
-            // remains removed on future launches.
-            if !onboarding_store.is_completed && !app_ui_hidden {
+            // Keep every detected local AI tool connected to screenpipe. The
+            // setup is backgrounded and idempotent: it installs missing MCP +
+            // skill entries, refreshes stale screenpipe launchers, and leaves
+            // unrelated tool settings alone.
+            if !app_ui_hidden {
                 let local_api = recording::local_api_context_from_app(&app.handle());
                 skills::connect_detected_ai_tools_in_background(
                     store.recording.api_auth,
@@ -1676,22 +1705,24 @@ async fn main() {
             // Pre-warm the floating search window (hidden, unfocused) so the
             // FIRST search-shortcut press reuses a warm webview instead of
             // cold-booting Next.js for ~5s (the "search frozen ~10s before you
-            // can type" bug). Cross-platform: create_search_window builds it
-            // hidden and never shows/activates it when unfocused, so there's no
-            // blink or focus-steal. Guarded like the chat pre-create above.
-            if onboarding_store.is_completed && !app_ui_hidden && !headless_startup {
-                let app_handle_search = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Stagger after the chat pre-create (3s) so the two hidden
-                    // webviews don't cold-boot at the same instant as the main
-                    // window.
-                    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-                    if app_handle_search.get_webview_window("search").is_none() {
-                        if let Err(e) = ShowRewindWindow::prewarm_search(&app_handle_search) {
-                            warn!("failed to pre-warm search window: {}", e);
+            // can type" bug). WebView2 can paint hidden transparent
+            // always-on-top windows during startup, so skip this on Windows.
+            #[cfg(not(target_os = "windows"))]
+            {
+                if onboarding_store.is_completed && !app_ui_hidden && !headless_startup {
+                    let app_handle_search = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        // Stagger after the chat pre-create (3s) so the two hidden
+                        // webviews don't cold-boot at the same instant as the main
+                        // window.
+                        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+                        if app_handle_search.get_webview_window("search").is_none() {
+                            if let Err(e) = ShowRewindWindow::prewarm_search(&app_handle_search) {
+                                warn!("failed to pre-warm search window: {}", e);
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
 
             // Pi is NOT auto-started at boot — it starts lazily when the user opens
@@ -1829,6 +1860,7 @@ async fn main() {
                 let wants_recording = recording_state.wants_recording.clone();
                 let is_starting_clone = recording_state.is_starting.clone();
                 let cloud_token_arc = recording_state.cloud_token.clone();
+                let history_access = recording_state.history_access.clone();
                 // DB-wedge auto-recovery hook wiring — captured into the server
                 // thread so the freshly-built `ServerCore`'s DB gets the hook.
                 let app_for_db_wedge = app_handle.clone();
@@ -1983,12 +2015,19 @@ async fn main() {
                                 on_pipe_output,
                                 Some(owned_browser),
                                 cloud_token_arc.clone(),
+                                history_access.clone(),
                             )
                             .await
                             {
                                 Ok(s) => s,
                                 Err(e) => {
                                     error!("Failed to start server core: {}", e);
+                                    if crate::port_conflict::is_error(&e, config.port) {
+                                        crate::port_conflict::show_reclaim_failed(
+                                            &app_for_owned,
+                                            config.port,
+                                        );
+                                    }
                                     is_starting_clone.store(false, std::sync::atomic::Ordering::SeqCst);
                                     return;
                                 }
@@ -2107,6 +2146,23 @@ async fn main() {
             // installed app registered exactly as it is.
             if crate::dev_isolation::is_active() {
                 debug!("dev isolation active, skipping autostart registration");
+            } else if crate::enterprise_persistence::installed() {
+                #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
+                match enterprise_autostart::set_macos_employee_autostart(&app_handle, false) {
+                    Ok(()) => {
+                        info!("persistence: retired redundant employee startup registrations")
+                    }
+                    Err(error) => warn!(
+                        "persistence: could not retire redundant startup registrations: {error}"
+                    ),
+                }
+                #[cfg(all(feature = "enterprise-build", target_os = "windows"))]
+                match app_handle.autolaunch().disable() {
+                    Ok(()) => info!("persistence: retired redundant Windows startup registration"),
+                    Err(error) => warn!(
+                        "persistence: could not retire Windows startup registration: {error}"
+                    ),
+                }
             } else if is_autostart_enabled {
                 let _ = autostart_manager.enable();
             } else {
@@ -2197,19 +2253,33 @@ async fn main() {
                 let self_heal_app = app_handle.clone();
                 let self_heal_db_path = launch_db_path.clone();
                 let notify_data_dir = data_dir.clone();
-                let surface_recovery = !app_ui_hidden && !headless_startup;
+                let recovery_app = app_handle.clone();
+                let automatic_recovery = headless_startup;
                 tauri::async_runtime::spawn(async move {
                     if crate::db_self_heal::try_self_heal_at_launch(
                         self_heal_app,
                         self_heal_db_path,
+                        !automatic_recovery,
                     )
                     .await
                     {
                         return;
                     }
-                    crate::db_relaunch::surface_quarantined_recovery_at_launch(&launch_db_path)
-                        .await;
-                    if surface_recovery {
+                    crate::db_relaunch::surface_quarantined_recovery_at_launch(
+                        &launch_db_path,
+                        !automatic_recovery,
+                    )
+                    .await;
+                    if automatic_recovery {
+                        let recovery = crate::db_recovery_notifications::
+                            start_headless_quarantined_database_recovery(
+                                recovery_app,
+                                notify_data_dir,
+                            );
+                        if let Err(error) = recovery {
+                            error!("failed to start automatic protected database recovery: {error}");
+                        }
+                    } else {
                         crate::db_recovery_notifications::notify_quarantined_database(
                             notify_data_dir,
                         );
@@ -2217,6 +2287,7 @@ async fn main() {
                 });
             }
             crate::disk_pressure_notifications::start(app_handle.clone());
+            activity_history::start(app_handle.clone());
 
             // Background ChatGPT OAuth token refresh — keeps access tokens
             // fresh so the lazy path in get_valid_token() rarely needs to
@@ -2488,14 +2559,15 @@ async fn main() {
                         }
                     }
                     // Defer off the event stack so run handler stays panic-free.
-                    // Open the settings/app window (not the timeline overlay).
+                    // Showing Onboarding is the app-entry gate: it focuses setup
+                    // while incomplete and routes to Home once complete.
                     if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant()
                     {
                         return;
                     }
                     let app = app_handle.app_handle().clone();
                     let _ = app_handle.app_handle().run_on_main_thread(move || {
-                        let _ = ShowRewindWindow::Home { page: None }.show(&app);
+                        let _ = ShowRewindWindow::Onboarding.show(&app);
                     });
                 }
                 _ => {}
