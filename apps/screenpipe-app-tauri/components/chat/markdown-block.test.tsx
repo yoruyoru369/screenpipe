@@ -11,6 +11,7 @@ const {
   openViewerWindowMock,
   setPendingNavigationMock,
   showWindowMock,
+  routeNotificationDeeplinkMock,
 } = vi.hoisted(() => ({
   emitMock: vi.fn(async () => undefined),
   openViewerWindowMock: vi.fn(async (_path: string) => ({
@@ -18,6 +19,7 @@ const {
   })),
   setPendingNavigationMock: vi.fn(),
   showWindowMock: vi.fn(async () => ({ status: "ok" as const })),
+  routeNotificationDeeplinkMock: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({
@@ -37,6 +39,10 @@ vi.mock("@/lib/hooks/use-timeline-store", () => ({
       setPendingNavigation: setPendingNavigationMock,
     }),
   },
+}));
+
+vi.mock("@/lib/notifications/actions", () => ({
+  routeNotificationDeeplink: routeNotificationDeeplinkMock,
 }));
 
 describe("MarkdownBlock", () => {
@@ -59,6 +65,23 @@ describe("MarkdownBlock", () => {
 
     expect(onOpenViewerPath).toHaveBeenCalledWith("/tmp/chat-preview.md");
     expect(openViewerWindowMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a compact preview when an external link receives keyboard focus", () => {
+    render(
+      <MarkdownBlock
+        text="[screenpipe repository](https://github.com/screenpipe/screenpipe)"
+        isUser={false}
+      />,
+    );
+
+    fireEvent.focus(
+      screen.getByRole("link", { name: "screenpipe repository" }),
+    );
+
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "screenpipe/screenpipe",
+    );
   });
 
   it.each([
@@ -88,4 +111,22 @@ describe("MarkdownBlock", () => {
       });
     },
   );
+
+  it("opens meeting evidence in the meeting record", async () => {
+    render(
+      <MarkdownBlock
+        text="[planning meeting](screenpipe://meeting/42)"
+        isUser={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "planning meeting" }));
+
+    await waitFor(() => {
+      expect(routeNotificationDeeplinkMock).toHaveBeenCalledWith(
+        "screenpipe://meeting/42",
+      );
+    });
+    expect(setPendingNavigationMock).not.toHaveBeenCalled();
+  });
 });

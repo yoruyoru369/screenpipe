@@ -52,11 +52,16 @@ export interface NotificationAction {
   open_in_chat?: boolean;
 }
 
-// Route a screenpipe:// deeplink to the window that can handle it. Meeting
-// deeplinks belong to the Home window's meetings page; everything else to Main.
+// Route a screenpipe:// deeplink to the window that can handle it. Meeting and
+// Activity deeplinks belong to Home; timeline and other routes belong to Main.
 export function isMeetingDeeplink(url: string) {
   return url.startsWith("screenpipe://meeting/") ||
     url.startsWith("screenpipe://meeting?");
+}
+
+export function isActivityDeeplink(url: string) {
+  return url === "screenpipe://activity" ||
+    url.startsWith("screenpipe://activity?");
 }
 
 export function parseMeetingDeeplink(url: string): {
@@ -82,9 +87,47 @@ export function parseMeetingDeeplink(url: string): {
 }
 
 export function windowForDeeplink(url: string) {
-  return isMeetingDeeplink(url)
-    ? { Home: { page: "meetings" } }
-    : "Main";
+  if (isMeetingDeeplink(url)) return { Home: { page: "meetings" } };
+  if (isActivityDeeplink(url)) return { Home: { page: "activity" } };
+  return "Main";
+}
+
+/**
+ * Local file a notification action points at, or null. Covers the two shapes
+ * producers use: `screenpipe://view?path=…` (what the /notify body rewriter
+ * emits) and raw `file://` URLs (what pipes tend to put in link actions).
+ *
+ * These must open the in-app viewer window directly. Routing them like a
+ * generic deeplink shows the Main timeline overlay first, which then covers
+ * the viewer — the user clicks "open report" and sees the timeline instead.
+ */
+export function viewerPathFromNotificationUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.protocol === "screenpipe:" &&
+    (parsed.host === "view" || parsed.pathname === "view")
+  ) {
+    return parsed.searchParams.get("path");
+  }
+  if (parsed.protocol === "file:") {
+    let path = parsed.pathname;
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // keep the raw path when the URL contains malformed escapes
+    }
+    // file:///C:/… parses to /C:/… — strip the artificial leading slash.
+    if (/^\/[A-Za-z]:[\\/]/.test(path)) {
+      path = path.slice(1);
+    }
+    return path || null;
+  }
+  return null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -97,12 +140,26 @@ export async function routeNotificationDeeplink(
     showWindowActivated?: typeof commands.showWindowActivated;
     emitEvent?: typeof emit;
     sleepMs?: (ms: number) => Promise<void>;
+    openViewerWindow?: typeof commands.openViewerWindow;
   } = {},
 ): Promise<void> {
   const showWindowActivated =
     deps.showWindowActivated ?? commands.showWindowActivated;
   const emitEvent = deps.emitEvent ?? emit;
   const sleepMs = deps.sleepMs ?? sleep;
+
+  // File links open the viewer window directly. Showing Main first would put
+  // the fullscreen timeline overlay on top of the viewer that's about to open.
+  const viewerPath = viewerPathFromNotificationUrl(url);
+  if (viewerPath) {
+    const openViewerWindow =
+      deps.openViewerWindow ?? commands.openViewerWindow;
+    const result = await openViewerWindow(viewerPath);
+    if (result.status === "error") {
+      throw new Error(result.error);
+    }
+    return;
+  }
 
   await showWindowActivated(windowForDeeplink(url));
 
@@ -254,7 +311,10 @@ export async function executeNotificationAction(
     case "link":
     case "deeplink": {
       if (action.url) {
-        if (action.url.startsWith("screenpipe://")) {
+        if (
+          action.url.startsWith("screenpipe://") ||
+          viewerPathFromNotificationUrl(action.url)
+        ) {
           await routeNotificationDeeplink(action.url);
         } else {
           // External URL — open in system browser.
@@ -284,7 +344,10 @@ export async function executeNotificationAction(
         action.deeplinkUrl ||
         ctx.sourceUrl;
       if (sourceUrl) {
-        if (sourceUrl.startsWith("screenpipe://")) {
+        if (
+          sourceUrl.startsWith("screenpipe://") ||
+          viewerPathFromNotificationUrl(sourceUrl)
+        ) {
           await routeNotificationDeeplink(sourceUrl);
         } else {
           const { open } = await import("@tauri-apps/plugin-shell");

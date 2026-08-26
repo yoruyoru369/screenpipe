@@ -633,6 +633,8 @@ mod tests {
             agent: "pi".to_string(),
             model: "claude-haiku-4-5".to_string(),
             provider: None,
+            cloud_agent: None,
+            effort: Default::default(),
             preset: vec![],
             connections: vec![],
             permissions: PipePermissionsConfig::Preset("reader".to_string()),

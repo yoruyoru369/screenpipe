@@ -10,6 +10,7 @@ import {
   AttachedContextCard,
   parseAttachedContext,
 } from "./attached-context";
+import { attachContextToUserMessage } from "@/lib/chat/attached-context";
 
 // Shaped after a real saved conversation: a 4,853-character user bubble whose
 // visible text opened with raw JSON and pushed the actual instruction below
@@ -25,6 +26,34 @@ const PROMPT =
 const SNAPSHOT_MESSAGE = `[Context from search: ${SNAPSHOT_PAYLOAD}]\n\n${PROMPT}`;
 
 describe("attached context", () => {
+  it("builds one parseable reviewed-snapshot turn for transport and display", () => {
+    const content = attachContextToUserMessage({
+      message: "Share this to Notion",
+      context: SNAPSHOT_PAYLOAD,
+      source: "connected-share-meeting",
+    });
+
+    expect(content).toContain("[Context from reviewed Screenpipe snapshot:");
+    expect(parseAttachedContext(content)).toMatchObject({
+      label: "frozen Screenpipe snapshot",
+      message: "Share this to Notion",
+    });
+  });
+
+  it("marks activity history context as an episode rather than generic search", () => {
+    const content = attachContextToUserMessage({
+      message: "What were the takeaways?",
+      context: "Time: 2026-08-18T23:18:59Z to 2026-08-18T23:29:59Z\nActivity: Analyzed agent frustration",
+      source: "activity-history-chat",
+    });
+
+    expect(content).toContain("[Context from activity episode:");
+    expect(parseAttachedContext(content)).toMatchObject({
+      label: "context from activity episode",
+      message: "What were the takeaways?",
+    });
+  });
+
   it("leaves ordinary messages alone", () => {
     expect(parseAttachedContext("what did I work on today?")).toBeNull();
     // A bracketed sentence is not an envelope.

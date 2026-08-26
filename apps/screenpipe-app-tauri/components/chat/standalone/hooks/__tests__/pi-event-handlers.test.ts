@@ -37,7 +37,11 @@ describe("pi foreground event helpers", () => {
   });
 
   it("turns a silent prompt-start timeout into an actionable retry", () => {
-    expect(isPiPromptStartTimeout("AI agent did not start responding within 15 seconds")).toBe(true);
+    expect(
+      isPiPromptStartTimeout(
+        "AI agent did not start responding within its startup grace period",
+      ),
+    ).toBe(true);
     expect(isPiPromptStartTimeout("rate limited")).toBe(false);
     expect(piPromptStartTimeoutMessage()).toBe(
       "The AI did not start responding, so screenpipe restarted it. Retry your message.",
@@ -105,6 +109,37 @@ describe("pi steering helpers", () => {
     expect(prompt).toContain("Original user request:\nwrite a summary");
     expect(prompt).toContain("1. make it shorter\n2. focus on risks");
     expect(prompt).toContain("Final steering message:\nfocus on risks");
+    expect(prompt).toContain(
+      "Only supersede conflicting parts; preserve non-conflicting constraints",
+    );
+  });
+
+  it("keeps unrelated constraints while the final correction wins", () => {
+    const prompt = buildSteerPrompt([
+      {
+        turnIntentId: "steer-1",
+        sessionId: "session-1",
+        content: "actually inspect the native window",
+        originalUserMessage: "inspect read-only in browser mocks; do not launch or kill the native app",
+        images: [],
+        optimisticUserId: "optimistic-1",
+        createdAt: 1,
+      },
+      {
+        turnIntentId: "steer-2",
+        sessionId: "session-1",
+        content: "final correction: browser mock only",
+        originalUserMessage: "inspect read-only in browser mocks; do not launch or kill the native app",
+        images: [],
+        optimisticUserId: "optimistic-2",
+        createdAt: 2,
+      },
+    ]);
+
+    expect(prompt).toContain("final correction: browser mock only");
+    expect(prompt).toContain("inspect read-only in browser mocks; do not launch or kill the native app");
+    expect(prompt).toContain("final steering message has highest priority");
+    expect(prompt).toContain("preserve non-conflicting constraints");
   });
 });
 

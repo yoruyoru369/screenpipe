@@ -103,12 +103,14 @@ vi.mock("@/components/meeting-notes/note-view", async () => {
       initialTranscriptOpen,
       transcriptOpenIntent,
       transcriptOpenRequestKey,
+      initialWorkspaceTab,
     }: {
       meeting: MeetingRecord;
       onBack: () => void;
       initialTranscriptOpen?: boolean;
       transcriptOpenIntent?: "open" | "closed";
       transcriptOpenRequestKey?: number;
+      initialWorkspaceTab?: "notes" | "transcript" | "summary";
     }) => {
       // Preserve compatibility with the pre-fix open-only prop so the transition
       // reaches the actual bug: legacy false is absence of intent and therefore
@@ -120,6 +122,8 @@ vi.mock("@/components/meeting-notes/note-view", async () => {
           `screenpipe:meeting:${meeting.id}:transcript-open`,
         ) === "true";
       const transcriptOpen = resolveTranscriptOpen(intent, persistedOpen);
+      const activeTab =
+        initialWorkspaceTab ?? (transcriptOpen ? "transcript" : "notes");
 
       React.useEffect(() => {
         if (intent === undefined) return;
@@ -133,6 +137,7 @@ vi.mock("@/components/meeting-notes/note-view", async () => {
         <section
           aria-label="meeting note"
           data-transcript-open={String(transcriptOpen)}
+          data-active-tab={activeTab}
         >
           <button onClick={onBack}>back</button>
           <div data-testid="saved-note">{meeting.note ?? ""}</div>
@@ -177,7 +182,7 @@ afterEach(() => {
 });
 
 describe("MeetingNotesSection meeting selection", () => {
-  it("opens the transcript for an ordinary meeting with no saved note", async () => {
+  it("opens notes for an ordinary meeting with no saved outcome", async () => {
     mocks.localFetch.mockResolvedValue(meetingsResponse([emptyNoteMeeting]));
     renderMeetingNotes();
 
@@ -186,12 +191,13 @@ describe("MeetingNotesSection meeting selection", () => {
     );
 
     const note = await screen.findByRole("region", { name: "meeting note" });
-    expect(note).toHaveAttribute("data-transcript-open", "true");
+    expect(note).toHaveAttribute("data-transcript-open", "false");
+    expect(note).toHaveAttribute("data-active-tab", "notes");
     expect(screen.getByTestId("saved-note")).toBeEmptyDOMElement();
-    expect(screen.getByText(TRANSCRIPT)).toBeVisible();
+    expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
   });
 
-  it("shows a saved summary alongside the transcript after an ordinary open", async () => {
+  it("opens a saved summary after an ordinary completed-meeting click", async () => {
     mocks.localFetch.mockResolvedValue(meetingsResponse([summarizedMeeting]));
     renderMeetingNotes();
 
@@ -199,10 +205,13 @@ describe("MeetingNotesSection meeting selection", () => {
       await screen.findByRole("button", { name: summarizedMeeting.title! }),
     );
 
-    expect((await screen.findByTestId("saved-note")).textContent).toBe(
+    const note = await screen.findByRole("region", { name: "meeting note" });
+    expect(note).toHaveAttribute("data-transcript-open", "false");
+    expect(note).toHaveAttribute("data-active-tab", "summary");
+    expect(screen.getByTestId("saved-note").textContent).toBe(
       summarizedMeeting.note,
     );
-    expect(screen.getByText(TRANSCRIPT)).toBeVisible();
+    expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
   });
 
   it("preserves an explicit deep-link request to keep the transcript closed", async () => {
@@ -224,7 +233,12 @@ describe("MeetingNotesSection meeting selection", () => {
     expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
   });
 
-  it("keeps an explicit false reopen closed after the same meeting persisted open", async () => {
+  it("opens Activity meeting artifacts on notes when no summary exists", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?meetingId=42&meetingView=best",
+    );
     mocks.localFetch.mockImplementation(async (path: string) =>
       path === "/meetings/42"
         ? new Response(JSON.stringify(emptyNoteMeeting), {
@@ -235,19 +249,47 @@ describe("MeetingNotesSection meeting selection", () => {
     );
     renderMeetingNotes();
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: emptyNoteMeeting.title! }),
+    const note = await screen.findByRole("region", { name: "meeting note" });
+    expect(note).toHaveAttribute("data-active-tab", "notes");
+    expect(note).toHaveAttribute("data-transcript-open", "false");
+  });
+
+  it("opens Activity meeting artifacts on the saved summary", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?meetingId=43&meetingView=best",
     );
+    mocks.localFetch.mockImplementation(async (path: string) =>
+      path === "/meetings/43"
+        ? new Response(JSON.stringify(summarizedMeeting), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        : meetingsResponse([summarizedMeeting]),
+    );
+    renderMeetingNotes();
+
     expect(
       await screen.findByRole("region", { name: "meeting note" }),
-    ).toHaveAttribute("data-transcript-open", "true");
-    expect(
-      window.sessionStorage.getItem(
-        `screenpipe:meeting:${emptyNoteMeeting.id}:transcript-open`,
-      ),
-    ).toBe("true");
+    ).toHaveAttribute("data-active-tab", "summary");
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "back" }));
+  it("keeps an explicit false reopen closed after the same meeting persisted open", async () => {
+    window.sessionStorage.setItem(
+      `screenpipe:meeting:${emptyNoteMeeting.id}:transcript-open`,
+      "true",
+    );
+    mocks.localFetch.mockImplementation(async (path: string) =>
+      path === "/meetings/42"
+        ? new Response(JSON.stringify(emptyNoteMeeting), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        : meetingsResponse([emptyNoteMeeting]),
+    );
+    renderMeetingNotes();
+
     await screen.findByRole("button", { name: emptyNoteMeeting.title! });
     await waitFor(() => expect(mocks.openMeetingNoteListener).not.toBeNull());
     await act(async () => {

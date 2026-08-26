@@ -55,7 +55,7 @@ export function ChatComposer({
   return (
     <div
       ref={input.sectionRef}
-      className="relative bg-gradient-to-t from-background via-background/80 to-transparent"
+      className="relative border-t border-border/60 bg-background"
     >
       <div className={CHAT_RAIL_CLASS}>
         <PrefillContextBanner prefill={prefill} />
@@ -82,7 +82,7 @@ export function ChatComposer({
             isDragging={input.isDragging}
           />
 
-          <UpgradeQuotaBanner />
+          <UpgradeQuotaBanner activePreset={modelControls.activePreset} />
           <FreePlanWallStrip />
           <FreeUpgradeSheet />
 
@@ -105,6 +105,14 @@ export function ChatComposer({
             filters={filters}
             modelControls={modelControls}
             isStreaming={input.isLoading || input.isStreaming}
+            dictation={{
+              inputValue: input.value,
+              inputRef: input.inputRef,
+              onValueChange: input.onValueChange,
+              disabled: !input.canChat,
+              sessionId: modelControls.currentQueueSessionId,
+              isMac: queue.isMac,
+            }}
             sendButton={{
               isStopMode,
               hasPendingDocs,

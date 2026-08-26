@@ -69,8 +69,8 @@ const APP_PID_FILE = resolve(E2E_DATA_DIR, 'app.pid');
 
 // `onboarding` marks the onboarding store complete so the app drops straight
 // into the home window. `no-recording` disables vision + audio so the server
-// boots without Screen Recording / Microphone TCC — without it, an unsigned
-// debug build (`--no-sign`) on a host without granted permissions would have
+// boots without Screen Recording / Microphone TCC — without it, a raw debug
+// binary on a host without granted permissions would have
 // the server early-return at the permission gate and `/health` would never
 // respond. See e2e/seeds.rs + the feature-gated startup hooks in main.rs.
 //
@@ -87,6 +87,9 @@ const APP_PID_FILE = resolve(E2E_DATA_DIR, 'app.pid');
 // src-tauri/src/e2e/seeds.rs) so the search-bugs spec runs inside the normal
 // `test:e2e` job instead of needing a separate CI step. Harmless for other
 // specs (namespaced "vector" frames; the empty-state spec uses its own query).
+// `pii-text-redaction` enables only the local text reconciliation worker. The
+// dedicated coordination spec uses it with `no-recording`, then writes a
+// synthetic backlog through `/add` and verifies redaction plus app liveness.
 // `sck-enumeration-hang-once` is a debug-only macOS fault injection used by the
 // opt-in SCK startup recovery spec; the first monitor callback never returns.
 // `visual-check-hang-once` is a debug-only macOS fault injection used by the
@@ -132,12 +135,12 @@ export const E2E_BUN_PATH = resolve(
   APP_ROOT,
   'src-tauri',
   'target',
-  'debug',
+  'debug-dev',
   process.platform === 'win32' ? 'bun.exe' : 'bun',
 );
 
 export function getAppPath(): string {
-  const base = resolve(APP_ROOT, 'src-tauri/target/debug');
+  const base = resolve(APP_ROOT, 'src-tauri/target/debug-dev');
   const name = process.platform === 'win32' ? 'screenpipe-app.exe' : 'screenpipe-app';
   return resolve(base, name);
 }
@@ -280,7 +283,7 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
   const appPath = getAppPath();
   if (!existsSync(appPath)) {
     throw new Error(
-      `Screenpipe debug binary not found at ${appPath}. Build with e2e feature: cd apps/screenpipe-app-tauri && bun tauri build --no-sign --debug --verbose --no-bundle -- --features e2e`
+      `Screenpipe debug binary not found at ${appPath}. Build with e2e feature: cd apps/screenpipe-app-tauri && bun run build:tauri:e2e`
     );
   }
 
@@ -298,7 +301,10 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
 
   if (backgroundAiToolsEnabled) {
     // Cross-platform fake agent homes. The app's e2e-only home override keeps
-    // the native background writer away from real ~/.codex and ~/.cursor.
+    // the native background writer away from real ~/.claude.json, ~/.codex,
+    // ~/.cursor, ~/.gemini, and ~/.runner.
+    mkdirSync(E2E_AI_TOOLS_HOME, { recursive: true });
+    writeFileSync(resolve(E2E_AI_TOOLS_HOME, '.claude.json'), '{}\n');
     mkdirSync(resolve(E2E_AI_TOOLS_HOME, '.codex'), { recursive: true });
     writeFileSync(
       resolve(E2E_AI_TOOLS_HOME, '.codex', 'config.toml'),
@@ -310,6 +316,24 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
       JSON.stringify({
         mcpServers: { existing: { command: 'existing-server' } },
         theme: 'dark',
+      }),
+    );
+    mkdirSync(resolve(E2E_AI_TOOLS_HOME, '.gemini'), { recursive: true });
+    writeFileSync(
+      resolve(E2E_AI_TOOLS_HOME, '.gemini', 'settings.json'),
+      JSON.stringify({
+        mcpServers: { existing: { command: 'gemini-existing' } },
+        ui: { theme: 'GitHub' },
+      }),
+    );
+    mkdirSync(resolve(E2E_AI_TOOLS_HOME, '.runner'), { recursive: true });
+    writeFileSync(
+      resolve(E2E_AI_TOOLS_HOME, '.runner', 'mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          existing: { type: 'http', url: 'https://example.com/mcp' },
+        },
+        workspace: 'kept',
       }),
     );
   }

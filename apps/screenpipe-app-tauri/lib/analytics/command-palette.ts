@@ -14,14 +14,18 @@ export const COMMAND_PALETTE_ACTION_IDS = [
   "new_chat",
   "pause_recording",
   "resume_recording",
+  "next_recent_chat",
+  "previous_recent_chat",
   "go_chat",
   "go_brain",
   "go_meetings",
   "go_scheduled",
   "go_timeline",
+  "go_activity",
   "go_connections",
   "toggle_sidebar",
   "open_settings",
+  "open_shortcut_guide",
   "open_shortcut_settings",
 ] as const;
 

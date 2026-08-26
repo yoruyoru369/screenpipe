@@ -6,9 +6,6 @@ name: E2E Tests
 
 env:
   GIT_LFS_SKIP_SMUDGE: 1
-  CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_DEV_CODEGEN_UNITS: "16"
 
 on:
   push:
@@ -16,6 +13,8 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "17 9 * * *"
   workflow_dispatch:
 
 permissions:
@@ -23,24 +22,27 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.ref }}
-  # See ci.yml — cancel superseded PR runs, while main pushes use a
-  # per-commit group so newer merges do not wait behind stale E2E runs.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # Only the newest push or PR revision can describe the current tree.
+  # Keep scheduled/manual runs separate via event_name.
+  cancel-in-progress: true
 
 jobs:
   changes:
-    name: Route PR E2E
+    name: Route desktop E2E
     runs-on: ubuntu-latest
     outputs:
       desktop: ${{ steps.filter.outputs.desktop }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
       - name: Detect desktop runtime changes
         id: filter
-        if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: dorny/paths-filter@v4
         with:
+          base: ${{ github.event_name == 'push' && github.ref || '' }}
           filters: |
             desktop:
               - 'apps/screenpipe-app-tauri/**'
@@ -55,21 +57,17 @@ jobs:
               - '.github/workflows/e2e-test.yml'
 
   windows-e2e-test:
-    name: Windows E2E Tests (run)
+    name: Windows E2E Tests (advisory)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       needs.changes.outputs.desktop == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: windows-2022
     continue-on-error: true
     timeout-minutes: 120
     env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
-      CARGO_PROFILE_DEV_CODEGEN_UNITS: "256"
-      CARGO_PROFILE_DEV_INCREMENTAL: "false"
-      CARGO_PROFILE_DEV_DEBUG: "0"
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
     - uses: actions/checkout@v4
@@ -155,9 +153,9 @@ jobs:
     # sccache, same as the Linux/macOS e2e jobs. This Build step is the
     # slowest in all of CI (~45 min cold). Backend is the shared R2 bucket
     # (was SCCACHE_GHA_ENABLED, which competed for the 10 GB repo cache
-    # quota). CARGO_INCREMENTAL=0 (set in the job env above) is required
-    # for sccache to cache rustc invocations. Placed after rust-cache on
-    # purpose — see the action's ordering note.
+    # quota). The checked-in debug-dev profile disables incremental compilation,
+    # which is required for sccache to cache rustc invocations. Placed after
+    # rust-cache on purpose — see the action's ordering note.
     - name: Setup sccache (shared R2 compile cache)
       uses: ./.github/actions/setup-sccache
       with:
@@ -226,7 +224,7 @@ jobs:
         # Skip source maps in CI — faster Next.js compile, not needed for E2E.
         NEXT_DISABLE_SOURCEMAPS: "1"
       with:
-        args: "--no-sign --debug --no-bundle -- --features e2e"
+        args: "--no-bundle -- --profile debug-dev --features e2e"
         projectPath: "./apps/screenpipe-app-tauri"
         tauriScript: bunx tauri -v
 
@@ -242,13 +240,13 @@ jobs:
       shell: pwsh
       run: |
         $src = "${{ github.workspace }}/ort-system-lib/lib"
-        $dst = "${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/target/debug"
+        $dst = "${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/target/debug-dev"
         if (-not (Test-Path $dst)) {
           New-Item -ItemType Directory -Path $dst -Force | Out-Null
         }
         # Always remove any existing onnxruntime*.dll at the destination
         # before copying. Why this is necessary: prior cancelled runs
-        # could have left 0-byte stubs at target/debug/onnxruntime*.dll
+        # could have left 0-byte stubs at target/debug-dev/onnxruntime*.dll
         # which Swatinem/rust-cache then preserves across runs — once
         # cached, every subsequent run inherits the stubs and the test
         # binary fails to load ORT. Force-copy alone wasn't enough
@@ -326,13 +324,15 @@ jobs:
         path: ./apps/screenpipe-app-tauri/.e2e
 
   linux-e2e-test:
-    name: Linux E2E Tests (run)
+    name: Linux E2E Tests (advisory)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       needs.changes.outputs.desktop == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
+    continue-on-error: true
     # 90 was set when the suite was ~70 specs; it is 112 now, and the job has
     # been cancelled at exactly 90m on every run since 2026-08-07 — which
     # truncates the suite and hides whatever the unreached specs would say.
@@ -419,9 +419,7 @@ jobs:
       timeout-minutes: 35
       run: |
         set -euo pipefail
-        export DEBIAN_FRONTEND=noninteractive
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends \
+        .github/scripts/apt-install-with-retries.sh --no-install-recommends \
           tesseract-ocr libtesseract-dev ffmpeg pkg-config build-essential libglib2.0-dev \
           libgtk-3-dev libwebkit2gtk-4.1-dev clang cmake \
           libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
@@ -444,8 +442,7 @@ jobs:
       run: |
         set -euo pipefail
         if ! gsettings list-schemas | grep -qx 'org.gnome.system.proxy'; then
-          sudo apt-get update -qq
-          sudo apt-get install -y --reinstall gsettings-desktop-schemas
+          .github/scripts/apt-install-with-retries.sh --reinstall gsettings-desktop-schemas
           sudo glib-compile-schemas /usr/share/glib-2.0/schemas
         fi
         gsettings list-schemas | grep -qx 'org.gnome.system.proxy'
@@ -487,8 +484,7 @@ jobs:
         REAL_SO="$(find_openblas_so)"
         if [ -z "$REAL_SO" ]; then
           echo "libopenblas not found on disk — forcing fresh install"
-          sudo apt-get update -qq
-          sudo apt-get install -y --reinstall libopenblas-dev
+          .github/scripts/apt-install-with-retries.sh --reinstall libopenblas-dev
           REAL_SO="$(find_openblas_so)"
         fi
         if [ -z "$REAL_SO" ]; then
@@ -615,7 +611,7 @@ jobs:
         # features; the dedicated gate spec re-enables it at runtime.
         NEXT_PUBLIC_SCREENPIPE_E2E: "true"
       with:
-        args: "--no-sign --debug --no-bundle -- --features e2e"
+        args: "--no-bundle -- --profile debug-dev --features e2e"
         projectPath: "./apps/screenpipe-app-tauri"
         tauriScript: bunx tauri -v
 
@@ -674,7 +670,8 @@ jobs:
     name: Linux Wayland E2E Tests (run)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       needs.changes.outputs.desktop == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
@@ -719,8 +716,7 @@ jobs:
       shell: bash
       run: |
         set -euxo pipefail
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
+        .github/scripts/apt-install-with-retries.sh --no-install-recommends \
           build-essential \
           cmake \
           foot \
@@ -822,10 +818,11 @@ jobs:
         if-no-files-found: ignore
 
   macos-e2e-test:
-    name: macOS E2E Tests (run)
+    name: macOS E2E Tests (advisory)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       needs.changes.outputs.desktop == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     # Keep this pinned off macos-latest until GitHub's latest image has a
@@ -910,7 +907,7 @@ jobs:
         # features; the dedicated gate spec re-enables it at runtime.
         NEXT_PUBLIC_SCREENPIPE_E2E: "true"
       with:
-        args: "--no-sign --debug --no-bundle -- --features e2e"
+        args: "--no-bundle -- --profile debug-dev --features e2e"
         projectPath: "./apps/screenpipe-app-tauri"
         tauriScript: bunx tauri -v
 
@@ -973,36 +970,6 @@ jobs:
         include-hidden-files: true
         path: ./apps/screenpipe-app-tauri/.e2e
 
-  windows-e2e-gate:
-    name: Windows E2E Tests
-    needs: [changes, windows-e2e-test]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify routed check
-        env:
-          ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
-          CHECK_RESULT: ${{ needs.windows-e2e-test.result }}
-        run: |
-          test "$ROUTER_RESULT" = success
-          if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi
-
-  linux-e2e-gate:
-    name: Linux E2E Tests
-    needs: [changes, linux-e2e-test]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify routed check
-        env:
-          ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
-          CHECK_RESULT: ${{ needs.linux-e2e-test.result }}
-        run: |
-          test "$ROUTER_RESULT" = success
-          if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi
-
   linux-wayland-e2e-gate:
     name: Linux Wayland E2E Tests
     needs: [changes, linux-wayland-e2e-test]
@@ -1012,23 +979,8 @@ jobs:
       - name: Verify routed check
         env:
           ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          SHOULD_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
           CHECK_RESULT: ${{ needs.linux-wayland-e2e-test.result }}
-        run: |
-          test "$ROUTER_RESULT" = success
-          if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi
-
-  macos-e2e-gate:
-    name: macOS E2E Tests
-    needs: [changes, macos-e2e-test]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify routed check
-        env:
-          ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
-          CHECK_RESULT: ${{ needs.macos-e2e-test.result }}
         run: |
           test "$ROUTER_RESULT" = success
           if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi

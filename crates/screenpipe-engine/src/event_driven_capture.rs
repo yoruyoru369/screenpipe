@@ -8,17 +8,22 @@
 //! Captures happen only on meaningful user events: app switch, window focus,
 //! click, typing pause, scroll stop, clipboard, and periodic idle fallback.
 
-use crate::capture_exclusions::{probe_excluded_sck_window_ids, storage_excluded_sck_window_ids};
+use crate::capture_exclusions::{
+    exclusion_sources, probe_excluded_sck_window_ids, storage_excluded_sck_window_ids,
+};
 use crate::hot_frame_cache::{HotFrame, HotFrameCache};
 use crate::power::PowerProfile;
-use crate::semantic_worker::{SemanticProjectionJob, SemanticProjectionSender};
+use crate::semantic_worker::{SemanticCaptureGap, SemanticProjectionJob, SemanticProjectionSender};
 use crate::visual_probe::bounded_visual_probe;
 use anyhow::Result;
 use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
-use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
+use screenpipe_capture::paired_capture::{
+    detach_tree_from_pixels, paired_capture, CaptureContext, PairedCaptureResult,
+};
+use screenpipe_capture::{TreeWalkerWorker, TreeWalkerWorkerOutcome};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
@@ -43,8 +48,15 @@ use tracing::{debug, error, info, warn};
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(target_os = "macos"))]
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const TREE_WALK_WORKER_TIMEOUT_GRACE: Duration = Duration::from_millis(750);
 const WARM_VISUAL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const WARM_FOCUS_BACKSTOP_INTERVAL: Duration = Duration::from_secs(1);
+
+fn tree_walk_worker_timeout(config: &TreeWalkerConfig) -> Duration {
+    config
+        .effective_walk_timeout()
+        .saturating_add(TREE_WALK_WORKER_TIMEOUT_GRACE)
+}
 
 /// Debug-only one-shot fault state for the exact production symptom where all
 /// monitor tasks remain alive but stop issuing capture heartbeats:
@@ -249,6 +261,7 @@ pub(crate) struct CaptureParams<'a> {
     pub device_name: &'a str,
     pub snapshot_writer: &'a SnapshotWriter,
     pub tree_walker_config: &'a TreeWalkerConfig,
+    pub tree_walker: &'a TreeWalkerWorker,
     pub window_filters: WindowFilters,
     pub ignored_patterns: Vec<WindowPattern>,
     pub use_pii_removal: bool,
@@ -897,6 +910,32 @@ fn record_persisted_capture(
     monitor.record_db_write(duration);
 }
 
+/// Record the mutually exclusive live OCR cache outcomes carried by a
+/// successfully persisted capture result.
+fn record_ocr_result_metrics(
+    vision_metrics: &screenpipe_screen::PipelineMetrics,
+    result: &PairedCaptureResult,
+) {
+    debug_assert!(
+        !(result.ocr_cache_hit && result.ocr_duration_ms.is_some()),
+        "a capture cannot both reuse cached OCR and execute OCR"
+    );
+
+    if result.ocr_cache_hit {
+        vision_metrics.record_ocr_cache_hit();
+    }
+    match (result.ocr_duration_ms, result.ocr_was_empty) {
+        (Some(ocr_ms), true) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+            vision_metrics.record_ocr_empty();
+        }
+        (Some(ocr_ms), false) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+        }
+        (None, _) => {}
+    }
+}
+
 fn record_capture_skip(
     aggregate: &screenpipe_screen::PipelineMetrics,
     monitor: &screenpipe_screen::PipelineMetrics,
@@ -1054,6 +1093,8 @@ pub(crate) async fn event_driven_capture_loop(
     // (slides, screen-share, demos) bypass AX-hash dedup during meetings even
     // when no HD session is running. Stays false when no controller is wired.
     let mut in_meeting = false;
+    let tree_walker =
+        TreeWalkerWorker::spawn(format!("monitor-{monitor_id}"), tree_walker_config.clone())?;
 
     let capture_params = CaptureParams {
         db: &db,
@@ -1062,6 +1103,7 @@ pub(crate) async fn event_driven_capture_loop(
         device_name: &device_name,
         snapshot_writer: &snapshot_writer,
         tree_walker_config: &tree_walker_config,
+        tree_walker: &tree_walker,
         window_filters: WindowFilters::new(
             &tree_walker_config.ignored_windows,
             &tree_walker_config.included_windows,
@@ -1128,13 +1170,7 @@ pub(crate) async fn event_driven_capture_loop(
                         &monitor_liveness,
                         Duration::from_millis(result.duration_ms),
                     );
-                    // OCR metrics: record once per OCR run (each run = cache miss).
-                    if let Some(ocr_ms) = result.ocr_duration_ms {
-                        vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                        if result.ocr_was_empty {
-                            vision_metrics.record_ocr_empty();
-                        }
-                    }
+                    record_ocr_result_metrics(&vision_metrics, result);
                     if let Some(ref cache) = hot_frame_cache {
                         push_to_hot_cache(cache, result, &device_name, &CaptureTrigger::Manual)
                             .await;
@@ -1582,65 +1618,64 @@ pub(crate) async fn event_driven_capture_loop(
                 tokio::time::sleep(poll_interval).await;
             }
         } else {
-            // Block on `recv()` for the FIRST trigger so an idle channel
-            // doesn't burn CPU (matches the upstream "reduce idle
-            // wakeups" change). Once a message arrives, drain the rest
-            // via `try_recv` so that bursts of triggers coalesce into
-            // one capture, with every correlation_id reaching the
-            // linker. The reducer then collapses (kind, corr_ids) and
-            // filters out skipped kinds (Clipboard/KeyPress with their
-            // respective gates off).
+            // Drain without parking this long-lived capture task inside
+            // `broadcast::Receiver::recv()`. Production traces showed this
+            // task repeatedly failing to resume from that receiver wait even
+            // though its 250ms timeout had elapsed; the heartbeat then froze
+            // for minutes while the rest of the runtime stayed healthy.
+            //
+            // Preserve the same 250ms idle cadence and CPU cost with a plain
+            // timer sleep. Triggers remain buffered by the broadcast channel
+            // and are drained on wake, adding at most the same poll interval
+            // already budgeted for checkpoint promotion and idle capture.
+            // This removes the receiver-waker/cancellation path without adding
+            // a retry threshold, watchdog timer, or other recovery heuristic.
             let mut drained: Vec<CaptureTriggerMsg> = Vec::new();
             let mut lagged_force_manual = false;
             let mut closed_now = false;
 
+            // Preserve immediate handling for an already-buffered trigger.
+            // Sleep only when the channel is empty; anything arriving during
+            // that sleep remains buffered for the drain below.
             record_loop_stage(
                 &vision_metrics,
                 &monitor_liveness,
-                screenpipe_screen::CaptureLoopStage::TriggerWait,
+                screenpipe_screen::CaptureLoopStage::TriggerDrain,
             );
-            match tokio::time::timeout(poll_interval, trigger_rx.recv()).await {
-                Ok(Ok(msg)) => drained.push(msg),
-                Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+            match trigger_rx.try_recv() {
+                Ok(msg) => drained.push(msg),
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    record_loop_stage(
+                        &vision_metrics,
+                        &monitor_liveness,
+                        screenpipe_screen::CaptureLoopStage::TriggerWait,
+                    );
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     debug!(
                         "trigger channel lagged by {} messages on monitor {}",
                         n, monitor_id
                     );
-                    // Missed broadcast msgs — their correlation_ids are
-                    // gone forever and those ui_events rows will stay
-                    // frame_id=NULL. Bump the lagged counter so the
-                    // periodic linker WARN shows this slice of loss.
                     report_triggers_dropped(
                         linker_tx.as_ref(),
                         Vec::new(),
                         crate::frame_linker::DropReason::Lagged,
                     );
-                    let _ = n;
-                    // Fall back to Manual below if nothing else wins.
                     lagged_force_manual = true;
                 }
-                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                Err(broadcast::error::TryRecvError::Closed) => {
                     warn!(
                         "trigger channel closed for monitor {}, continuing with polling-only mode",
                         monitor_id
                     );
                     closed_now = true;
                 }
-                Err(_elapsed) => {
-                    // No trigger this poll_interval — fall through to
-                    // poll_activity below.
-                }
             }
 
-            // The bounded wait above returned, so anything past this point is
-            // synchronous gate work, not the timer. Re-marking here keeps the
-            // watchdog's "frozen in <stage>" message honest: `trigger-wait`
-            // now accuses only the 250ms-bounded await (a freeze there means
-            // the task was never resumed), while `trigger-drain` accuses the
-            // synchronous gates below (a freeze there means a lock is held by
-            // another thread). Previously both shared one marker, so a
-            // multi-minute #3939 freeze reported `trigger-wait` even though a
-            // 250ms timeout cannot account for it.
+            // Anything past this point is synchronous channel/gate work.
+            // Re-marking here keeps the watchdog's "frozen in <stage>"
+            // message honest.
             record_loop_stage(
                 &vision_metrics,
                 &monitor_liveness,
@@ -1761,7 +1796,11 @@ pub(crate) async fn event_driven_capture_loop(
                 &monitor_liveness,
                 screenpipe_screen::CaptureLoopStage::ExclusionProbe,
             );
-            let fresh_ids = probe_excluded_sck_window_ids(&capture_params.window_filters).await;
+            let fresh_ids = probe_excluded_sck_window_ids(
+                &capture_params.window_filters,
+                exclusion_sources(capture_params.tree_walker_config),
+            )
+            .await;
             if fresh_ids != cached_excluded_ids {
                 cached_excluded_ids = fresh_ids;
             }
@@ -2002,15 +2041,7 @@ pub(crate) async fn event_driven_capture_loop(
                                 &monitor_liveness,
                                 Duration::from_millis(result.duration_ms),
                             );
-                            // OCR metrics: record once per OCR run. Each run is a
-                            // cache miss (no OCR result cache exists). `ocr_duration_ms`
-                            // is Some only when OCR actually ran for this frame.
-                            if let Some(ocr_ms) = result.ocr_duration_ms {
-                                vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                                if result.ocr_was_empty {
-                                    vision_metrics.record_ocr_empty();
-                                }
-                            }
+                            record_ocr_result_metrics(&vision_metrics, result);
                             // OCR-gate telemetry (#5054/#5060): decision counters
                             // (skip / crop_ocr — the fast-path ratio) plus the
                             // per-capture detect+hash latency.
@@ -2294,6 +2325,42 @@ struct CaptureOutput {
 struct LightweightFocusedMetadata {
     app_name: Option<String>,
     window_name: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::macos::get_focused_pid_fresh()
+}
+
+#[cfg(target_os = "windows")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::windows::get_focused_pid_fresh()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn get_focused_pid_fresh() -> Option<i32> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    use cidre::{ns, objc};
+
+    objc::ar_pool(|| {
+        ns::RunningApp::with_pid(pid)
+            .and_then(|app| app.localized_name())
+            .map(|name| name.to_string())
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    screenpipe_a11y::platform::windows::app_name_for_pid(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn app_name_for_pid(_pid: i32) -> Option<String> {
+    None
 }
 
 fn normalize_metadata_value(value: Option<&str>) -> Option<String> {
@@ -2760,7 +2827,11 @@ async fn do_capture(
     let storage_exclusions = if screenshot_disabled {
         Some(Vec::new())
     } else {
-        storage_excluded_sck_window_ids(&params.window_filters).await
+        storage_excluded_sck_window_ids(
+            &params.window_filters,
+            exclusion_sources(params.tree_walker_config),
+        )
+        .await
     };
     let skip_pixels_for_unknown_exclusions = storage_exclusions.is_none();
     if skip_pixels_for_unknown_exclusions {
@@ -2796,6 +2867,13 @@ async fn do_capture(
             capture_dur, params.monitor_id
         );
         image
+    };
+    // This scalar is the screenshot's app identity. Read it immediately after
+    // ScreenCaptureKit returns so no process object travels with the pixels.
+    let screenshot_focus_pid = if monitor_hosts_focus && !screenshot_disabled {
+        get_focused_pid_fresh()
+    } else {
+        None
     };
 
     // Skip frames that are unusable for indexing.  Two cases:
@@ -2937,12 +3015,32 @@ async fn do_capture(
     // that window's tree, identity, and dedup hash. Non-focused monitors use
     // the screenshot/OCR path below instead.
     let tree_walk_result = if monitor_hosts_focus {
-        Some(
-            tokio::task::spawn_blocking(move || {
-                screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
-            })
-            .await?,
-        )
+        let worker_timeout = tree_walk_worker_timeout(&config);
+        match params
+            .tree_walker
+            .walk_with_timeout(config, worker_timeout)
+            .await?
+        {
+            TreeWalkerWorkerOutcome::Completed(result) => Some(result),
+            TreeWalkerWorkerOutcome::TimedOut { restarted } => {
+                if let Some(app) = trigger_app.as_deref() {
+                    walk_budget.record_worker_timeout(app);
+                }
+                crate::ui_recorder::record_tree_walk(
+                    crate::ui_recorder::TreeWalkOutcome::WorkerTimeout { restarted },
+                );
+                None
+            }
+            TreeWalkerWorkerOutcome::Saturated => {
+                if let Some(app) = trigger_app.as_deref() {
+                    walk_budget.record_worker_timeout(app);
+                }
+                crate::ui_recorder::record_tree_walk(
+                    crate::ui_recorder::TreeWalkOutcome::WorkerSaturated,
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -3023,7 +3121,7 @@ async fn do_capture(
         Some(TreeWalkResult::Skipped(_)) | None => {}
     }
 
-    let tree_snapshot = match tree_walk_result {
+    let mut tree_snapshot = match tree_walk_result {
         Some(TreeWalkResult::Found(snap)) => Some(snap),
         Some(TreeWalkResult::Skipped(reason)) => {
             debug!(
@@ -3039,6 +3137,25 @@ async fn do_capture(
         }
         Some(TreeWalkResult::NotFound) | None => None,
     };
+    let ax_focus_pid = if tree_snapshot.is_some() && !screenshot_disabled {
+        get_focused_pid_fresh()
+    } else {
+        None
+    };
+    let ax_screenshot_coherent = match (screenshot_focus_pid, ax_focus_pid) {
+        (Some(screenshot_pid), Some(ax_pid)) => screenshot_pid == ax_pid,
+        _ => true,
+    };
+    if tree_snapshot.is_some() && !ax_screenshot_coherent {
+        debug!(
+            screenshot_pid = screenshot_focus_pid,
+            ax_pid = ax_focus_pid,
+            "focused process changed across screenshot/AX capture; preserving AX as non-pixel-aligned"
+        );
+        if let Some(snapshot) = tree_snapshot.as_mut() {
+            detach_tree_from_pixels(snapshot);
+        }
+    }
 
     // Safety net: when the tree walk returned NotFound (AX failure, budget skip,
     // etc.) the Skipped(UserIgnored) path didn't fire.  If the focused app still
@@ -3071,7 +3188,7 @@ async fn do_capture(
     // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
     // force a write every 30s even if the hash matches — see `dedup_applies`.
     let dedup_eligible = dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed());
-    if dedup_eligible {
+    if dedup_eligible && ax_screenshot_coherent {
         if let Some(ref snap) = tree_snapshot {
             if !snap.text_content.is_empty() {
                 let new_hash = snap.content_hash as i64;
@@ -3098,11 +3215,20 @@ async fn do_capture(
     // Use tree metadata by default, but for focus-change triggers prefer the
     // event payload when the tree lags or reports the wrong frontmost target.
     let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
-        resolve_capture_metadata(
-            tree_snapshot.as_ref(),
-            trigger,
-            lightweight_focused_metadata.as_ref(),
-        );
+        if ax_screenshot_coherent {
+            resolve_capture_metadata(
+                tree_snapshot.as_ref(),
+                trigger,
+                lightweight_focused_metadata.as_ref(),
+            )
+        } else {
+            (
+                screenshot_focus_pid.and_then(app_name_for_pid),
+                None,
+                None,
+                None,
+            )
+        };
 
     // Skip lock screen / screensaver — these waste disk and pollute timeline.
     // Also update the global SCREEN_IS_LOCKED flag so subsequent loop iterations
@@ -3203,6 +3329,7 @@ async fn do_capture(
         let (frame_w, frame_h) = image.dimensions();
         tree_snapshot
             .as_ref()
+            .filter(|_| ax_screenshot_coherent)
             .filter(|snap| {
                 app_name_owned
                     .as_deref()
@@ -3241,19 +3368,30 @@ async fn do_capture(
         screenshot_disabled: screenshot_disabled || skip_pixels_for_unknown_exclusions,
         in_meeting,
         monitor_hosts_focus,
+        ax_screenshot_coherent,
         focused_window_bounds,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
-    if let (Some(sender), Some(snapshot)) = (params.semantic_tx, tree_snapshot) {
-        sender.submit(SemanticProjectionJob::from_capture(
-            result.frame_id,
-            result.captured_at,
-            result.app_name.clone(),
-            result.browser_url.clone(),
-            snapshot,
-            params.use_pii_removal,
-        ));
+    if let Some(sender) = params.semantic_tx {
+        match tree_snapshot {
+            Some(snapshot) if ax_screenshot_coherent => {
+                let _ = sender.submit(SemanticProjectionJob::from_capture(
+                    result.frame_id,
+                    result.captured_at,
+                    result.app_name.clone(),
+                    result.browser_url.clone(),
+                    snapshot,
+                    params.use_pii_removal,
+                ));
+            }
+            Some(_) => {
+                sender.record_capture_gap(result.frame_id, SemanticCaptureGap::FocusIncoherent);
+            }
+            None => {
+                sender.record_capture_gap(result.frame_id, SemanticCaptureGap::TreeMissing);
+            }
+        }
     }
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
@@ -3600,6 +3738,48 @@ fn is_frame_corrupt(image: &image::DynamicImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ocr_metrics_result(
+        ocr_cache_hit: bool,
+        ocr_duration_ms: Option<u64>,
+        ocr_was_empty: bool,
+    ) -> PairedCaptureResult {
+        PairedCaptureResult {
+            frame_id: 1,
+            snapshot_path: String::new(),
+            accessibility_text: None,
+            text_source: None,
+            capture_trigger: "test".to_string(),
+            captured_at: Utc::now(),
+            duration_ms: 1,
+            ocr_duration_ms,
+            ocr_was_empty,
+            ocr_cache_hit,
+            ocr_gate_decision: None,
+            ocr_gate_detect_duration: None,
+            app_name: None,
+            window_name: None,
+            browser_url: None,
+            content_hash: None,
+        }
+    }
+
+    #[test]
+    fn capture_result_metrics_distinguish_hits_runs_and_noops() {
+        let metrics = screenpipe_screen::PipelineMetrics::new();
+
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(true, None, false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(10), false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(30), true));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, None, false));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ocr_cache_hits, 1);
+        assert_eq!(snapshot.ocr_cache_misses, 2);
+        assert_eq!(snapshot.ocr_completed, 2);
+        assert_eq!(snapshot.ocr_empty, 1);
+        assert!((snapshot.avg_ocr_latency_ms - 20.0).abs() < 1e-6);
+    }
 
     #[test]
     fn capture_loop_silent_seed_requires_exact_token() {

@@ -12,6 +12,26 @@ use tracing::{error, info, warn};
 
 /// Global app handle stored so native action callbacks can emit events.
 static GLOBAL_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+static NATIVE_TIMELINE_PLACEMENT_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn handle_shortcut_overlay_hour_snooze(app: &tauri::AppHandle) {
+    let app = app.clone();
+    native_shortcut_reminder::hide();
+    tauri::async_runtime::spawn(async move {
+        let persist_succeeded = crate::commands::snooze_shortcut_reminder_for_hour(app.clone())
+            .await
+            .is_ok();
+        track_native_overlay_event(
+            &app,
+            "shortcut_reminder_dismissed",
+            serde_json::json!({
+                "dismiss_scope": "hour",
+                "snooze_hours": 1,
+                "persist_succeeded": persist_succeeded,
+            }),
+        );
+    });
+}
 
 // The anchor allowlist and both store writes live in `overlay_anchor`, which is
 // compiled everywhere: the native panel and the webview overlay have to agree
@@ -53,6 +73,467 @@ pub(super) fn install_notification_action_callback(app_handle: &tauri::AppHandle
 pub(super) fn install_shortcut_action_callback(app_handle: &tauri::AppHandle) {
     let _ = GLOBAL_APP_HANDLE.set(app_handle.clone());
     native_shortcut_reminder::set_action_callback(native_shortcut_action_callback);
+    // The native timeline shares the same trampoline lifetime, so install it
+    // here rather than adding a second startup hook that could drift.
+    crate::native_timeline::set_action_callback(native_timeline_action_callback);
+    install_native_timeline_placement(app_handle);
+}
+
+/// Lets the webview pin the native timeline over a slice of its own layout.
+///
+/// This rides on events rather than commands on purpose: the rect changes on
+/// every resize, and a command would mean a generated binding for a call whose
+/// only job is to forward four numbers. The webview is the only thing that
+/// knows where its content area is, so it has to be the one to say.
+fn install_native_timeline_placement(app_handle: &tauri::AppHandle) {
+    use tauri::{Emitter, Listener};
+
+    // `install_shortcut_action_callback` is also called when the reminder is
+    // shown again. Event listeners are permanent for the app lifetime, so
+    // registering another pair would make one attach request create several
+    // native timelines and several competing acknowledgements.
+    if NATIVE_TIMELINE_PLACEMENT_INSTALLED.set(()).is_err() {
+        return;
+    }
+
+    let attach_handle = app_handle.clone();
+    app_handle.listen("native-timeline-attach", move |event| {
+        let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
+            return;
+        };
+        payload["historyAccessRestricted"] = serde_json::json!(
+            attach_handle
+                .state::<crate::recording::RecordingState>()
+                .history_access
+                .is_restricted()
+        );
+        payload["hostWindow"] = serde_json::json!(-1);
+        let pointer = host_window_pointer(&attach_handle, &payload);
+        if let Some(pointer) = pointer {
+            payload["hostPointer"] = serde_json::json!(pointer);
+        }
+        let ok = pointer.is_some() && crate::native_timeline::show_raw(&payload.to_string());
+        tracing::info!(
+            target: "native_timeline",
+            label = payload.get("windowLabel").and_then(|v| v.as_str()).unwrap_or("?"),
+            resolved_host = pointer.is_some(),
+            attached = ok,
+            "native timeline attach request"
+        );
+        // Tell the webview whether it actually got a window. Without this a
+        // failed attach is a transparent hole in the layout, which reads as a
+        // blank screen rather than as "fall back to the React timeline".
+        let label = payload
+            .get("windowLabel")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let _ = attach_handle.emit(
+            "native-timeline-attached",
+            serde_json::json!({ "windowLabel": label, "ok": ok }),
+        );
+    });
+
+    let detach_handle = app_handle.clone();
+    app_handle.listen("native-timeline-detach", move |event| {
+        let payload = serde_json::from_str::<serde_json::Value>(event.payload())
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut out = serde_json::json!({});
+        if let Some(pointer) = host_window_pointer(&detach_handle, &payload) {
+            out["hostPointer"] = serde_json::json!(pointer);
+        }
+        crate::native_timeline::detach(&out.to_string());
+    });
+}
+
+/// The address of the `NSWindow` behind a Tauri window label.
+///
+/// Which window is asking matters once more than one of them shows a timeline,
+/// and "the main window" stops being an answer. The label comes from the
+/// webview, which is the only side that knows who it is; Tauri turns it into
+/// the AppKit handle that Swift can attach to.
+#[cfg(target_os = "macos")]
+fn host_window_pointer(app: &tauri::AppHandle, payload: &serde_json::Value) -> Option<isize> {
+    use tauri::Manager;
+
+    let label = payload.get("windowLabel")?.as_str()?;
+    let window = app.get_webview_window(label)?;
+    window.ns_window().ok().map(|ptr| ptr as isize)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_window_pointer(_app: &tauri::AppHandle, _payload: &serde_json::Value) -> Option<isize> {
+    None
+}
+
+/// Callback invoked from Swift when the native timeline asks the app to do
+/// something it deliberately cannot do itself: open another window, write to
+/// the clipboard, or delete a range.
+///
+/// A Rust panic crossing this Cocoa→Rust trampoline aborts the whole app, so
+/// everything is caught here.
+extern "C" fn native_timeline_action_callback(action_ptr: *const std::os::raw::c_char) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        native_timeline_action_callback_inner(action_ptr);
+    }));
+}
+
+fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char) {
+    if action_ptr.is_null() {
+        return;
+    }
+    let raw = match unsafe { std::ffi::CStr::from_ptr(action_ptr) }.to_str() {
+        Ok(value) => value.to_string(),
+        Err(_) => return,
+    };
+    let Some(app) = GLOBAL_APP_HANDLE.get().cloned() else {
+        return;
+    };
+
+    use crate::native_timeline::{RoutedTimelineAction, TimelineAction};
+    use tauri::Emitter;
+
+    let routed = RoutedTimelineAction::parse(&raw);
+    let target = routed.window_label;
+
+    match routed.action {
+        TimelineAction::CloseWindow => {
+            crate::native_timeline::hide();
+            // The Swift close button and its attached-window blur both mean
+            // close the overlay, not merely remove the AppKit child and leave
+            // an empty webview host behind.
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::commands::close_window(app, ShowRewindWindow::Main).await
+                {
+                    tracing::warn!(%error, "failed to close timeline overlay");
+                }
+            });
+        }
+        TimelineAction::ReturnToActivity => {
+            emit_timeline_event(&app, target.as_deref(), "timeline-return-to-activity", ());
+        }
+        TimelineAction::OpenSearch => {
+            emit_timeline_event(&app, target.as_deref(), "timeline-open-search", ());
+        }
+        TimelineAction::OpenDailySummary { date } => {
+            emit_timeline_daily_summary(&app, target.as_deref(), date);
+        }
+        TimelineAction::OpenChat => {
+            emit_timeline_event(&app, target.as_deref(), "timeline-open-chat", ());
+        }
+        TimelineAction::ToggleSidebar => {
+            emit_timeline_event(&app, target.as_deref(), "timeline-toggle-sidebar", ());
+        }
+        TimelineAction::OpenRecordingSettings => {
+            let _ = app.emit("timeline-open-recording-settings", ());
+        }
+        TimelineAction::CopyFrame { frame_id } => {
+            let _ = app.emit("timeline-copy-frame", frame_id);
+        }
+        TimelineAction::CopyText => {
+            let _ = app.emit("timeline-copy-text", ());
+        }
+        TimelineAction::AskAiSelection { selection } => {
+            emit_timeline_event(
+                &app,
+                target.as_deref(),
+                "timeline-ask-ai-selection",
+                selection,
+            );
+        }
+        TimelineAction::ExportVideoSelection { selection } => {
+            emit_timeline_event(
+                &app,
+                target.as_deref(),
+                "timeline-export-video-selection",
+                selection,
+            );
+        }
+        TimelineAction::ApplyTag { tag } => {
+            // Swift already wrote the tag optimistically; this is for anything
+            // in the app that wants to react (toasts, analytics).
+            let _ = app.emit("timeline-tag-applied", tag);
+        }
+        TimelineAction::DeleteRange => {
+            let _ = app.emit("timeline-delete-range", ());
+        }
+        TimelineAction::Unknown { raw } => {
+            // Forwarded rather than dropped so a newer Swift build is not
+            // silently ignored by an older Rust one.
+            let _ = app.emit("timeline-action", raw);
+        }
+    }
+}
+
+fn emit_timeline_event<T: serde::Serialize + Clone>(
+    app: &tauri::AppHandle,
+    window_label: Option<&str>,
+    event: &str,
+    payload: T,
+) {
+    if let Some(label) = window_label {
+        if let Err(error) = app.emit_to(label, event, payload.clone()) {
+            tracing::warn!(%error, %label, %event, "failed to route native timeline action");
+        }
+    } else if let Err(error) = app.emit(event, payload) {
+        tracing::warn!(%error, %event, "failed to broadcast native timeline action");
+    }
+}
+
+fn resolve_timeline_event_target<F>(
+    explicit_label: Option<&str>,
+    mut window_state: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Option<bool>,
+{
+    if let Some(label) = explicit_label.filter(|label| !label.is_empty()) {
+        return Some(label.to_string());
+    }
+
+    // A legacy native callback has no host label. Prefer the visible overlay:
+    // it is the only surface the user can be clicking while it covers Home.
+    for label in ["main", "main-window", "home"] {
+        if window_state(label) == Some(true) {
+            return Some(label.to_string());
+        }
+    }
+
+    // If every surface is hidden, still choose exactly one loaded webview.
+    // Broadcasting leaves a Daily Summary open in both windows, which appears
+    // in Home as soon as the user dismisses the overlay.
+    for label in ["home", "main", "main-window"] {
+        if window_state(label).is_some() {
+            return Some(label.to_string());
+        }
+    }
+    None
+}
+
+fn emit_timeline_daily_summary(app: &tauri::AppHandle, window_label: Option<&str>, date: String) {
+    let target = resolve_timeline_event_target(window_label, |label| {
+        app.get_webview_window(label)
+            .map(|window| window.is_visible().unwrap_or(false))
+    });
+    let Some(label) = target else {
+        tracing::warn!("dropped native daily summary action without a timeline host");
+        return;
+    };
+    let payload = serde_json::json!({
+        "date": date,
+        "windowLabel": label,
+    });
+    if let Err(error) = app.emit_to(&label, "timeline-open-daily-summary", payload) {
+        tracing::warn!(%error, %label, "failed to route native daily summary action");
+    }
+}
+
+/// Local file a notification URL points at, or `None`. Covers the two shapes
+/// producers use: `screenpipe://view?path=…` (what the /notify body rewriter
+/// emits) and raw `file://` URLs (what pipes tend to put in link actions).
+///
+/// These open the in-app viewer window directly. Routing them like a generic
+/// deeplink shows the Main timeline overlay first, which then covers the
+/// viewer — the user clicks "open report" and only sees the timeline.
+fn viewer_path_from_notification_url(url: &str) -> Option<String> {
+    if let Some(query) = url
+        .strip_prefix("screenpipe://view?")
+        .or_else(|| url.strip_prefix("screenpipe://view/?"))
+    {
+        return query.split('&').find_map(|part| {
+            let value = part.strip_prefix("path=")?;
+            let decoded = urlencoding::decode(value).ok()?.into_owned();
+            (!decoded.is_empty()).then_some(decoded)
+        });
+    }
+
+    let rest = url.strip_prefix("file://")?;
+    // Drop an optional localhost authority ("file://localhost/x").
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let decoded = urlencoding::decode(rest).ok()?.into_owned();
+    // file:///C:/… decodes to /C:/… — strip the artificial leading slash.
+    let bytes = decoded.as_bytes();
+    if bytes.len() > 3
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes[3] == b'/' || bytes[3] == b'\\')
+    {
+        return Some(decoded[1..].to_string());
+    }
+    Some(decoded)
+}
+
+/// Open the in-app viewer for a notification file link. Activates the app
+/// first (a notification click is explicit user intent, mirroring
+/// `show_window_activated`) so the viewer doesn't open behind the frontmost
+/// app — and deliberately does NOT show the Main timeline overlay.
+fn open_viewer_from_notification(app: &tauri::AppHandle, path: String) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.run_on_main_thread(crate::window::activate_app_if_allowed);
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::viewer::open_viewer_window(app, path).await {
+            error!("failed to open viewer from notification action: {}", e);
+        }
+    });
+}
+
+/// Build the `chat-prefill` payload for a chat-opening notification action:
+/// `type=chat`, or `type=pipe` with `open_in_chat`. Mirrors
+/// `executeNotificationAction` in lib/notifications/actions.ts so a click on
+/// the native panel lands in chat exactly like a click on the webview toast.
+fn chat_prefill_payload_from_action(action: &serde_json::Value) -> Option<serde_json::Value> {
+    let action_type = action.get("type").and_then(|v| v.as_str())?;
+    let context = action.get("context").filter(|c| !c.is_null());
+    match action_type {
+        "chat" => {
+            let prompt = action.get("prompt").and_then(|v| v.as_str());
+            if prompt.is_none() && context.is_none() {
+                return None;
+            }
+            let context_str = context
+                .map(|c| {
+                    format!(
+                        "context:\n{}",
+                        serde_json::to_string_pretty(c).unwrap_or_default()
+                    )
+                })
+                .unwrap_or_default();
+            Some(serde_json::json!({
+                "context": context_str,
+                "prompt": prompt,
+                "displayLabel": action.get("label").and_then(|v| v.as_str()),
+                "autoSend": action
+                    .get("auto_send")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                "source": "notification-native",
+                "targetWindow": "chat",
+            }))
+        }
+        "pipe" => {
+            if action.get("open_in_chat").and_then(|v| v.as_bool()) != Some(true) {
+                return None;
+            }
+            let pipe = action.get("pipe").and_then(|v| v.as_str())?;
+            let context_str = context
+                .map(|c| serde_json::to_string_pretty(c).unwrap_or_default())
+                .unwrap_or_default();
+            Some(serde_json::json!({
+                "context": format!("run pipe \"{pipe}\" with this context:\n{context_str}"),
+                "prompt": format!(
+                    "run the {pipe} pipe{}",
+                    if context.is_some() { " with the provided context" } else { "" }
+                ),
+                "autoSend": true,
+                "source": "notification-native",
+                "targetWindow": "chat",
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Show the Chat window and deliver a `chat-prefill` event once its webview is
+/// ready. Rust mirror of `showChatWithPrefill` (lib/chat-utils.ts): the chat
+/// component answers "chat-ping" with "chat-ready" once mounted, so we wait
+/// for that handshake instead of emitting into a webview that is still booting
+/// — the failure mode behind "open in chat does nothing".
+fn open_chat_with_prefill(app: tauri::AppHandle, prefill: serde_json::Value) {
+    std::thread::spawn(move || {
+        use tauri::Listener;
+
+        if let Err(e) = tauri::async_runtime::block_on(crate::commands::show_window_activated(
+            app.clone(),
+            ShowRewindWindow::Chat,
+        )) {
+            error!("failed to show chat window for notification action: {}", e);
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let listener = app.listen("chat-ready", move |event| {
+            let ready_window = serde_json::from_str::<serde_json::Value>(event.payload())
+                .ok()
+                .and_then(|v| {
+                    v.get("windowLabel")
+                        .and_then(|w| w.as_str())
+                        .map(str::to_string)
+                });
+            // A missing label counts as ready, matching waitForChatReady.
+            if ready_window.as_deref().map_or(true, |w| w == "chat") {
+                let _ = tx.send(());
+            }
+        });
+        let mut chat_ready = false;
+        for _ in 0..3 {
+            let _ = app.emit("chat-ping", serde_json::json!({ "targetWindow": "chat" }));
+            if rx
+                .recv_timeout(std::time::Duration::from_millis(2500))
+                .is_ok()
+            {
+                chat_ready = true;
+                break;
+            }
+        }
+        app.unlisten(listener);
+        if !chat_ready {
+            warn!("chat window never reported ready; sending notification prefill anyway");
+        }
+        if let Err(e) = app.emit("chat-prefill", prefill) {
+            error!("failed to deliver notification chat prefill: {}", e);
+        }
+    });
+}
+
+/// Run a pipe in the background from a notification click, then confirm (or
+/// report failure) through the same notification surface — a background run
+/// with zero feedback reads as a dead button.
+fn run_pipe_from_notification(
+    app: tauri::AppHandle,
+    pipe: String,
+    context: Option<serde_json::Value>,
+) {
+    std::thread::spawn(move || {
+        use crate::recording::local_api_context_from_app;
+        let api = local_api_context_from_app(&app);
+        let client = reqwest::blocking::Client::new();
+        let request = api.apply_auth_blocking(
+            client
+                .post(api.url(&format!("/pipes/{}/run", urlencoding::encode(&pipe))))
+                .header("Content-Type", "application/json")
+                .body(serde_json::json!({ "notification_context": context }).to_string()),
+        );
+        let outcome = match request.send() {
+            Ok(res) if res.status().is_success() => Ok(()),
+            Ok(res) => Err(format!("HTTP {}", res.status())),
+            Err(e) => Err(e.to_string()),
+        };
+        let confirmation = match &outcome {
+            Ok(()) => serde_json::json!({
+                "title": format!("{pipe} is running"),
+                "body": "started from your notification — results arrive as a new notification.",
+                // Toast-only: a "started" echo should not earn an inbox row.
+                "transient": true,
+            }),
+            Err(e) => {
+                error!("failed to run pipe '{}' from notification action: {}", pipe, e);
+                serde_json::json!({
+                    "title": format!("couldn't run {pipe}"),
+                    "body": format!("the run request failed: {e}"),
+                })
+            }
+        };
+        let _ = client
+            .post(api.url("/notify"))
+            .header("Content-Type", "application/json")
+            .body(confirmation.to_string())
+            .send();
+    });
 }
 
 fn notification_copy_value(action: &serde_json::Value) -> Option<String> {
@@ -303,17 +784,16 @@ pub(crate) fn dispatch_notification_action(json: String) {
             return;
         };
 
+        if let Some(path) = viewer_path_from_notification_url(&url) {
+            open_viewer_from_notification(app, path);
+            return;
+        }
+
         let is_in_app = url.starts_with("screenpipe://");
         let app_clone = app.clone();
         std::thread::spawn(move || {
             if is_in_app {
-                let target = if is_meeting_deeplink(&url) {
-                    ShowRewindWindow::Home {
-                        page: Some(meeting_page_with_id(&url)),
-                    }
-                } else {
-                    ShowRewindWindow::Main
-                };
+                let target = notification_deeplink_target(&url);
                 let app_for_show = app_clone.clone();
                 let _ = app_clone.run_on_main_thread(move || {
                     if let Err(e) = target.show(&app_for_show) {
@@ -323,8 +803,7 @@ pub(crate) fn dispatch_notification_action(json: String) {
                 if is_meeting_deeplink(&url) {
                     emit_meeting_note_route_with_retries(&app_clone, &url);
                 } else {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    let _ = app_clone.emit("deep-link-received", url);
+                    emit_notification_deeplink(&app_clone, url);
                 }
             } else {
                 use tauri_plugin_opener::OpenerExt;
@@ -418,6 +897,14 @@ pub(crate) fn dispatch_notification_action(json: String) {
             return;
         };
 
+        // File links (screenpipe://view or file://) open the in-app viewer
+        // directly. Routing them through the generic path below would show the
+        // Main timeline overlay on top of the viewer that's about to open.
+        if let Some(path) = viewer_path_from_notification_url(&url) {
+            open_viewer_from_notification(app, path);
+            return;
+        }
+
         // Guard against senders putting a browser URL into "deeplink" or a
         // screenpipe:// URL into "link". We route on actual scheme, not on
         // the declared type, so a typo doesn't break the click.
@@ -425,15 +912,9 @@ pub(crate) fn dispatch_notification_action(json: String) {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             if is_in_app {
-                let target = if is_meeting_deeplink(&url) {
-                    ShowRewindWindow::Home {
-                        page: Some(meeting_page_with_id(&url)),
-                    }
-                } else {
-                    ShowRewindWindow::Main
-                };
-                // Show the target surface first. Meeting links should not flash
-                // Main/timeline before routing into Home -> Meeting notes.
+                let target = notification_deeplink_target(&url);
+                // Show the target surface first. Meeting and Activity links
+                // must not flash or leave the user on Main/timeline.
                 let app_for_show = app_clone.clone();
                 let _ = app_clone.run_on_main_thread(move || {
                     if let Err(e) = target.show(&app_for_show) {
@@ -443,8 +924,7 @@ pub(crate) fn dispatch_notification_action(json: String) {
                 if is_meeting_deeplink(&url) {
                     emit_meeting_note_route_with_retries(&app_clone, &url);
                 } else {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    let _ = app_clone.emit("deep-link-received", url);
+                    emit_notification_deeplink(&app_clone, url);
                 }
             } else {
                 // External URL — hand off to the opener plugin.
@@ -539,14 +1019,100 @@ pub(crate) fn dispatch_notification_action(json: String) {
         return;
     }
 
-    // Everything else (pipe, mute, dismiss, auto_dismiss, legacy string
-    // actions) still goes to the JS handler. The overlay window owns those
-    // because they need access to posthog / localforage / chat prefill.
+    // Chat-opening actions ("chat", and "pipe" with open_in_chat) and
+    // background pipe runs are handled in Rust for the same reason as
+    // link/deeplink above: their JS listener lives in the Main overlay
+    // webview, which is usually not mounted when a native notification is
+    // clicked — the click silently did nothing ("open in chat does nothing").
+    if action_type == Some("chat") || action_type == Some("pipe") {
+        if let Some(action) = parsed.as_ref() {
+            // Mirrors the `notification_action` capture the JS handler did
+            // when it (sometimes) received these events.
+            let track = |app: &tauri::AppHandle| {
+                track_native_overlay_event(
+                    app,
+                    "notification_action",
+                    serde_json::json!({ "action_type": action_type }),
+                );
+            };
+            if let Some(prefill) = chat_prefill_payload_from_action(action) {
+                track(app);
+                open_chat_with_prefill(app.clone(), prefill);
+                return;
+            }
+            if action_type == Some("pipe")
+                && action.get("open_in_chat").and_then(|v| v.as_bool()) != Some(true)
+            {
+                if let Some(pipe) = action.get("pipe").and_then(|v| v.as_str()) {
+                    track(app);
+                    run_pipe_from_notification(
+                        app.clone(),
+                        pipe.to_string(),
+                        action.get("context").cloned(),
+                    );
+                    return;
+                }
+            }
+        }
+        // Unusable payload (e.g. a pipe action without a pipe name) — fall
+        // through to the JS handler like before.
+    }
+
+    // Everything else (mute, dismiss, auto_dismiss, legacy string actions)
+    // still goes to the JS handler. The overlay window owns those because
+    // they need access to posthog / localforage.
     let _ = app.emit("native-notification-action", &json);
 }
 
 fn is_meeting_deeplink(url: &str) -> bool {
     url.starts_with("screenpipe://meeting/") || url.starts_with("screenpipe://meeting?")
+}
+
+fn is_activity_deeplink(url: &str) -> bool {
+    url == "screenpipe://activity" || url.starts_with("screenpipe://activity?")
+}
+
+fn is_first_run_deeplink(url: &str) -> bool {
+    url == "screenpipe://first-run-summary"
+        || url.starts_with("screenpipe://first-run-summary?")
+        || url.starts_with("screenpipe://first-run-agent?")
+}
+
+fn notification_deeplink_target(url: &str) -> ShowRewindWindow {
+    if is_meeting_deeplink(url) {
+        ShowRewindWindow::Home {
+            page: Some(meeting_page_with_id(url)),
+        }
+    } else if is_activity_deeplink(url) {
+        ShowRewindWindow::Home {
+            page: Some("activity".to_string()),
+        }
+    } else if is_first_run_deeplink(url) {
+        ShowRewindWindow::Home {
+            page: Some("home".to_string()),
+        }
+    } else {
+        ShowRewindWindow::Main
+    }
+}
+
+fn emit_notification_deeplink(app: &tauri::AppHandle, url: String) {
+    if !is_first_run_deeplink(&url) {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let _ = app.emit("deep-link-received", url);
+        return;
+    }
+
+    // A ready-summary notification is specifically meant to recover a user
+    // from another app. On a cold launch the Home webview may not have mounted
+    // its deep-link listener at 150ms yet. Retry inside its one-second JS
+    // dedupe window: whichever delivery first reaches the handler wins, while
+    // the others are ignored there (and an in-flight Cursor handoff remains
+    // protected by the active-link guard for its full replay delay).
+    for delay_ms in [150_u64, 350, 400] {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        let _ = app.emit("deep-link-received", url.clone());
+    }
 }
 
 fn native_overlay_meeting_note_id(action: &str) -> Option<u64> {
@@ -797,6 +1363,9 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
                         }
                     });
                 }
+                "dismiss_hour" => {
+                    handle_shortcut_overlay_hour_snooze(&app_clone);
+                }
                 "restart_recording" => {
                     // Recording-health overlay: restart the engine in place.
                     // Same flow as the webview's overlay_restart_recording
@@ -878,10 +1447,127 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
 #[cfg(test)]
 mod tests {
     use super::{
-        native_overlay_meeting_note_id, notification_copy_value, notification_source_url,
-        parse_meeting_deeplink, parse_overlay_anchor, SHORTCUT_OVERLAY_ANCHORS,
+        chat_prefill_payload_from_action, native_overlay_meeting_note_id, notification_copy_value,
+        notification_deeplink_target, notification_source_url, parse_meeting_deeplink,
+        parse_overlay_anchor, resolve_timeline_event_target, viewer_path_from_notification_url,
+        SHORTCUT_OVERLAY_ANCHORS,
     };
     use serde_json::json;
+
+    #[test]
+    fn viewer_path_parses_view_deeplinks() {
+        assert_eq!(
+            viewer_path_from_notification_url(
+                "screenpipe://view?path=%2FUsers%2Flouis%2F.screenpipe%2Fpipes%2Ftime-breakdown%2Foutput%2F2026-08-25.md"
+            ),
+            Some("/Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md".to_string())
+        );
+        assert_eq!(
+            viewer_path_from_notification_url("screenpipe://view?path="),
+            None
+        );
+        assert_eq!(viewer_path_from_notification_url("screenpipe://view"), None);
+    }
+
+    #[test]
+    fn viewer_path_parses_file_urls() {
+        assert_eq!(
+            viewer_path_from_notification_url("file:///Users/louis/report%20final.md"),
+            Some("/Users/louis/report final.md".to_string())
+        );
+        assert_eq!(
+            viewer_path_from_notification_url("file://localhost/Users/louis/report.md"),
+            Some("/Users/louis/report.md".to_string())
+        );
+        // Windows drive letters lose the artificial leading slash.
+        assert_eq!(
+            viewer_path_from_notification_url("file:///C:/Users/louis/report.md"),
+            Some("C:/Users/louis/report.md".to_string())
+        );
+    }
+
+    #[test]
+    fn viewer_path_ignores_other_urls() {
+        assert_eq!(
+            viewer_path_from_notification_url("screenpipe://meeting/123"),
+            None
+        );
+        assert_eq!(
+            viewer_path_from_notification_url("https://example.com/report.md"),
+            None
+        );
+        assert_eq!(viewer_path_from_notification_url("file://host/x.md"), None);
+    }
+
+    #[test]
+    fn chat_action_builds_prefill_with_auto_send_default_true() {
+        let prefill = chat_prefill_payload_from_action(&json!({
+            "type": "chat",
+            "label": "draft Razorpay email",
+            "prompt": "Draft a short email to Razorpay.",
+        }))
+        .expect("chat action should build a prefill");
+        assert_eq!(prefill["prompt"], "Draft a short email to Razorpay.");
+        assert_eq!(prefill["displayLabel"], "draft Razorpay email");
+        assert_eq!(prefill["autoSend"], true);
+        assert_eq!(prefill["targetWindow"], "chat");
+        assert_eq!(prefill["context"], "");
+    }
+
+    #[test]
+    fn chat_action_respects_auto_send_false_and_serializes_context() {
+        let prefill = chat_prefill_payload_from_action(&json!({
+            "type": "chat",
+            "prompt": "Review the failures.",
+            "auto_send": false,
+            "context": { "run_date": "2026-08-25" },
+        }))
+        .expect("chat action should build a prefill");
+        assert_eq!(prefill["autoSend"], false);
+        let context = prefill["context"].as_str().unwrap();
+        assert!(context.starts_with("context:\n"));
+        assert!(context.contains("2026-08-25"));
+    }
+
+    #[test]
+    fn chat_action_without_prompt_or_context_is_skipped() {
+        assert!(chat_prefill_payload_from_action(&json!({ "type": "chat" })).is_none());
+    }
+
+    #[test]
+    fn open_in_chat_pipe_action_builds_run_pipe_prefill() {
+        // The exact payload the "review in chat" buttons send today.
+        let prefill = chat_prefill_payload_from_action(&json!({
+            "type": "pipe",
+            "label": "review in chat",
+            "pipe": "meeting-summary",
+            "open_in_chat": true,
+            "context": { "meeting_id": 147 },
+        }))
+        .expect("open_in_chat pipe action should build a prefill");
+        assert_eq!(prefill["prompt"], "run the meeting-summary pipe with the provided context");
+        assert_eq!(prefill["autoSend"], true);
+        assert_eq!(prefill["targetWindow"], "chat");
+        assert!(prefill["context"]
+            .as_str()
+            .unwrap()
+            .starts_with("run pipe \"meeting-summary\" with this context:"));
+    }
+
+    #[test]
+    fn background_pipe_action_is_not_a_chat_prefill() {
+        assert!(chat_prefill_payload_from_action(&json!({
+            "type": "pipe",
+            "pipe": "meeting-summary",
+        }))
+        .is_none());
+        // open_in_chat without a pipe name has nothing to run.
+        assert!(chat_prefill_payload_from_action(&json!({
+            "type": "pipe",
+            "open_in_chat": true,
+        }))
+        .is_none());
+    }
 
     #[test]
     fn accepts_every_anchor_the_overlay_can_report() {
@@ -901,6 +1587,34 @@ mod tests {
         assert_eq!(parse_overlay_anchor("set_overlay_anchor:"), None);
         assert_eq!(parse_overlay_anchor("set_overlay_anchor:top-left "), None);
         assert_eq!(parse_overlay_anchor("open_timeline"), None);
+    }
+
+    #[test]
+    fn legacy_timeline_events_choose_one_visible_surface() {
+        let state = |label: &str| match label {
+            "main" => Some(true),
+            "home" => Some(true),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_timeline_event_target(None, state),
+            Some("main".to_string()),
+        );
+
+        let hidden_overlay = |label: &str| match label {
+            "main" => Some(false),
+            "home" => Some(true),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_timeline_event_target(None, hidden_overlay),
+            Some("home".to_string()),
+        );
+
+        assert_eq!(
+            resolve_timeline_event_target(Some("home"), |_| None),
+            Some("home".to_string()),
+        );
     }
 
     #[test]
@@ -939,6 +1653,34 @@ mod tests {
             None
         );
         assert_eq!(parse_meeting_deeplink("screenpipe://settings"), None);
+    }
+
+    #[test]
+    fn activity_notification_deeplink_only_targets_activity_home() {
+        assert!(matches!(
+            notification_deeplink_target("screenpipe://activity"),
+            crate::window::ShowRewindWindow::Home { page: Some(page) }
+                if page == "activity"
+        ));
+        assert!(matches!(
+            notification_deeplink_target("screenpipe://activity?range=today"),
+            crate::window::ShowRewindWindow::Home { page: Some(page) }
+                if page == "activity"
+        ));
+    }
+
+    #[test]
+    fn first_run_notification_deeplinks_target_home() {
+        for url in [
+            "screenpipe://first-run-summary",
+            "screenpipe://first-run-agent?target=claude",
+        ] {
+            assert!(matches!(
+                notification_deeplink_target(url),
+                crate::window::ShowRewindWindow::Home { page: Some(page) }
+                    if page == "home"
+            ));
+        }
     }
 
     #[test]

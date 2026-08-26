@@ -4,6 +4,92 @@
 
 export type BrowserDevScenario = "ready" | "empty" | "backend-error";
 
+type MockCloudAgentProvider = "codex" | "claude" | "cursor";
+
+interface MockCloudAgentConfig {
+  provider: MockCloudAgentProvider;
+  environment_id?: string;
+  branch?: string;
+  session_id?: string;
+  agent_id?: string;
+  repository?: string;
+  starting_ref?: string;
+  send_screenpipe_context: boolean;
+  context_lookback_hours: number;
+  context_max_items: number;
+}
+
+// The ready fixture starts with Codex already authenticated, matching the
+// normal returning-user state where the CLI session survives app restarts.
+const mockCloudConnections = new Set<MockCloudAgentProvider>(["codex"]);
+let mockCloudAgentConfig: MockCloudAgentConfig = {
+  provider: "codex",
+  environment_id: "screenpipe/screenpipe",
+  send_screenpipe_context: false,
+  context_lookback_hours: 24,
+  context_max_items: 80,
+};
+let mockPipeAgent = "cloud-agent";
+
+function mockCloudProviderStatuses() {
+  return (["codex", "claude", "cursor"] as const).map((provider) => ({
+    provider,
+    available: true,
+    configured: mockCloudConnections.has(provider),
+    detail:
+      provider === "codex"
+        ? mockCloudConnections.has(provider)
+          ? "uses your ChatGPT account"
+          : "connect your ChatGPT account"
+        : provider === "claude"
+          ? mockCloudConnections.has(provider)
+            ? "uses your Claude account"
+            : "connect your Claude account"
+          : mockCloudConnections.has(provider)
+            ? "uses your Cursor Cloud Agents API key"
+            : "add a Cursor Cloud Agents API key",
+  }));
+}
+
+function mockDailyRecapPipe() {
+  return {
+    config: {
+      name: "daily-recap",
+      description: "Summarize the day with relevant screenpipe memory.",
+      schedule: "0 17 * * *",
+      enabled: true,
+      agent: mockPipeAgent,
+      model: "default",
+      cloud_agent:
+        mockPipeAgent === "cloud-agent" ? mockCloudAgentConfig : null,
+      connections: [],
+    },
+    last_run: null,
+    last_success: null,
+    is_running: false,
+    is_bundled_builtin: false,
+    prompt_body:
+      "Summarize what I worked on today, the decisions I made, and the next actions.",
+    raw_content:
+      "---\nname: daily-recap\nschedule: 0 17 * * *\n---\n\nSummarize what I worked on today.",
+    last_error: null,
+    current_execution_id: null,
+    consecutive_failures: 0,
+    execution_count: 0,
+    next_run: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    recent_executions: [],
+  };
+}
+
+function parseJsonBody(init: RequestInit | undefined): Record<string, unknown> {
+  if (typeof init?.body !== "string") return {};
+  try {
+    return JSON.parse(init.body) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 export function createMockHealth(scenario: BrowserDevScenario = "ready") {
   const now = new Date().toISOString();
   return {
@@ -16,8 +102,7 @@ export function createMockHealth(scenario: BrowserDevScenario = "ready") {
     audio_status: "ok",
     ui_status: "ok",
     message: "browser development mock is ready",
-    monitors:
-      scenario === "empty" ? [] : ["Browser dev display (1440x900)"],
+    monitors: scenario === "empty" ? [] : ["Browser dev display (1440x900)"],
   };
 }
 
@@ -47,28 +132,31 @@ function mockAppFrames(appName: string, limit: number, offset: number) {
   const roster = MOCK_APP_ROSTER.find((app) => app.name === appName);
   if (!roster) return [];
   const total = Math.min(roster.count, 72);
-  return Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => {
-    const index = offset + i;
-    return {
-      type: "OCR",
-      content: {
-        frame_id: 90_000 + index,
-        text: `${appName} window capture ${index + 1}`,
-        timestamp: new Date(Date.now() - index * 1_800_000).toISOString(),
-        file_path: "",
-        offset_index: index,
-        app_name: appName,
-        window_name: `${appName} — mock window`,
-        tags: [],
-        frame: null,
-        frame_name: null,
-        browser_url: null,
-        focused: true,
-        device_name: "browser dev",
-        text_source: "accessibility",
-      },
-    };
-  });
+  return Array.from(
+    { length: Math.max(0, Math.min(limit, total - offset)) },
+    (_, i) => {
+      const index = offset + i;
+      return {
+        type: "OCR",
+        content: {
+          frame_id: 90_000 + index,
+          text: `${appName} window capture ${index + 1}`,
+          timestamp: new Date(Date.now() - index * 1_800_000).toISOString(),
+          file_path: "",
+          offset_index: index,
+          app_name: appName,
+          window_name: `${appName} — mock window`,
+          tags: [],
+          frame: null,
+          frame_name: null,
+          browser_url: null,
+          focused: true,
+          device_name: "browser dev",
+          text_source: "accessibility",
+        },
+      };
+    },
+  );
 }
 
 export function mockLocalApiResponse(
@@ -92,6 +180,21 @@ export function mockLocalApiResponse(
   if (url.pathname === "/health") {
     return Response.json(createMockHealth(scenario));
   }
+  // Sharing fixtures are synthetic but connected, so the meeting preview can
+  // exercise the same ranked app stack and review dialog as the desktop app.
+  if (url.pathname === "/connections") {
+    return Response.json({
+      data:
+        scenario === "empty"
+          ? []
+          : [
+              { id: "slack", name: "Slack", connected: true },
+              { id: "notion", name: "Notion", connected: true, mcp: true },
+              { id: "linear", name: "Linear", connected: true, mcp: true },
+              { id: "obsidian", name: "Obsidian", connected: true },
+            ],
+    });
+  }
   if (url.pathname === "/audio/device/status") return Response.json([]);
   if (url.pathname === "/vision/device/status") return Response.json([]);
   if (url.pathname === "/raw_sql") {
@@ -111,6 +214,27 @@ export function mockLocalApiResponse(
     }
     return Response.json(mockActivitySummary());
   }
+  if (url.pathname === "/activity-ledger") {
+    return Response.json(mockActivityLedger(url, scenario));
+  }
+  if (url.pathname === "/frames/preview-samples") {
+    const start = new Date(url.searchParams.get("start_time") ?? "");
+    const end = new Date(url.searchParams.get("end_time") ?? "");
+    const validRange =
+      Number.isFinite(start.getTime()) && Number.isFinite(end.getTime());
+    const span = validRange ? end.getTime() - start.getTime() : 0;
+    return Response.json({
+      frames:
+        scenario === "empty" || !validRange
+          ? []
+          : Array.from({ length: 6 }, (_, index) => ({
+              frame_id: 98_000 + index,
+              timestamp: new Date(
+                start.getTime() + (span * index) / 5,
+              ).toISOString(),
+            })),
+    });
+  }
   if (url.pathname === "/meetings/status") {
     return Response.json({ active: false, manualActive: false });
   }
@@ -126,6 +250,56 @@ export function mockLocalApiResponse(
   }
   if (url.pathname === "/pipes/activity") {
     return Response.json({ data: [], has_more: false, next_before_id: null });
+  }
+  if (url.pathname === "/cloud-agents/status") {
+    return Response.json({ providers: mockCloudProviderStatuses() });
+  }
+  const cloudConnect = url.pathname.match(
+    /^\/cloud-agents\/(codex|claude|cursor)\/connect$/,
+  );
+  if (cloudConnect && method === "POST") {
+    const provider = cloudConnect[1];
+    if (provider === "codex" || provider === "claude") {
+      mockCloudConnections.add(provider);
+    }
+    return Response.json({ providers: mockCloudProviderStatuses() });
+  }
+  if (url.pathname === "/cloud-agents/cursor-key" && method === "PUT") {
+    mockCloudConnections.add("cursor");
+    return Response.json({ success: true });
+  }
+  if (url.pathname === "/cloud-agents/cursor-agents") {
+    return Response.json({
+      agents: mockCloudConnections.has("cursor")
+        ? [
+            {
+              id: "bc-00000000-0000-0000-0000-000000000001",
+              name: "daily memory agent",
+              status: "ACTIVE",
+              url: "https://cursor.com/agents/bc-00000000-0000-0000-0000-000000000001",
+            },
+          ]
+        : [],
+    });
+  }
+  const cloudCodebases = url.pathname.match(
+    /^\/cloud-agents\/(codex|claude|cursor)\/codebases$/,
+  );
+  if (cloudCodebases) {
+    const values =
+      cloudCodebases[1] === "claude"
+        ? []
+        : [
+            "https://github.com/screenpipe/screenpipe",
+            "https://github.com/screenpipe/docs",
+            "https://github.com/example/product-app",
+          ];
+    return Response.json({
+      codebases: values.map((value) => ({
+        value,
+        label: value.replace("https://github.com/", ""),
+      })),
+    });
   }
   if (url.pathname === "/search") {
     const appName = url.searchParams.get("app_name");
@@ -153,7 +327,34 @@ export function mockLocalApiResponse(
     }
     return Response.json(emptyPage);
   }
-  if (url.pathname === "/pipes") return Response.json(emptyPage);
+  if (url.pathname === "/pipes") {
+    return Response.json(
+      scenario === "empty"
+        ? emptyPage
+        : {
+            data: [mockDailyRecapPipe()],
+            pagination: { limit: 100, offset: 0, total: 1 },
+          },
+    );
+  }
+  if (url.pathname === "/pipes/daily-recap/config" && method === "POST") {
+    const body = parseJsonBody(init);
+    if (typeof body.agent === "string") mockPipeAgent = body.agent;
+    if (body.cloud_agent && typeof body.cloud_agent === "object") {
+      mockCloudAgentConfig = body.cloud_agent as MockCloudAgentConfig;
+    }
+    return Response.json({ success: true });
+  }
+  if (url.pathname === "/pipes/favorites") {
+    return Response.json({ data: [] });
+  }
+  if (url.pathname === "/pipes/store/check-updates") {
+    return Response.json({ data: [] });
+  }
+  if (url.pathname.endsWith("/logs")) return Response.json([]);
+  if (url.pathname.endsWith("/executions")) {
+    return Response.json({ data: [], has_more: false });
+  }
   if (method === "DELETE") return Response.json({ success: true });
   if (method !== "GET") return Response.json({ success: true });
   return Response.json(scenario === "empty" ? emptyPage : { data: [] });
@@ -176,13 +377,48 @@ const MOCK_MEETING_TURNS: ReadonlyArray<{
   speaker: string;
   text: string;
 }> = [
-  { at: 0.04, device: "output", speaker: "sample person", text: "Let's start with where the rollout actually stands." },
-  { at: 0.18, device: "input", speaker: "me", text: "Capture is stable on the two machines we watched all week." },
-  { at: 0.33, device: "output", speaker: "another person", text: "What happens when someone reopens the meeting a day later?" },
-  { at: 0.47, device: "input", speaker: "me", text: "They get the saved summary, and the transcript stays intact underneath it." },
-  { at: 0.61, device: "output", speaker: "sample person", text: "Good. Put the evidence next to the summary so nobody has to trust it blind." },
-  { at: 0.76, device: "input", speaker: "me", text: "Agreed — the replay strip and the open tabs belong on that tab." },
-  { at: 0.91, device: "output", speaker: "another person", text: "Then we can send the summary out without a second pass." },
+  {
+    at: 0.04,
+    device: "output",
+    speaker: "sample person",
+    text: "Let's start with where the rollout actually stands.",
+  },
+  {
+    at: 0.18,
+    device: "input",
+    speaker: "me",
+    text: "Capture is stable on the two machines we watched all week.",
+  },
+  {
+    at: 0.33,
+    device: "output",
+    speaker: "another person",
+    text: "What happens when someone reopens the meeting a day later?",
+  },
+  {
+    at: 0.47,
+    device: "input",
+    speaker: "me",
+    text: "They get the saved summary, and the transcript stays intact underneath it.",
+  },
+  {
+    at: 0.61,
+    device: "output",
+    speaker: "sample person",
+    text: "Good. Put the evidence next to the summary so nobody has to trust it blind.",
+  },
+  {
+    at: 0.76,
+    device: "input",
+    speaker: "me",
+    text: "Agreed — the replay strip and the open tabs belong on that tab.",
+  },
+  {
+    at: 0.91,
+    device: "output",
+    speaker: "another person",
+    text: "Then we can send the summary out without a second pass.",
+  },
 ];
 
 function mockMeetingAudioRows() {
@@ -212,18 +448,80 @@ function mockActivitySummary() {
   const { start, end } = mockMeetingWindow();
   const span = end.getTime() - start.getTime();
   return {
+    data_status: "ok",
+    total_active_minutes: 20,
     apps: [
-      { name: "Google Chrome", frame_count: 412, minutes: 12, first_seen: start.toISOString(), last_seen: end.toISOString() },
-      { name: "Cursor", frame_count: 188, minutes: 6, first_seen: start.toISOString(), last_seen: end.toISOString() },
+      {
+        name: "Google Chrome",
+        frame_count: 412,
+        minutes: 12,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
+      {
+        name: "Cursor",
+        frame_count: 188,
+        minutes: 6,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
+      {
+        name: "Obsidian",
+        frame_count: 62,
+        minutes: 3,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
     ],
     windows: [
-      { app_name: "Google Chrome", window_name: "Rollout plan — sample doc", browser_url: "https://example.com/docs/rollout-plan", minutes: 8, frame_count: 240 },
-      { app_name: "Google Chrome", window_name: "Sample tracker — board", browser_url: "https://example.com/board/sample", minutes: 4, frame_count: 120 },
-      { app_name: "Cursor", window_name: "meeting-workspace.tsx", browser_url: "", minutes: 6, frame_count: 188 },
-      { app_name: "Slack", window_name: "#sample-channel", browser_url: "", minutes: 2, frame_count: 44 },
+      {
+        app_name: "Google Chrome",
+        window_name: "Rollout plan — sample doc",
+        browser_url: "https://example.com/docs/rollout-plan",
+        minutes: 8,
+        frame_count: 240,
+      },
+      {
+        app_name: "Google Chrome",
+        window_name: "Sample tracker — Linear",
+        browser_url: "https://linear.app/sample/board",
+        minutes: 4,
+        frame_count: 120,
+      },
+      {
+        app_name: "Google Chrome",
+        window_name: "Rollout notes — Notion",
+        browser_url: "https://notion.so/sample-rollout-notes",
+        minutes: 3,
+        frame_count: 88,
+      },
+      {
+        app_name: "Cursor",
+        window_name: "meeting-workspace.tsx",
+        browser_url: "",
+        minutes: 6,
+        frame_count: 188,
+      },
+      {
+        app_name: "Slack",
+        window_name: "#sample-channel",
+        browser_url: "",
+        minutes: 2,
+        frame_count: 44,
+      },
+      {
+        app_name: "Obsidian",
+        window_name: "sample rollout notes",
+        browser_url: "",
+        minutes: 3,
+        frame_count: 62,
+      },
     ],
     edited_files: [
-      { path: "/sample/project/components/meeting-notes/note-view.tsx", frame_count: 96 },
+      {
+        path: "/sample/project/components/meeting-notes/note-view.tsx",
+        frame_count: 96,
+      },
       { path: "/sample/notes/rollout-plan.md", frame_count: 31 },
     ],
     audio_summary: {
@@ -242,6 +540,216 @@ function mockActivitySummary() {
     total_frames: 600,
     time_range: { start: start.toISOString(), end: end.toISOString() },
   };
+}
+
+/** Invented intervals for the browser-only ledger surface. The fixture follows
+ * the requested depth so browser QA exercises the real response contract. */
+function mockActivityLedger(url: URL, scenario: BrowserDevScenario) {
+  const requestedEnd = new Date(url.searchParams.get("end_time") ?? "");
+  const end = Number.isFinite(requestedEnd.getTime())
+    ? requestedEnd
+    : new Date();
+  const requestedStart = new Date(url.searchParams.get("start_time") ?? "");
+  const start = Number.isFinite(requestedStart.getTime())
+    ? requestedStart
+    : new Date(end.getTime() - 4 * 60 * 60 * 1000);
+  const depth = url.searchParams.get("depth") ?? "task";
+  const includeArtifacts = url.searchParams.get("include_artifacts") === "true";
+  const envelope = (intervals: unknown[]) => ({
+    intervals,
+    depth,
+    data_status: intervals.length ? "ok" : "empty",
+    time_range: { start: start.toISOString(), end: end.toISOString() },
+    generated_at: new Date().toISOString(),
+  });
+  if (scenario === "empty") return envelope([]);
+
+  const at = (minutesAgo: number) =>
+    new Date(end.getTime() - minutesAgo * 60_000).toISOString();
+  const base = [
+    {
+      id: 101,
+      task_id: 11,
+      parent_task_id: 1,
+      kind: "task",
+      title: "review sample onboarding issue",
+      category: "Slack",
+      app_name: "Slack",
+      start_at: at(170),
+      end_at: at(132),
+      state: "final",
+      confidence: 0.82,
+      producer: "deterministic-v1",
+      evidence_count: 12,
+      actions: [
+        {
+          id: 1001,
+          occurred_at: at(162),
+          action_type: "window_focus",
+          summary: "focused Slack conversation",
+          app_name: "Slack",
+          confidence: 0.8,
+          source_type: "ui_event",
+          source_id: 7101,
+        },
+        {
+          id: 1002,
+          occurred_at: at(141),
+          action_type: "text",
+          summary: "typed in message field",
+          app_name: "Slack",
+          confidence: 0.85,
+          source_type: "ui_event",
+          source_id: 7102,
+        },
+      ],
+      evidence: [
+        {
+          source_type: "frame",
+          source_id: 90101,
+          occurred_at: at(169),
+          frame_id: 90101,
+          app_name: "Slack",
+          window_title: "sample onboarding issue",
+          browser_url: null,
+        },
+        {
+          source_type: "ui_event",
+          source_id: 7102,
+          occurred_at: at(141),
+          frame_id: 90102,
+          app_name: "Slack",
+          window_title: "sample onboarding issue",
+          browser_url: null,
+        },
+      ],
+    },
+    {
+      id: 102,
+      task_id: 12,
+      parent_task_id: 2,
+      kind: "document",
+      title: "activity-ledger.tsx",
+      category: "Cursor",
+      app_name: "Cursor",
+      start_at: at(124),
+      end_at: at(48),
+      state: "final",
+      confidence: 0.9,
+      producer: "deterministic-v1",
+      evidence_count: 24,
+      actions: [
+        {
+          id: 1003,
+          occurred_at: at(97),
+          action_type: "text",
+          summary: "typed in editor",
+          app_name: "Cursor",
+          confidence: 0.88,
+          source_type: "ui_event",
+          source_id: 7103,
+        },
+      ],
+      evidence: [
+        {
+          source_type: "frame",
+          source_id: 90103,
+          occurred_at: at(122),
+          frame_id: 90103,
+          app_name: "Cursor",
+          window_title: "activity-ledger.tsx",
+          browser_url: null,
+        },
+        {
+          source_type: "frame",
+          source_id: 90104,
+          occurred_at: at(49),
+          frame_id: 90104,
+          app_name: "Cursor",
+          window_title: "activity-ledger.tsx",
+          browser_url: null,
+        },
+      ],
+    },
+    {
+      id: 103,
+      task_id: 13,
+      parent_task_id: 3,
+      kind: "task",
+      title: "inspect sample pull request",
+      category: "Arc",
+      app_name: "Arc",
+      start_at: at(39),
+      end_at: at(4),
+      state: "provisional",
+      confidence: 0.75,
+      producer: "deterministic-v1",
+      evidence_count: 9,
+      actions: [
+        {
+          id: 1004,
+          occurred_at: at(24),
+          action_type: "click",
+          summary: "clicked review control",
+          app_name: "Arc",
+          confidence: 0.8,
+          source_type: "ui_event",
+          source_id: 7104,
+        },
+      ],
+      evidence: [
+        {
+          source_type: "frame",
+          source_id: 90105,
+          occurred_at: at(38),
+          frame_id: 90105,
+          app_name: "Arc",
+          window_title: "sample pull request",
+          browser_url: "https://github.com/example/sample/pull/1",
+        },
+        {
+          source_type: "frame",
+          source_id: 90106,
+          occurred_at: at(5),
+          frame_id: 90106,
+          app_name: "Arc",
+          window_title: "sample pull request",
+          browser_url: "https://github.com/example/sample/pull/1",
+        },
+      ],
+    },
+  ];
+
+  return envelope(
+    base.map((interval, index) => {
+      const evidence = interval.evidence.map((item) =>
+        includeArtifacts
+          ? item
+          : {
+              source_type: item.source_type,
+              source_id: item.source_id,
+              occurred_at: item.occurred_at,
+            },
+      );
+      if (depth === "category") {
+        return {
+          ...interval,
+          task_id: 200 + index,
+          parent_task_id: null,
+          kind: "category",
+          title: interval.category,
+          actions: undefined,
+          evidence: includeArtifacts ? evidence : undefined,
+        };
+      }
+      if (depth === "action") return { ...interval, evidence };
+      return {
+        ...interval,
+        actions: undefined,
+        evidence: includeArtifacts ? evidence : undefined,
+      };
+    }),
+  );
 }
 
 // Invented content only. This exists so the meeting note surface renders in
@@ -293,10 +801,7 @@ function installMockFetch(apiPort: number, scenario: BrowserDevScenario) {
   };
 }
 
-function installMockWebSocket(
-  apiPort: number,
-  scenario: BrowserDevScenario,
-) {
+function installMockWebSocket(apiPort: number, scenario: BrowserDevScenario) {
   const NativeWebSocket = window.WebSocket;
 
   class BrowserDevWebSocket extends EventTarget {

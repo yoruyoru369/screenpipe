@@ -73,22 +73,23 @@ public func shortcutSetMeetingStopResult(_ succeeded: Int32) {
 }
 
 /// Recording-health state pushed from the Rust health loop (issue #5127):
-/// "normal" | "failure" | "fixing" | "recovered", optionally "state|detail"
-/// or "state|detail|subsystem" where detail is a concise failure reason (or a
-/// boot-phase label while fixing) and subsystem is "audio" or "screen" when
-/// the engine could attribute the failure to one (#6126).
+/// "normal" | "failure" | "recovering" | "fixing" | "recovered", optionally
+/// "state|detail", "state|detail|subsystem", or a fourth explicit action
+/// field. Detail is a concise failure reason (or a boot-phase label while
+/// fixing), and subsystem is "audio" or "screen" when attributable (#6126).
 /// Swift only renders it — all detection/debounce/recovery logic lives in Rust.
 @_cdecl("shortcut_set_health_state")
 public func shortcutSetHealthState(_ statePtr: UnsafePointer<CChar>?) -> Int32 {
     guard let statePtr = statePtr else { return -1 }
     let payload = String(cString: statePtr)
-    let parts = payload.split(separator: "|", maxSplits: 2).map(String.init)
+    let parts = payload.split(separator: "|", maxSplits: 3, omittingEmptySubsequences: false).map(String.init)
     let state = parts.first ?? "normal"
     let detail = parts.count > 1 ? parts[1] : ""
     let subsystem = parts.count > 2 ? parts[2] : ""
+    let action = parts.count > 3 ? parts[3] : ""
     if #available(macOS 13.0, *) {
         ShortcutReminderController.shared.setHealthState(
-            state, detail: detail, subsystem: subsystem)
+            state, detail: detail, subsystem: subsystem, action: action)
         return 0
     }
     return -2
@@ -109,14 +110,17 @@ final class OverlayMetrics: ObservableObject {
     /// Scoped to one meeting: cleared whenever the meeting goes inactive, so the
     /// next meeting never inherits a card the user pinned for the previous one.
     @Published var meetingPinned: Bool = false
-    /// "normal" | "failure" | "fixing" | "recovered" — set only via
-    /// ShortcutReminderController.setHealthState (pushed from Rust).
+    /// "normal" | "failure" | "recovering" | "fixing" | "recovered" — set
+    /// only via ShortcutReminderController.setHealthState (pushed from Rust).
     @Published var healthState: String = "normal"
     /// Concise failure reason, or boot-phase label while fixing.
     @Published var healthDetail: String = ""
     /// "audio" | "screen" | "" — which subsystem failed, when the engine could
     /// attribute it to one. Empty keeps the pill's generic wording (#6126).
     @Published var healthSubsystem: String = ""
+    /// Explicit behavior from Rust. Kept separate from user-facing copy so a
+    /// wording change cannot turn a manual-only incident into a restart click.
+    @Published var healthAction: String = ""
 
     /// Collapsed failure-pill label. Must stay in sync with the webview's
     /// `failureHeadline` in app/shortcut-reminder/page.tsx — both render the
@@ -127,6 +131,12 @@ final class OverlayMetrics: ObservableObject {
         case "screen": return "screen capture needs help"
         default: return "recording needs help"
         }
+    }
+
+    /// Terminal native failures are advisory only. The user must decide when
+    /// to quit and reopen the app; the recording-health UI never exits it.
+    var manualRecoveryRequired: Bool {
+        healthAction == "manual-reopen"
     }
     /// True when the cursor is inside the panel area — drives expand/collapse
     /// since SwiftUI's .onHover tracking areas use .activeInActiveApp which
@@ -461,16 +471,16 @@ private let kBaseNotificationW: CGFloat = 340
 private let kBaseNotificationH: CGFloat = 34
 private let kRestingOpacity: Double = 0.50
 private let kAnimDur: Double = 0.2
-private let kDockControls = ["search", "chat", "timeline", "audio", "settings"]
+private let kDockControls = ["search", "chat", "timeline", "audio", "brand"]
 
-/// Convert configured shortcuts to one stable, readable macOS order.
+/// Convert configured shortcuts to one stable, compact macOS glyph order.
 /// Settings historically stored both `Super+Control+…` and
-/// `Control+Super+…`; the overlay should always read `Cmd+Ctrl+…`.
+/// `Control+Super+…`; the overlay should always read `⌘⌃…`.
 func prettifyShortcut(_ raw: String) -> String {
     let normalized = raw
-        .replacingOccurrences(of: "⌘", with: "Cmd+")
-        .replacingOccurrences(of: "⌃", with: "Ctrl+")
-        .replacingOccurrences(of: "⌥", with: "Opt+")
+        .replacingOccurrences(of: "⌘", with: "Command+")
+        .replacingOccurrences(of: "⌃", with: "Control+")
+        .replacingOccurrences(of: "⌥", with: "Option+")
         .replacingOccurrences(of: "⇧", with: "Shift+")
 
     var modifiers = Set<String>()
@@ -478,10 +488,10 @@ func prettifyShortcut(_ raw: String) -> String {
     for part in normalized.split(separator: "+", omittingEmptySubsequences: true) {
         let trimmed = part.trimmingCharacters(in: .whitespaces)
         switch trimmed.lowercased() {
-        case "super", "cmd", "command", "meta": modifiers.insert("Cmd")
-        case "ctrl", "control": modifiers.insert("Ctrl")
-        case "alt", "option", "opt": modifiers.insert("Opt")
-        case "shift": modifiers.insert("Shift")
+        case "super", "cmd", "command", "meta": modifiers.insert("⌘")
+        case "ctrl", "control": modifiers.insert("⌃")
+        case "alt", "option", "opt": modifiers.insert("⌥")
+        case "shift": modifiers.insert("⇧")
         default:
             if !trimmed.isEmpty {
                 keys.append(trimmed.uppercased())
@@ -489,8 +499,8 @@ func prettifyShortcut(_ raw: String) -> String {
         }
     }
 
-    let canonicalModifiers = ["Cmd", "Ctrl", "Opt", "Shift"].filter(modifiers.contains)
-    return (canonicalModifiers + keys).joined(separator: "+")
+    let canonicalModifiers = ["⌘", "⌃", "⌥", "⇧"].filter(modifiers.contains)
+    return (canonicalModifiers + keys).joined()
 }
 
 /// Which side of the panel the pill and its dock hug. The panel stays a fixed
@@ -781,6 +791,31 @@ func overlayHoverRect(
     )
 }
 
+func dockControl(
+    at point: NSPoint,
+    in bounds: NSRect,
+    expanded: Bool,
+    disclosureDown: Bool,
+    horizontal: OverlayHorizontal,
+    scale: CGFloat
+) -> (String, Int)? {
+    guard expanded else { return nil }
+    let dock = overlayHoverRect(
+        in: bounds,
+        expanded: true,
+        disclosureDown: disclosureDown,
+        horizontal: horizontal,
+        scale: scale
+    )
+    guard dock.contains(point) else { return nil }
+    let cellWidth = dock.width / CGFloat(kDockControls.count)
+    let index = min(
+        kDockControls.count - 1,
+        max(0, Int((point.x - dock.minX) / cellWidth))
+    )
+    return (kDockControls[index], index)
+}
+
 func disclosureContent(
     for control: String?,
     overlayShortcut: String,
@@ -789,6 +824,7 @@ func disclosureContent(
     metrics: OverlayMetrics
 ) -> (String, String?)? {
     switch control {
+    case "brand": return ("screenpipe", "right-click")
     case "timeline": return ("timeline", overlayShortcut)
     case "chat": return ("ask chat", chatShortcut)
     case "search": return ("search", searchShortcut)
@@ -888,6 +924,8 @@ struct ShortcutReminderView: View {
         ZStack {
             if metrics.healthState == "failure" {
                 failureView
+            } else if metrics.healthState == "recovering" {
+                recoveringView
             } else if metrics.healthState == "fixing" {
                 fixingView
             } else if metrics.healthState == "recovered" {
@@ -915,16 +953,15 @@ struct ShortcutReminderView: View {
 
     private var failureView: some View {
         HStack(spacing: 0) {
-            // The message zone is itself a Button — and clicking it RESTARTS.
-            // Users click the thing that says "recording needs help" expecting
-            // the fix (observed repeatedly in testing); a separate restart
-            // button to the right of the text reads as "nothing happened".
+            // The message zone is itself a Button for recoverable failures.
+            // A terminal native failure is advisory only: never turn a health
+            // signal into an app-exit action.
             // Hover has already expanded the row by the time a click is
             // possible, so expand-on-click would always be a no-op anyway.
             // (Plain Button, NOT .onTapGesture: tap recognizers delay/steal
             // mouse events in this nonactivating panel.)
             Button(action: {
-                if isExpanded {
+                if isExpanded && !metrics.manualRecoveryRequired {
                     metrics.healthState = "fixing"
                     onAction("restart_recording")
                 } else {
@@ -951,7 +988,7 @@ struct ShortcutReminderView: View {
 
                     if !isExpanded {
                         // Repair affordance: hint that an action lives here.
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: metrics.manualRecoveryRequired ? "power" : "arrow.clockwise")
                             .font(.system(size: 6 * scale, weight: .bold))
                             .foregroundColor(.white.opacity(0.45))
                             .padding(.trailing, s(8))
@@ -965,25 +1002,38 @@ struct ShortcutReminderView: View {
             if isExpanded {
                 Rectangle().fill(.white.opacity(0.15)).frame(width: 0.5).frame(height: s(12))
 
-                Button(action: {
-                    // Optimistic — Rust pushes the authoritative "fixing"
-                    // right after it receives the action.
-                    metrics.healthState = "fixing"
-                    onAction("restart_recording")
-                }) {
+                if metrics.manualRecoveryRequired {
                     HStack(spacing: s(2)) {
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: "power")
                             .font(.system(size: 6 * scale, weight: .bold))
                             .foregroundColor(.white.opacity(0.95))
-                        Text("restart")
+                        Text("quit & reopen")
                             .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .bold))
                             .foregroundColor(.white.opacity(0.95))
                     }
                     .padding(.horizontal, s(8))
                     .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
+                } else {
+                    Button(action: {
+                        // Optimistic — Rust pushes the authoritative "fixing"
+                        // right after it receives the action.
+                        metrics.healthState = "fixing"
+                        onAction("restart_recording")
+                    }) {
+                        HStack(spacing: s(2)) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 6 * scale, weight: .bold))
+                                .foregroundColor(.white.opacity(0.95))
+                            Text("restart")
+                                .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .bold))
+                                .foregroundColor(.white.opacity(0.95))
+                        }
+                        .padding(.horizontal, s(8))
+                        .frame(maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 Rectangle().fill(.white.opacity(0.15)).frame(width: 0.5).frame(height: s(12))
 
@@ -1013,17 +1063,25 @@ struct ShortcutReminderView: View {
     }
 
     private var fixingView: some View {
+        healthProgressView(
+            label: metrics.healthDetail.isEmpty
+                ? "fixing recording..."
+                : "fixing — \(metrics.healthDetail)..."
+        )
+    }
+
+    private var recoveringView: some View {
+        healthProgressView(label: "checking recovery...")
+    }
+
+    private func healthProgressView(label: String) -> some View {
         HStack(spacing: s(4)) {
             ProgressView()
                 .scaleEffect(0.45)
                 .frame(width: s(12), height: s(12))
                 .padding(.leading, s(8))
 
-            Text(
-                metrics.healthDetail.isEmpty
-                    ? "fixing recording..."
-                    : "fixing — \(metrics.healthDetail)..."
-            )
+            Text(label)
                 .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .regular))
                 .foregroundColor(.white.opacity(0.85))
                 .padding(.trailing, s(8))
@@ -1137,8 +1195,12 @@ struct ShortcutReminderView: View {
 
             Rectangle().fill(.white.opacity(0.28)).frame(width: 1).padding(.vertical, s(4))
 
-            DockIconButton(icon: "gearshape", active: metrics.hoveredControl == "settings", scale: scale) {
-                onAction("open_overlay_settings")
+            DockAppIconButton(
+                active: metrics.hoveredControl == "brand",
+                meetingActive: metrics.meetingActive,
+                scale: scale
+            ) {
+                onAction("open_timeline")
             }
         }
         .frame(width: kBaseExpandedW * scale, height: kBaseDockH * scale)
@@ -1330,6 +1392,38 @@ private struct DockIconButton: View {
 }
 
 @available(macOS 13.0, *)
+private struct DockAppIconButton: View {
+    let active: Bool
+    let meetingActive: Bool
+    let scale: CGFloat
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                if let appIcon = NSApp.applicationIconImage {
+                    Image(nsImage: appIcon)
+                        .resizable()
+                        .frame(width: 12 * scale, height: 12 * scale)
+                }
+                if meetingActive {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 4 * scale, height: 4 * scale)
+                        .offset(x: 2 * scale, y: -2 * scale)
+                }
+            }
+            .opacity(active ? 1 : 0.78)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(active ? Color.white.opacity(0.14) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("screenpipe — right-click for options")
+    }
+}
+
+@available(macOS 13.0, *)
 private struct DockStatusCell<Content: View>: View {
     let active: Bool
     @ViewBuilder let content: () -> Content
@@ -1472,9 +1566,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var hoverHideWorkItem: DispatchWorkItem?
     private var meetingStopTimeoutWorkItem: DispatchWorkItem?
 
-    private var overlayShortcut = "Cmd+Ctrl+S"
-    private var chatShortcut = "Cmd+Ctrl+L"
-    private var searchShortcut = "Cmd+Ctrl+K"
+    private var overlayShortcut = "⌘⌃S"
+    private var chatShortcut = "⌘⌃L"
+    private var searchShortcut = "⌘⌃K"
     private var metrics = OverlayMetrics()
     private var wsTask: URLSessionWebSocketTask?
     private var wsRetryTimer: Timer?
@@ -1484,6 +1578,21 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var metricsWsUrl = "ws://127.0.0.1:3030/ws/metrics"
     private var eventsWsUrl = "ws://127.0.0.1:3030/ws/meeting-overlay"
     private var isVisible = false
+    private var captureProtected = false
+
+    private var overlaySharingType: NSWindow.SharingType {
+        captureProtected ? .none : .readOnly
+    }
+
+    func setCaptureProtected(_ protected: Bool) {
+        let apply = { [self] in
+            captureProtected = protected
+            for panel in [panel, disclosurePanel, transcriptPanel, dragStagePanel, notificationPanel] {
+                panel?.sharingType = overlaySharingType
+            }
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
+    }
 
     /// Where the pill is pinned. Rust supplies the persisted value on show and
     /// stores whatever the user drags it to.
@@ -1976,13 +2085,21 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     /// frame is deliberately NOT resized — all health content is sized to fit
     /// the fixed expanded panel, because setFrame on this nonactivating panel
     /// breaks its mouse routing (dead-click pill).
-    func setHealthState(_ state: String, detail: String = "", subsystem: String = "") {
+    func setHealthState(
+        _ state: String,
+        detail: String = "",
+        subsystem: String = "",
+        action: String = ""
+    ) {
         DispatchQueue.main.async { [self] in
             if self.metrics.healthDetail != detail {
                 self.metrics.healthDetail = detail
             }
             if self.metrics.healthSubsystem != subsystem {
                 self.metrics.healthSubsystem = subsystem
+            }
+            if self.metrics.healthAction != action {
+                self.metrics.healthAction = action
             }
             if self.metrics.healthState != state {
                 let normalityChanged = (self.metrics.healthState == "normal") != (state == "normal")
@@ -2053,7 +2170,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         p.isMovableByWindowBackground = false
         p.acceptsMouseMovedEvents = true
         p.isReleasedWhenClosed = false
-        p.sharingType = .readOnly
+        p.sharingType = overlaySharingType
         p.delegate = self
 
         let tracking = ReminderTrackingView(frame: NSRect(x: 0, y: 0, width: Int(w), height: Int(h)))
@@ -2114,23 +2231,39 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             metrics.hoveredControl = nil
             return
         }
-        guard metrics.isHovering, let point = point else {
+        guard metrics.isHovering,
+              let point = point,
+              let bounds = trackingView?.bounds else {
             metrics.hoveredControl = nil
             return
         }
-        let cellWidth = (kBaseExpandedW * gOverlayScale) / CGFloat(kDockControls.count)
-        let dockHeight = kBaseDockH * gOverlayScale
-        let panelHeight = kBaseExpandedH * gOverlayScale
-        let pointerIsInDock = metrics.disclosureDown
-            ? point.y >= panelHeight - dockHeight
-            : point.y <= dockHeight
-        guard pointerIsInDock else { return }
-        let index = min(kDockControls.count - 1, max(0, Int(point.x / cellWidth)))
-        let control = kDockControls[index]
+        guard let (control, index) = dockControl(
+            at: point,
+            in: bounds,
+            expanded: metrics.isHovering || metrics.forceExpanded,
+            disclosureDown: metrics.disclosureDown,
+            horizontal: metrics.horizontal,
+            scale: gOverlayScale
+        ) else { return }
         if metrics.hoveredControl != control {
             metrics.hoveredControl = control
             showDisclosurePanel(for: control, index: index)
         }
+    }
+
+    private func showShortcutContextMenuIfNeeded(at point: NSPoint) -> Bool {
+        guard let bounds = trackingView?.bounds,
+              let (control, _) = dockControl(
+                  at: point,
+                  in: bounds,
+                  expanded: metrics.isHovering || metrics.forceExpanded,
+                  disclosureDown: metrics.disclosureDown,
+                  horizontal: metrics.horizontal,
+                  scale: gOverlayScale
+              ),
+              control == "brand" else { return false }
+        showShortcutContextMenu(at: point)
+        return true
     }
 
     private func refreshActiveDisclosure() {
@@ -2179,7 +2312,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             disclosure.hidesOnDeactivate = false
             disclosure.ignoresMouseEvents = true
             disclosure.isReleasedWhenClosed = false
-            disclosure.sharingType = .readOnly
+            disclosure.sharingType = overlaySharingType
             disclosurePanel = disclosure
         }
 
@@ -2324,7 +2457,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         preview.hidesOnDeactivate = false
         preview.acceptsMouseMovedEvents = true
         preview.isReleasedWhenClosed = false
-        preview.sharingType = .readOnly
+        preview.sharingType = overlaySharingType
 
         let tracking = ReminderTrackingView(
             frame: NSRect(x: 0, y: 0, width: Int(w), height: Int(h))
@@ -2774,7 +2907,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         stage.hasShadow = false
         stage.hidesOnDeactivate = false
         stage.isReleasedWhenClosed = false
-        stage.sharingType = .readOnly
+        stage.sharingType = overlaySharingType
         // Never take the drag away from the pill.
         stage.ignoresMouseEvents = true
 
@@ -2835,6 +2968,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                 // `endPillDrag` restores the card against the pill's new home
                 // and rides it in on the settle.
                 self?.endPillDrag()
+            }
+            hosting.onRightClick = { [weak self] point in
+                self?.showShortcutContextMenuIfNeeded(at: point) ?? false
             }
             hosting.frame = contentView.bounds
             hosting.autoresizingMask = [.width, .height]
@@ -2925,7 +3061,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         toast.hidesOnDeactivate = false
         toast.acceptsMouseMovedEvents = true
         toast.isReleasedWhenClosed = false
-        toast.sharingType = .readOnly
+        toast.sharingType = overlaySharingType
 
         let tracking = ReminderTrackingView(
             frame: NSRect(x: 0, y: 0, width: Int(w), height: Int(h))
@@ -3037,6 +3173,49 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             toast.animator().setFrame(destination, display: true)
             toast.animator().alphaValue = 1
         }
+    }
+
+    /// Wispr-style native menu: one temporary escape beside the floating bar,
+    /// with the durable choice kept in Settings. Using AppKit's menu avoids a
+    /// second floating panel and inherits keyboard, screen-edge and VoiceOver
+    /// behavior from macOS.
+    private func showShortcutContextMenu(at point: NSPoint) {
+        guard let contentView = panel?.contentView else { return }
+        let menu = NSMenu(title: "shortcut reminder")
+        menu.autoenablesItems = false
+
+        let snooze = NSMenuItem(
+            title: "Hide for 1 hour",
+            action: #selector(hideShortcutReminderForHour),
+            keyEquivalent: ""
+        )
+        snooze.target = self
+        snooze.isEnabled = true
+        menu.addItem(snooze)
+        menu.addItem(.separator())
+
+        let settings = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openShortcutReminderSettings),
+            keyEquivalent: ""
+        )
+        settings.target = self
+        settings.isEnabled = true
+        menu.addItem(settings)
+
+        menu.popUp(
+            positioning: nil,
+            at: point,
+            in: contentView
+        )
+    }
+
+    @objc private func hideShortcutReminderForHour() {
+        sendAction("dismiss_hour")
+    }
+
+    @objc private func openShortcutReminderSettings() {
+        sendAction("open_overlay_settings")
     }
 
     private func sendAction(_ action: String) {
@@ -3327,6 +3506,9 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
     var onDragStarted: (() -> Void)?
     /// Called once the user releases, so the controller can snap and persist.
     var onDragEnded: (() -> Void)?
+    /// Returns true when the click belonged to the expanded brand control and
+    /// the controller presented its native context menu.
+    var onRightClick: ((NSPoint) -> Bool)?
     /// Centre of the visible chip relative to the panel origin. Supplied by the
     /// controller because only it knows the current metrics; used to clamp the
     /// chip rather than the whole panel, most of which is empty space for the
@@ -3448,6 +3630,11 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
         }
     }
 
+    override func rightMouseDown(with event: NSEvent) {
+        if onRightClick?(event.locationInWindow) == true { return }
+        super.rightMouseDown(with: event)
+    }
+
     /// Keep the grabbed point of the panel pinned under the cursor, but never
     /// let the chip itself leave the desktop. Screen coordinates throughout, so
     /// crossing onto another display just works.
@@ -3484,6 +3671,15 @@ public func shortcutShow(_ jsonPtr: UnsafePointer<CChar>?) -> Int32 {
 public func shortcutHide() -> Int32 {
     if #available(macOS 13.0, *) {
         ShortcutReminderController.shared.hide()
+        return 0
+    }
+    return -2
+}
+
+@_cdecl("shortcut_set_capture_protected")
+public func shortcutSetCaptureProtected(_ protected: Int32) -> Int32 {
+    if #available(macOS 13.0, *) {
+        ShortcutReminderController.shared.setCaptureProtected(protected != 0)
         return 0
     }
     return -2

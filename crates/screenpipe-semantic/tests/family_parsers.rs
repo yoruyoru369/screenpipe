@@ -120,6 +120,116 @@ fn mail_fixture_extracts_subject_sender_and_body() {
 }
 
 #[test]
+fn additional_mail_clients_use_the_structural_family_parser() {
+    let clients = [
+        (
+            "Thunderbird",
+            serde_json::json!({
+                "platform": "windows",
+                "app_id": null,
+                "executable": "thunderbird.exe",
+                "display_name": "Thunderbird",
+                "version": null,
+                "browser_url": null
+            }),
+        ),
+        (
+            "Proton Mail",
+            serde_json::json!({
+                "platform": "macos",
+                "app_id": "ch.protonmail.desktop",
+                "executable": "Proton Mail",
+                "display_name": "Proton Mail",
+                "version": null,
+                "browser_url": null
+            }),
+        ),
+        (
+            "Fastmail",
+            serde_json::json!({
+                "platform": "macos",
+                "app_id": null,
+                "executable": "Safari",
+                "display_name": "Safari",
+                "version": null,
+                "browser_url": "https://app.fastmail.com/mail/Inbox/example"
+            }),
+        ),
+        (
+            "HEY",
+            serde_json::json!({
+                "platform": "windows",
+                "app_id": null,
+                "executable": "chrome.exe",
+                "display_name": "Chrome",
+                "version": null,
+                "browser_url": "https://app.hey.com/topics/example"
+            }),
+        ),
+    ];
+
+    for (client, app) in clients {
+        let source = serde_json::json!({
+            "app": app,
+            "nodes": [
+                { "parent": null, "role": "Window", "title": format!("Parser update - {client}") },
+                { "parent": 0, "role": "Document" },
+                { "parent": 1, "role": "Heading", "classes": ["thread-title"], "title": "Parser update" },
+                { "parent": 1, "role": "Group", "classes": ["email-message"] },
+                { "parent": 3, "role": "Text", "classes": ["sender"], "value": "Dana" },
+                { "parent": 3, "role": "Group", "classes": ["message-body"] },
+                { "parent": 5, "role": "Text", "value": "Please review the mail parser." }
+            ]
+        })
+        .to_string();
+        let items = handled(&source, "family.mail");
+        assert_eq!(items[0].title.as_deref(), Some("Parser update"), "{client}");
+        assert_eq!(items[1].actor.as_deref(), Some("Dana"), "{client}");
+        assert_eq!(
+            items[1].body.as_deref(),
+            Some("Please review the mail parser."),
+            "{client}"
+        );
+    }
+}
+
+#[test]
+fn proton_mail_extracts_its_native_message_structure() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "ch.protonmail.desktop",
+            "executable": "Proton Mail",
+            "display_name": "Proton Mail",
+            "version": null,
+            "browser_url": null
+        },
+        "nodes": [
+            { "parent": null, "role": "AXWebArea" },
+            { "parent": 0, "role": "AXHeading", "text": "Parser update" },
+            { "parent": 0, "role": "AXGroup", "classes": ["message-container"] },
+            { "parent": 2, "role": "AXGroup", "classes": ["message-header", "message-header-collapsed"] },
+            { "parent": 3, "role": "AXGroup", "classes": ["message-header-recipient-labels"] },
+            { "parent": 4, "role": "AXStaticText", "text": "Dana" },
+            { "parent": 2, "role": "AXGroup", "classes": ["message-content"] },
+            { "parent": 6, "role": "AXStaticText", "text": "Please review the Proton parser." }
+        ]
+    }"#;
+    let items = handled(source, "family.mail");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].title.as_deref(), Some("Parser update"));
+    assert_eq!(
+        items[0].metadata.get("surface").map(String::as_str),
+        Some("proton_message")
+    );
+    assert_eq!(items[1].actor.as_deref(), Some("Dana"));
+    assert_eq!(
+        items[1].body.as_deref(),
+        Some("Please review the Proton parser.")
+    );
+}
+
+#[test]
 fn document_fixture_emits_only_largest_editor_body() {
     let items = handled(
         include_str!("fixtures/families/notion_document.json"),
@@ -231,6 +341,50 @@ fn gmail_windows_fixture_extracts_list_rows_with_unread_state() {
     assert!(rows
         .iter()
         .all(|row| !row.title.as_deref().unwrap_or_default().contains('\u{a0}')));
+}
+
+#[test]
+fn gmail_macos_web_fixture_extracts_ax_group_list_rows() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": null,
+            "executable": "Google Chrome",
+            "display_name": "Chrome",
+            "version": null,
+            "browser_url": "https://mail.google.com/mail/u/0/#inbox"
+        },
+        "nodes": [
+            { "parent": null, "role": "AXWebArea", "text": "Inbox - Gmail" },
+            {
+                "parent": 0,
+                "role": "AXGroup",
+                "text": "unread, Dana Lopez, Parser rollout, 9:14 AM, Please review the parser rollout.",
+                "classes": ["zA", "zE"]
+            },
+            { "parent": 1, "role": "AXStaticText", "text": "Dana Lopez", "classes": ["yX"] },
+            {
+                "parent": 1,
+                "role": "AXStaticText",
+                "text": "Parser rollout\u00a0-\u00a0Please review the parser rollout.",
+                "classes": ["a4W"]
+            },
+            { "parent": 1, "role": "AXStaticText", "text": "9:14 AM", "classes": ["xW"] }
+        ]
+    }"#;
+    let items = handled(source, "family.mail");
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0].metadata.get("view").map(String::as_str),
+        Some("list")
+    );
+    assert_eq!(items[1].actor.as_deref(), Some("Dana Lopez"));
+    assert_eq!(items[1].title.as_deref(), Some("Parser rollout"));
+    assert_eq!(
+        items[1].body.as_deref(),
+        Some("Please review the parser rollout.")
+    );
+    assert_eq!(items[1].status.as_deref(), Some("unread"));
 }
 
 #[test]
@@ -474,6 +628,53 @@ fn teams_windows_fixture_extracts_fluent_control_message_turns() {
             .unwrap_or_default()
             .contains("Missed call"));
     }
+}
+
+#[test]
+fn teams_windows_chat_list_fixture_extracts_treeitem_rows() {
+    let source = r#"{
+        "app": {
+            "platform": "windows",
+            "app_id": "com.microsoft.teams2",
+            "executable": "ms-teams.exe",
+            "display_name": "Microsoft Teams",
+            "version": null,
+            "browser_url": null
+        },
+        "nodes": [
+            { "parent": null, "role": "Window", "text": "Microsoft Teams" },
+            { "parent": 0, "role": "Button", "text": "New message (Ctrl+N)" },
+            {
+                "parent": 0,
+                "role": "TreeItem",
+                "text": "Meeting chat Launch Review Last message You: shipped the parser eval Muted 4/8/2024"
+            },
+            {
+                "parent": 0,
+                "role": "TreeItem",
+                "text": "Chat Dana Lopez Last message Dana Lopez: numbers are ready 4/9/2024"
+            }
+        ]
+    }"#;
+    let items = handled(source, "family.conversation");
+    assert_eq!(items.len(), 3, "list plus two chat rows");
+    assert_eq!(
+        items[0].metadata.get("view").map(String::as_str),
+        Some("chat_list")
+    );
+    assert_eq!(items[1].title.as_deref(), Some("Launch Review"));
+    assert_eq!(items[1].body.as_deref(), Some("shipped the parser eval"));
+    assert_eq!(items[1].status.as_deref(), Some("muted"));
+    assert_eq!(
+        items[1].metadata.get("last_sender").map(String::as_str),
+        Some("You")
+    );
+    assert_eq!(
+        items[1].metadata.get("last_active").map(String::as_str),
+        Some("4/8/2024")
+    );
+    assert_eq!(items[2].title.as_deref(), Some("Dana Lopez"));
+    assert_eq!(items[2].body.as_deref(), Some("numbers are ready"));
 }
 
 #[test]

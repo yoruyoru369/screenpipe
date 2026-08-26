@@ -20,7 +20,7 @@ pub enum AppFamily {
 
 /// Public app identity and family membership for one built-in parser profile.
 ///
-/// The catalog describes 51 supported app targets using public app identities,
+/// The catalog describes 56 supported app targets using public app identities,
 /// URL patterns, and stable accessibility contracts.
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltinAppProfile {
@@ -189,9 +189,19 @@ pub static BUILTIN_APP_PROFILES: &[BuiltinAppProfile] = &[
         &[C],
         &["com.hnc.Discord"],
         &["Discord", "Discord.exe", "discord"],
+        &[r"^https://discord\.com/"],
+        &["discord.com/"],
+        Some("https://discord.com/channels/example/channel"),
+    ),
+    profile(
+        "fastmail",
+        "Fastmail",
+        &[M],
         &[],
         &[],
-        None,
+        &[r"^https?://app\.fastmail\.com/"],
+        &["app.fastmail.com/"],
+        Some("https://app.fastmail.com/mail/Inbox/example"),
     ),
     profile(
         "fantastical",
@@ -242,6 +252,16 @@ pub static BUILTIN_APP_PROFILES: &[BuiltinAppProfile] = &[
         &[r"^https://mail\.google\.com/"],
         &["mail.google.com/"],
         Some("https://mail.google.com/mail/u/0/#inbox/example"),
+    ),
+    profile(
+        "hey",
+        "HEY",
+        &[M],
+        &[],
+        &[],
+        &[r"^https?://app\.hey\.com/"],
+        &["app.hey.com/"],
+        Some("https://app.hey.com/topics/example"),
     ),
     profile(
         "iterm2",
@@ -418,6 +438,16 @@ pub static BUILTIN_APP_PROFILES: &[BuiltinAppProfile] = &[
         None,
     ),
     profile(
+        "protonmail",
+        "Proton Mail",
+        &[M],
+        &["ch.protonmail.desktop"],
+        &["Proton Mail", "Proton Mail.exe", "proton-mail"],
+        &[r"^https?://mail\.proton\.me/"],
+        &["mail.proton.me/"],
+        Some("https://mail.proton.me/u/0/inbox/example"),
+    ),
+    profile(
         "slack",
         "Slack",
         &[C],
@@ -477,6 +507,16 @@ pub static BUILTIN_APP_PROFILES: &[BuiltinAppProfile] = &[
         &[D],
         &["com.apple.TextEdit"],
         &["TextEdit"],
+        &[],
+        &[],
+        None,
+    ),
+    profile(
+        "thunderbird",
+        "Thunderbird",
+        &[M],
+        &["org.mozilla.thunderbird"],
+        &["Thunderbird", "thunderbird.exe", "thunderbird"],
         &[],
         &[],
         None,
@@ -586,6 +626,16 @@ pub static BUILTIN_APP_PROFILES: &[BuiltinAppProfile] = &[
         &[E, D],
         &["com.apple.dt.Xcode"],
         &["Xcode"],
+        &[],
+        &[],
+        None,
+    ),
+    profile(
+        "zed",
+        "Zed",
+        &[E],
+        &["dev.zed.Zed"],
+        &["Zed", "zed"],
         &[],
         &[],
         None,

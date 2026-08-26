@@ -9,8 +9,8 @@ import type { SidebarNavId } from "@/lib/utils/sidebar-nav-layout";
 
 const ITEMS: SidebarNavItem[] = [
   { id: "home", label: "Chat", icon: <span /> },
-  { id: "brain", label: "Brain", icon: <span /> },
-  { id: "pipes", label: "Scheduled", icon: <span /> },
+  { id: "brain", label: "Library", icon: <span /> },
+  { id: "pipes", label: "Automations", icon: <span /> },
 ];
 
 function renderList(overrides: Partial<React.ComponentProps<typeof SidebarNavList>> = {}) {
@@ -64,10 +64,33 @@ describe("SidebarNavList", () => {
     expect(screen.getByTestId("nav-pipes")).toBeInTheDocument();
   });
 
+  it("marks the active row with the neutral signal rail", () => {
+    renderList();
+    expect(screen.getByTestId("nav-home")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByTestId("nav-home")).toHaveClass("before:bg-signal");
+    expect(screen.getByTestId("nav-brain")).not.toHaveClass(
+      "before:bg-signal",
+    );
+  });
+
   it("selects a section on click", () => {
     const handlers = renderList();
     fireEvent.click(screen.getByTestId("nav-brain"));
     expect(handlers.onSelect).toHaveBeenCalledWith("brain");
+  });
+
+  it("signals hover and keyboard intent before a section opens", () => {
+    const onIntent = vi.fn();
+    renderList({ onIntent });
+
+    fireEvent.mouseEnter(screen.getByTestId("nav-brain"));
+    fireEvent.focus(screen.getByTestId("nav-pipes"));
+
+    expect(onIntent).toHaveBeenNthCalledWith(1, "brain");
+    expect(onIntent).toHaveBeenNthCalledWith(2, "pipes");
   });
 
   it("moves a row from the right-click menu", () => {

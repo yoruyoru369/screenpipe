@@ -256,6 +256,9 @@ pub(crate) enum VisionReason {
     CaptureStalled,
     /// Capture is permitted and expected, but never produced a first frame.
     NotStarted,
+    /// Linux pixel capture is fresh, but no Tesseract binary is resolvable, so
+    /// screenshots are being stored without searchable OCR text.
+    OcrUnavailable,
 }
 
 impl VisionReason {
@@ -270,6 +273,7 @@ impl VisionReason {
             Self::PermissionDenied => "permission_denied",
             Self::CaptureStalled => "capture_stalled",
             Self::NotStarted => "not_started",
+            Self::OcrUnavailable => "ocr_unavailable",
         }
     }
 
@@ -278,7 +282,7 @@ impl VisionReason {
     pub(crate) fn is_fault(self) -> bool {
         matches!(
             self,
-            Self::PermissionDenied | Self::CaptureStalled | Self::NotStarted
+            Self::PermissionDenied | Self::CaptureStalled | Self::NotStarted | Self::OcrUnavailable
         )
     }
 
@@ -312,6 +316,9 @@ impl VisionReason {
             Self::NotStarted => {
                 Some("Screen capture has not produced a frame yet. If this persists, please send logs from the Help section.")
             }
+            Self::OcrUnavailable => Some(
+                "Screen text capture is unavailable because Tesseract could not be found. Update or reinstall screenpipe; on Debian/Ubuntu, run `sudo apt install tesseract-ocr`, then restart screenpipe.",
+            ),
         }
     }
 }
@@ -330,6 +337,24 @@ pub(crate) fn classify_vision_reason(
     permission_granted: bool,
     frame_status: &str,
 ) -> VisionReason {
+    classify_vision_reason_with_ocr(
+        vision_disabled,
+        displays_expected,
+        screenshot_state,
+        permission_granted,
+        frame_status,
+        true,
+    )
+}
+
+pub(crate) fn classify_vision_reason_with_ocr(
+    vision_disabled: bool,
+    displays_expected: bool,
+    screenshot_state: screenpipe_screen::ScreenshotCaptureState,
+    permission_granted: bool,
+    frame_status: &str,
+    ocr_available: bool,
+) -> VisionReason {
     use screenpipe_screen::ScreenshotCaptureState as S;
 
     if vision_disabled {
@@ -346,6 +371,7 @@ pub(crate) fn classify_vision_reason(
     // Only now can a missing frame be a real fault — and permission is only
     // the answer when the permission monitor actually says so.
     match frame_status {
+        "ok" | "disabled" if !ocr_available => VisionReason::OcrUnavailable,
         "ok" | "disabled" => VisionReason::Ok,
         _ if !permission_granted => VisionReason::PermissionDenied,
         "not_started" => VisionReason::NotStarted,
@@ -389,6 +415,22 @@ fn has_unrecovered_recent_stream_timeout(
 struct MeetingsOnlyAudioIdleState {
     waiting_for_meeting: bool,
     detector_unavailable: bool,
+}
+
+fn effective_audio_capture_mode(
+    audio_disabled: bool,
+    configured_mode: Option<&AudioCaptureMode>,
+    meetings_only_supported: bool,
+) -> &'static str {
+    if audio_disabled {
+        "disabled"
+    } else if meetings_only_supported
+        && matches!(configured_mode, Some(AudioCaptureMode::MeetingsOnly))
+    {
+        "meetings-only"
+    } else {
+        "always"
+    }
 }
 
 fn meetings_only_audio_idle_state(
@@ -590,13 +632,14 @@ pub struct HealthCheckResponse {
     /// `ok`, `disabled_by_setting`, `no_displays_expected`,
     /// `screenshots_disabled_by_config`,
     /// `screenshots_disabled_by_power_profile`, `permission_denied`,
-    /// `capture_stalled`, `not_started`.
+    /// `capture_stalled`, `not_started`, `ocr_unavailable`.
     ///
     /// `frame_status` alone collapses "screenpipe turned pixels off" and "the
     /// OS is blocking capture" into the same value, which is how #5808 sent
     /// users to the permission screen for a permission that was already
     /// granted. Clients should prefer this field when choosing what to tell
-    /// the user; only `permission_denied` warrants permission guidance.
+    /// the user; only `permission_denied` warrants permission guidance, while
+    /// `ocr_unavailable` means fresh frames are not yielding searchable text.
     pub vision_reason: String,
     /// Capture-loop stage last entered, and how long ago. A frozen loop is the
     /// only thing that can make `frame_status` stale (it is a max of the DB
@@ -604,6 +647,10 @@ pub struct HealthCheckResponse {
     /// are what turn "stale" into a locatable freeze point.
     pub loop_stage: String,
     pub loop_stage_age_secs: Option<u64>,
+    /// Effective runtime audio capture mode: `always`, `meetings-only`, or
+    /// `disabled`. This can differ from the saved preference when policy or
+    /// platform support changes the mode used by the recorder.
+    pub audio_capture_mode: String,
     pub audio_status: String,
     pub message: String,
     pub verbose_instructions: Option<String>,
@@ -735,6 +782,15 @@ pub struct PipelineHealthInfo {
     /// OCR runs that produced (near-)empty text (subset of ocr_completed).
     /// `ocr_empty / ocr_completed` is the OCR-quality failure rate.
     pub ocr_empty: u64,
+}
+
+fn ocr_cache_hit_rate(hits: u64, misses: u64) -> f64 {
+    let total = hits + misses;
+    if total == 0 {
+        0.0
+    } else {
+        hits as f64 / total as f64
+    }
 }
 
 #[derive(Serialize, OaSchema, Deserialize, Clone)]
@@ -914,6 +970,7 @@ fn degraded_response() -> HealthCheckResponse {
         vision_reason: "unknown".to_string(),
         loop_stage: "unknown".to_string(),
         loop_stage_age_secs: None,
+        audio_capture_mode: "unknown".to_string(),
         audio_status: "unknown".to_string(),
         message: "health check timed out before producing a snapshot".to_string(),
         verbose_instructions: None,
@@ -1171,11 +1228,13 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     // Report intentional meetings-only idleness only after every configured
     // stream has actually been released. During teardown, health continues to
     // describe the observed active streams instead of claiming an early pause.
-    let meetings_only_configured = cfg!(any(target_os = "macos", target_os = "windows"))
-        && matches!(
-            state.audio_manager.configured_audio_capture_mode(),
-            Some(AudioCaptureMode::MeetingsOnly)
-        );
+    let configured_audio_capture_mode = state.audio_manager.configured_audio_capture_mode();
+    let audio_capture_mode = effective_audio_capture_mode(
+        state.audio_disabled,
+        configured_audio_capture_mode.as_ref(),
+        cfg!(any(target_os = "macos", target_os = "windows")),
+    );
+    let meetings_only_configured = audio_capture_mode == "meetings-only";
     // Detector absence is not ordinary idle: the device gate fails closed, and
     // health must make the missing prerequisite visible. A timed-out health
     // probe is kept as unknown so lock contention cannot manufacture an error.
@@ -1408,12 +1467,17 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
 
     // Why vision is in that state, in terms the user can act on. Permission is
     // only ever named when the permission monitor's last known result says so.
-    let vision_reason = classify_vision_reason(
+    #[cfg(target_os = "linux")]
+    let ocr_available = screenpipe_screen::tesseract_available();
+    #[cfg(not(target_os = "linux"))]
+    let ocr_available = true;
+    let vision_reason = classify_vision_reason_with_ocr(
         state.vision_disabled,
         vision_capture_expected,
         state.vision_metrics.screenshot_capture_state(),
         crate::permission_monitor::screen_recording_granted(),
         frame_status,
+        ocr_available,
     );
 
     // Cross-check: if audio is enabled, uptime > 2 min, but zero chunks were ever
@@ -1599,6 +1663,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
             || audio_status == "no_input_device"
             || audio_status == "waiting_for_meeting")
         && !vision_degraded
+        && !vision_reason.is_fault()
         && !audio_degraded
     {
         (
@@ -1612,7 +1677,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         // An intentional pixel pause is not an unhealthy system: it is the app
         // doing what it was configured to do. Reporting it as a fault is what
         // dragged users to the permission screen in #5808.
-        if frame_status != "ok" && frame_status != "disabled" && vision_reason.is_fault() {
+        if vision_reason.is_fault() {
             unhealthy_systems.push("vision");
         }
         if vision_degraded && !unhealthy_systems.contains(&"vision") {
@@ -1722,7 +1787,6 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
 
     // Build pipeline metrics from the snapshot already taken above
     let pipeline = if !state.vision_disabled {
-        let total_ocr_ops = vision_snap.ocr_cache_hits + vision_snap.ocr_cache_misses;
         Some(PipelineHealthInfo {
             uptime_secs: vision_snap.uptime_secs,
             frames_captured: vision_snap.frames_captured,
@@ -1747,11 +1811,10 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
             video_queue_depth: vision_snap.video_queue_depth,
             time_to_first_frame_ms: vision_snap.time_to_first_frame_ms,
             pipeline_stall_count: vision_snap.pipeline_stall_count,
-            ocr_cache_hit_rate: if total_ocr_ops > 0 {
-                vision_snap.ocr_cache_hits as f64 / total_ocr_ops as f64
-            } else {
-                0.0
-            },
+            ocr_cache_hit_rate: ocr_cache_hit_rate(
+                vision_snap.ocr_cache_hits,
+                vision_snap.ocr_cache_misses,
+            ),
             ocr_empty: vision_snap.ocr_empty,
         })
     } else {
@@ -1779,6 +1842,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         loop_stage: vision_loop_stage.as_str().to_string(),
         loop_stage_age_secs: vision_loop_stage_entered_ts
             .and_then(|ts| (ts > 0).then(|| now_ts.saturating_sub(ts))),
+        audio_capture_mode: audio_capture_mode.to_string(),
         audio_status,
         message,
         verbose_instructions,
@@ -2154,6 +2218,43 @@ mod vision_reason_tests {
     const GRANTED: bool = true;
     const DENIED: bool = false;
 
+    #[test]
+    fn fresh_linux_frames_with_missing_ocr_are_degraded() {
+        let reason = classify_vision_reason_with_ocr(false, true, S::Enabled, GRANTED, "ok", false);
+        assert_eq!(reason, VisionReason::OcrUnavailable);
+        assert!(reason.is_fault());
+        let instruction = reason.instruction().expect("actionable OCR recovery");
+        assert!(instruction.contains("tesseract-ocr"));
+        assert!(instruction.to_lowercase().contains("restart"));
+    }
+
+    #[test]
+    fn available_ocr_and_intentional_pauses_keep_existing_reasons() {
+        assert_eq!(
+            classify_vision_reason_with_ocr(false, true, S::Enabled, GRANTED, "ok", true),
+            VisionReason::Ok,
+        );
+        assert_eq!(
+            classify_vision_reason_with_ocr(true, true, S::Enabled, GRANTED, "ok", false),
+            VisionReason::DisabledBySetting,
+        );
+        assert_eq!(
+            classify_vision_reason_with_ocr(
+                false,
+                true,
+                S::DisabledByConfig,
+                GRANTED,
+                "stale",
+                false,
+            ),
+            VisionReason::ScreenshotsDisabledByConfig,
+        );
+        assert_eq!(
+            classify_vision_reason_with_ocr(false, true, S::Enabled, DENIED, "stale", false),
+            VisionReason::PermissionDenied,
+        );
+    }
+
     /// The reported case: permission is fine, screenpipe disabled screenshots
     /// via config, capture goes stale because no pixel frame ever lands.
     #[test]
@@ -2199,6 +2300,7 @@ mod vision_reason_tests {
             VisionReason::ScreenshotsDisabledByPowerProfile,
             VisionReason::CaptureStalled,
             VisionReason::NotStarted,
+            VisionReason::OcrUnavailable,
         ] {
             let text = other.instruction().unwrap_or("").to_lowercase();
             assert!(
@@ -2277,6 +2379,7 @@ mod vision_reason_tests {
             VisionReason::PermissionDenied,
             VisionReason::CaptureStalled,
             VisionReason::NotStarted,
+            VisionReason::OcrUnavailable,
         ];
         let names: std::collections::HashSet<_> = all.iter().map(|r| r.as_str()).collect();
         assert_eq!(names.len(), all.len(), "reason names must be unique");
@@ -2317,6 +2420,13 @@ mod vision_reason_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ocr_cache_rate_uses_measured_hits_and_misses() {
+        assert!((ocr_cache_hit_rate(2, 3) - 0.4).abs() < f64::EPSILON);
+        assert_eq!(ocr_cache_hit_rate(0, 0), 0.0);
+        assert_eq!(ocr_cache_hit_rate(1, 0), 1.0);
+    }
 
     #[test]
     fn transcription_mode_reports_configuration_not_activity() {
@@ -2382,6 +2492,7 @@ mod tests {
             vision_reason: "ok".to_string(),
             loop_stage: "unknown".to_string(),
             loop_stage_age_secs: None,
+            audio_capture_mode: "always".to_string(),
             audio_status: "ok".to_string(),
             message: "test".to_string(),
             verbose_instructions: None,
@@ -2485,6 +2596,24 @@ mod tests {
         assert_eq!(
             state.reason,
             "audio capture is paused while the screen is locked"
+        );
+    }
+
+    #[test]
+    fn effective_audio_capture_mode_reports_the_mode_the_recorder_can_run() {
+        assert_eq!(effective_audio_capture_mode(true, None, true), "disabled");
+        assert_eq!(effective_audio_capture_mode(false, None, true), "always");
+        assert_eq!(
+            effective_audio_capture_mode(false, Some(&AudioCaptureMode::Always), true),
+            "always"
+        );
+        assert_eq!(
+            effective_audio_capture_mode(false, Some(&AudioCaptureMode::MeetingsOnly), true),
+            "meetings-only"
+        );
+        assert_eq!(
+            effective_audio_capture_mode(false, Some(&AudioCaptureMode::MeetingsOnly), false),
+            "always"
         );
     }
 

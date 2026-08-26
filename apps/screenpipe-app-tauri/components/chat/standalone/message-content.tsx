@@ -5,10 +5,13 @@
 
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Check, Calendar, ChevronDown, ChevronRight, ChevronUp, KeyRound, Loader2, Plug, RefreshCw, ShieldCheck } from "lucide-react";
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
-import { MarkdownBlock } from "@/components/chat/markdown-block";
+import {
+  MarkdownBlock,
+  type MarkdownBlockOptions,
+} from "@/components/chat/markdown-block";
 import { AskUserToolCard, isAskUserToolCall } from "@/components/chat/standalone/ask-user-tool-card";
 import {
   AttachedContextCard,
@@ -21,7 +24,7 @@ import { cn } from "@/lib/utils";
 import type { Message, ToolCall, ContentBlock } from "@/lib/chat/types";
 import type { ConnectionListItem } from "@/lib/chat/connection-suggestions";
 import type { InlineConnectStatus } from "@/lib/connections/inline-connect";
-import { formatDurationParts, formatStoppedWorkDuration, formatWorkDuration, hasAssistantToolWorkBody } from "@/lib/chat/message-rendering";
+import { formatDurationParts, formatStoppedWorkDuration, formatWorkDuration, hasAssistantTextBody, hasAssistantToolWorkBody } from "@/lib/chat/message-rendering";
 import {
   classifyCurl,
   endpointFamily,
@@ -37,6 +40,7 @@ import {
   firstExternalWebTarget,
   presentToolActivity,
   presentToolActivityStatus,
+  presentMcpStartup,
   mcpScreenpipeCommand,
   type WebTargetPresentation,
 } from "@/lib/chat/tool-presentation";
@@ -45,6 +49,7 @@ import {
 } from "@/lib/source-citations";
 import { renderChartFence } from "@/components/chat/charts/chat-chart";
 import { PlanBlock } from "@/components/chat/standalone/plan-block";
+import { ActivityIcon, type ActivityIconState } from "@/components/chat/standalone/activity-icon";
 
 const MermaidDiagram = React.lazy(() =>
   import("@/components/rewind/mermaid-diagram").then((mod) => ({
@@ -365,10 +370,110 @@ function RunningToolStatus({ toolCall }: { toolCall: ToolCall }) {
   );
 }
 
+const MIN_COMPACTED_TOOL_CALLS = 3;
+
+type ToolActivityRailEntry = {
+  toolCall: ToolCall;
+  groupedToolCalls?: ToolCall[];
+  childToolCalls: ToolCall[];
+};
+
+function toolActivityCompactionKey(
+  toolCall: ToolCall,
+  errorRecovered: boolean,
+  waitingForUser: boolean,
+): string | null {
+  if (toolCall.subagent || isAskUserToolCall(toolCall)) return null;
+
+  const presentation = presentToolActivity(toolCall);
+  const showError = Boolean(toolCall.isError && !errorRecovered);
+  const state = toolCall.isRunning && waitingForUser
+    ? "waiting"
+    : toolCall.isRunning
+      ? "running"
+      : showError
+        ? "error"
+        : "completed";
+  const label = toolCall.isRunning || showError
+    ? presentation.runningLabel
+    : presentation.completedLabel;
+  const target = extractConnectionIconFromToolCall(toolCall)
+    ?? extractWebTargetFromToolCall(toolCall)?.domain
+    ?? extractAppFromToolCall(toolCall)
+    ?? "";
+
+  return JSON.stringify([
+    toolCall.agentId ?? "",
+    toolCall.toolName.toLowerCase(),
+    presentation.icon,
+    state,
+    label,
+    target,
+  ]);
+}
+
+function compactToolActivityRows(
+  toolCalls: ToolCall[],
+  childrenByParent: Map<string, ToolCall[]>,
+  errorRecovered: boolean,
+  waitingForUser: boolean,
+): ToolActivityRailEntry[] {
+  const entries: ToolActivityRailEntry[] = [];
+  let run: ToolCall[] = [];
+  let runKey: string | null = null;
+
+  const flushRun = () => {
+    if (run.length >= MIN_COMPACTED_TOOL_CALLS) {
+      entries.push({
+        toolCall: run[0],
+        groupedToolCalls: [...run],
+        childToolCalls: [],
+      });
+    } else {
+      for (const toolCall of run) {
+        entries.push({
+          toolCall,
+          childToolCalls: childrenByParent.get(toolCall.id) ?? [],
+        });
+      }
+    }
+    run = [];
+    runKey = null;
+  };
+
+  for (const toolCall of toolCalls) {
+    const childToolCalls = childrenByParent.get(toolCall.id) ?? [];
+    const key = childToolCalls.length === 0
+      ? toolActivityCompactionKey(toolCall, errorRecovered, waitingForUser)
+      : null;
+    if (key && key === runKey) {
+      run.push(toolCall);
+      continue;
+    }
+    flushRun();
+    if (key) {
+      run = [toolCall];
+      runKey = key;
+    } else {
+      entries.push({ toolCall, childToolCalls });
+    }
+  }
+  flushRun();
+  return entries;
+}
+
+function compactedToolCountLabel(toolCall: ToolCall, count: number): string {
+  const noun = toolCall.toolName.toLowerCase().includes("query") ? "queries" : "steps";
+  return `${count} ${noun}`;
+}
+
 function ToolCallRailItem({
   toolCall,
   isLast,
   childToolCalls,
+  groupedToolCalls,
+  errorRecovered = false,
+  waitingForUser = false,
   onAskUserReply,
 }: {
   toolCall: ToolCall;
@@ -377,48 +482,68 @@ function ToolCallRailItem({
   // expand so clicking the container toggles its whole subtree, rather than
   // leaving the children as always-on siblings that clutter the rail.
   childToolCalls?: ToolCall[];
+  // Adjacent equivalent calls are one high-level row. The individual calls
+  // remain available behind a second disclosure click.
+  groupedToolCalls?: ToolCall[];
+  errorRecovered?: boolean;
+  waitingForUser?: boolean;
   onAskUserReply?: (reply: string, displayLabel: string) => void | Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const hasChildren = (childToolCalls?.length ?? 0) > 0;
-  const presentation = presentToolActivity(toolCall);
-  const label = toolCall.isRunning ? presentation.runningLabel : presentation.completedLabel;
-  const appName = extractAppFromToolCall(toolCall);
-  const connectionIconName = extractConnectionIconFromToolCall(toolCall);
-  const webTarget = extractWebTargetFromToolCall(toolCall);
-  const isAskUser = isAskUserToolCall(toolCall);
+  const reduceMotion = useReducedMotion();
+  const compactedCalls = groupedToolCalls && groupedToolCalls.length > 1
+    ? groupedToolCalls
+    : null;
+  const statusToolCall = compactedCalls?.find((call) => call.isRunning)
+    ?? compactedCalls?.find((call) => call.isError && !errorRecovered)
+    ?? compactedCalls?.[compactedCalls.length - 1]
+    ?? toolCall;
+  const hasChildren = Boolean(compactedCalls) || (childToolCalls?.length ?? 0) > 0;
+  const presentation = presentToolActivity(statusToolCall);
+  const showError = compactedCalls
+    ? compactedCalls.some((call) => call.isError && !errorRecovered)
+    : Boolean(toolCall.isError && !errorRecovered);
+  const isRunning = compactedCalls
+    ? compactedCalls.some((call) => call.isRunning)
+    : toolCall.isRunning;
+  const label = isRunning || showError
+    ? presentation.runningLabel
+    : presentation.completedLabel;
+  const appName = extractAppFromToolCall(statusToolCall);
+  const connectionIconName = extractConnectionIconFromToolCall(statusToolCall);
+  const webTarget = extractWebTargetFromToolCall(statusToolCall);
+  const isAskUser = isAskUserToolCall(statusToolCall);
+  const state: ActivityIconState = isRunning && (waitingForUser || isAskUser)
+    ? "waiting"
+    : isRunning
+      ? "running"
+      : showError
+        ? "error"
+        : "completed";
+  const brandedIcon = connectionIconName ? (
+    <ConnectionToolIcon name={connectionIconName} />
+  ) : webTarget ? (
+    <WebTargetIcon target={webTarget} sizeClass="h-3.5 w-3.5" letterClass="text-[8px]" />
+  ) : appName ? (
+    <AppIcon name={appName} sizeClass="h-3.5 w-3.5" letterClass="text-[8px]" />
+  ) : undefined;
 
   return (
-    <div className="relative flex min-w-0">
+    <div
+      className="relative flex min-w-0"
+      data-activity-state={state}
+      data-tool-call-count={compactedCalls?.length ?? 1}
+    >
       {/* Vertical rail line */}
-      <div className="flex flex-col items-center flex-shrink-0 w-5">
-        {/* Dot */}
-        <div className="relative flex items-center justify-center w-5 h-5">
-          {connectionIconName && !toolCall.isRunning && !toolCall.isError ? (
-            <ConnectionToolIcon name={connectionIconName} />
-          ) : toolCall.isRunning ? (
-            // Pulsing hollow dot for running
-            <motion.div
-              className="w-2 h-2 border border-foreground"
-              animate={{ opacity: [1, 1, 0.3, 0.3, 1] }}
-              transition={{ duration: 1, repeat: Infinity, times: [0, 0.25, 0.25, 0.75, 0.75], ease: "linear" }}
-            />
-          ) : toolCall.isError ? (
-            // X mark for error
-            <span className="text-[10px] font-mono font-bold text-foreground leading-none">✗</span>
-          ) : (
-            // Solid dot for success
-            <motion.div
-              className="w-2 h-2 bg-foreground"
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ duration: 0.15, ease: "easeOut" }}
-            />
-          )}
+      <div className="flex w-6 flex-shrink-0 flex-col items-center">
+        <div className="relative flex h-5 w-6 items-center justify-center">
+          <ActivityIcon kind={presentation.icon} state={state}>
+            {brandedIcon}
+          </ActivityIcon>
         </div>
         {/* Connecting line */}
         {!isLast && (
-          <div className="w-px flex-1 bg-border" />
+          <div className="w-px flex-1 bg-border/80" />
         )}
       </div>
 
@@ -429,23 +554,29 @@ function ToolCallRailItem({
         ) : (
           <button
             onClick={() => setExpanded(!expanded)}
-            className="w-full flex items-center gap-1.5 text-left min-w-0 group py-0.5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
+            className="group flex w-full min-w-0 items-center gap-1.5 py-0.5 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal motion-reduce:transition-none"
             data-testid="tool-activity-item"
             aria-expanded={expanded}
           >
-            {webTarget ? (
-              <WebTargetIcon target={webTarget} sizeClass="w-3.5 h-3.5" letterClass="text-[8px]" />
-            ) : appName && !connectionIconName && (
-              <AppIcon name={appName} sizeClass="w-3.5 h-3.5" letterClass="text-[8px]" />
-            )}
             <span className="truncate flex-1 text-xs text-foreground/70 group-hover:text-foreground transition-colors duration-150">
               {label}
             </span>
-            {hasChildren && !expanded && (
+            {showError && (
+              <span className="shrink-0 border border-destructive/40 px-1 font-mono text-[9px] uppercase tracking-wide text-destructive">
+                {compactedCalls
+                  ? `${compactedCalls.filter((call) => call.isError).length} failed`
+                  : "failed"}
+              </span>
+            )}
+            {compactedCalls && !expanded ? (
+              <span className="flex-shrink-0 text-[11px] text-foreground/30">
+                {compactedToolCountLabel(statusToolCall, compactedCalls.length)}
+              </span>
+            ) : hasChildren && !expanded ? (
               <span className="flex-shrink-0 text-[11px] text-foreground/30">
                 {childToolCalls!.length} {childToolCalls!.length === 1 ? "step" : "steps"}
               </span>
-            )}
+            ) : null}
             {expanded ? (
               <ChevronDown className="h-3 w-3 flex-shrink-0 text-foreground/30 group-hover:text-foreground/60 transition-colors duration-150" />
             ) : (
@@ -453,22 +584,25 @@ function ToolCallRailItem({
             )}
           </button>
         )}
-        {!isAskUser && <RunningToolStatus toolCall={toolCall} />}
+        {!isAskUser && !compactedCalls && <RunningToolStatus toolCall={toolCall} />}
         <AnimatePresence>
           {!isAskUser && expanded && (
             <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="overflow-hidden"
+              // Nested disclosures can be opened after the parent rail has
+              // already animated. Starting another entrance animation here can
+              // leave WebKit at opacity 0, so keep the live details in normal
+              // document flow and only animate their exit.
+              initial={false}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.15 }}
             >
               <div className="border-l border-border ml-0 pl-3 mt-1 mb-1">
-                <FriendlyToolDetails toolCall={toolCall} />
+                {!compactedCalls && <FriendlyToolDetails toolCall={toolCall} />}
                 {/* Streamed output: live while running, and kept after the tool
                     finishes so what streamed doesn't vanish. Only for bash once
                     done, since other tools already show their full result below. */}
-                {toolCall.progress && (toolCall.isRunning || toolCall.toolName === "bash" || toolCall.subagent) && (
+                {!compactedCalls && toolCall.progress && (toolCall.isRunning || toolCall.toolName === "bash" || toolCall.subagent) && (
                   <div className="mt-1 pt-1 border-t border-border/50">
                     <pre className="whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto overflow-x-hidden max-w-full text-xs font-mono text-foreground/50">
                       {toolCall.progress}
@@ -480,7 +614,7 @@ function ToolCallRailItem({
                     ... agentId ... output_file ..."), meant for the model, not the
                     user. Its real content is the nested transcript above, so
                     suppress the launch boilerplate. */}
-                {toolCall.result !== undefined && toolCall.toolName !== "bash" && !toolCall.subagent && (
+                {!compactedCalls && toolCall.result !== undefined && toolCall.toolName !== "bash" && !toolCall.subagent && (
                   <div className="mt-1 pt-1 border-t border-border/50">
                     <pre className={cn(
                       "whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto overflow-x-hidden max-w-full text-xs font-mono",
@@ -493,18 +627,33 @@ function ToolCallRailItem({
                 {/* A subagent's own tools nest inside its expand, so clicking
                     the subagent row reveals or hides its whole subtree instead
                     of leaving the children always on. */}
-                {hasChildren && (
+                {compactedCalls ? (
+                  <div className="mt-1" data-testid="tool-activity-group-details">
+                    {compactedCalls.map((call, index) => (
+                      <ToolCallRailItem
+                        key={toolCallRenderKey(call, index)}
+                        toolCall={call}
+                        isLast={index === compactedCalls.length - 1}
+                        errorRecovered={errorRecovered}
+                        waitingForUser={waitingForUser}
+                        onAskUserReply={onAskUserReply}
+                      />
+                    ))}
+                  </div>
+                ) : hasChildren ? (
                   <div className="mt-1">
                     {childToolCalls!.map((child, j) => (
                       <ToolCallRailItem
                         key={toolCallRenderKey(child, j)}
                         toolCall={child}
                         isLast={j === childToolCalls!.length - 1}
+                        errorRecovered={errorRecovered}
+                        waitingForUser={waitingForUser}
                         onAskUserReply={onAskUserReply}
                       />
                     ))}
                   </div>
-                )}
+                ) : null}
               </div>
             </motion.div>
           )}
@@ -1245,18 +1394,7 @@ function WorkSummaryText({
   );
 }
 
-function ToolCallGroup({
-  toolCalls,
-  defaultExpanded = false,
-  isGenerating = false,
-  waitingForApproval = false,
-  preferSummaryOverride = false,
-  summaryOverride,
-  workStartedAtMs,
-  hideSummary = false,
-  forceCollapsed = false,
-  onAskUserReply,
-}: {
+type ToolCallGroupProps = {
   toolCalls: ToolCall[];
   defaultExpanded?: boolean;
   isGenerating?: boolean;
@@ -1266,17 +1404,34 @@ function ToolCallGroup({
   workStartedAtMs?: number;
   hideSummary?: boolean;
   forceCollapsed?: boolean;
+  recoveredWithAnswer?: boolean;
   onAskUserReply?: (reply: string, displayLabel: string) => void | Promise<void>;
-}) {
+};
+
+function ToolActivityGroup({
+  toolCalls,
+  defaultExpanded = false,
+  isGenerating = false,
+  waitingForApproval = false,
+  preferSummaryOverride = false,
+  summaryOverride,
+  workStartedAtMs,
+  hideSummary = false,
+  forceCollapsed = false,
+  recoveredWithAnswer = false,
+  onAskUserReply,
+}: ToolCallGroupProps) {
   const [manualExpand, setManualExpand] = useState<boolean | null>(null);
   const [runningSummary, setRunningSummary] = useState("Working");
   const [completedLiveSummary, setCompletedLiveSummary] = useState<string | null>(null);
   const wasWorkingRef = useRef(false);
+  const reduceMotion = useReducedMotion();
 
   const hasRunningTool = toolCalls.some((tc) => tc.isRunning);
   // While blocked on the user's approval the turn is still live, not done.
   const isWorking = hasRunningTool || isGenerating || waitingForApproval;
   const hasInteractiveTool = toolCalls.some(isAskUserToolCall);
+  const waitingForUser = waitingForApproval || hasInteractiveTool;
   const hasError = toolCalls.some((tc) => tc.isError);
   const allDone = !isWorking;
   const total = toolCalls.length;
@@ -1300,6 +1455,20 @@ function ToolCallGroup({
               : (friendlyCompletedSummary(summaryOverride) || "done"))
       )
     : "";
+  const summaryToolCall = [...toolCalls].reverse().find((toolCall) => toolCall.isRunning)
+    ?? toolCalls[toolCalls.length - 1];
+  const summaryIcon = waitingForApproval
+    ? "approval"
+    : summaryToolCall
+      ? presentToolActivity(summaryToolCall).icon
+      : "work";
+  const widgetState: ActivityIconState = waitingForUser
+    ? "waiting"
+    : isWorking
+      ? "running"
+      : hasError && !recoveredWithAnswer
+        ? "error"
+        : "completed";
 
   useEffect(() => {
     if (!isWorking || !startedAtMs) {
@@ -1341,37 +1510,50 @@ function ToolCallGroup({
   // Tool activity is progressively disclosed: one friendly status is visible
   // by default, and the user can expand a high-level activity list. Interactive
   // tools stay open because hiding a question would block the conversation.
+  const e2eForceExpanded =
+    process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true" &&
+    typeof window !== "undefined" &&
+    (window as typeof window & { __e2eExpandToolActivity?: boolean })
+      .__e2eExpandToolActivity === true;
   const isExpanded = forceCollapsed
     ? false
     : hideSummary
       ? true
-      : hasInteractiveTool
+      : hasInteractiveTool || e2eForceExpanded
         ? true
         : manualExpand !== null ? manualExpand : defaultExpanded;
 
   return (
-    <div className="w-full min-w-0 self-stretch">
+    <div
+      className={cn(
+        "w-full min-w-0 self-stretch",
+        !hideSummary && "border border-border/70 bg-card/30",
+      )}
+      data-testid="tool-activity-widget"
+      data-activity-state={widgetState}
+    >
       {!hideSummary && (
-        <div className="mb-2 w-full min-w-full">
+        <div className="w-full min-w-full">
           {/* Header toggles the tool list open/closed. It stays interactive
               while the model is working so the user can inspect steps mid-turn:
               the running spinner + live step progress show while active, the
               summary + any failure count once idle. */}
           <button
             onClick={() => setManualExpand(isExpanded ? false : true)}
-            className="w-full flex items-center gap-1.5 py-1 text-left min-w-0 group cursor-pointer disabled:cursor-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
+            className="group flex w-full min-w-0 cursor-pointer items-center gap-2 px-2 py-1.5 text-left transition-colors duration-150 hover:bg-foreground/[0.035] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal disabled:cursor-default disabled:opacity-70 motion-reduce:transition-none"
             data-testid="tool-activity-summary"
             aria-expanded={isExpanded}
             disabled={forceCollapsed || hasInteractiveTool}
           >
-            {isWorking && (
-              <RefreshCw
-                className="h-3 w-3 shrink-0 animate-spin text-foreground/40"
-                data-testid="tool-activity-running-indicator"
-                aria-hidden="true"
-              />
-            )}
-            <span className="truncate text-xs font-mono text-foreground/50 group-hover:text-foreground/80 transition-colors duration-150">
+            <ActivityIcon
+              kind={summaryIcon}
+              state={widgetState}
+              testId={isWorking ? "tool-activity-running-indicator" : undefined}
+            />
+            <span
+              className="truncate text-xs font-mono text-foreground/55 transition-colors duration-150 group-hover:text-foreground/80 motion-reduce:transition-none"
+              aria-live="polite"
+            >
               {isWorking ? (
                 <>
                   <WorkSummaryText text={runningSummary} animateRunningDuration />
@@ -1384,8 +1566,8 @@ function ToolCallGroup({
               ) : (
                 <>
                   <WorkSummaryText text={summary || `${total} steps`} animateRunningDuration={false} />
-                  {hasError && (
-                    <span className="ml-1.5 text-foreground/30">· {toolCalls.filter(tc => tc.isError).length} failed</span>
+                  {hasError && !recoveredWithAnswer && (
+                    <span className="ml-1.5 text-destructive">· {toolCalls.filter(tc => tc.isError).length} failed</span>
                   )}
                 </>
               )}
@@ -1396,7 +1578,6 @@ function ToolCallGroup({
               <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-foreground/30 group-hover:text-foreground/60 transition-colors duration-150" />
             ))}
           </button>
-          <div className="w-full min-w-full border-t border-border/50" />
         </div>
       )}
 
@@ -1404,13 +1585,18 @@ function ToolCallGroup({
       <AnimatePresence>
         {isExpanded && (
           <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="overflow-hidden"
+            initial={reduceMotion || e2eForceExpanded ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: reduceMotion || e2eForceExpanded ? 0 : 0.15 }}
           >
-            <div className="pl-1 pt-1" data-testid="tool-activity-list">
+            <div
+              className={cn(
+                "pt-1",
+                hideSummary ? "pl-1" : "border-t border-border/60 px-2 pb-1 pt-2",
+              )}
+              data-testid="tool-activity-list"
+            >
               {(() => {
                 // Subagent child calls (parentToolCallId) nest under their
                 // spawning Task row instead of cluttering the rail as siblings.
@@ -1438,20 +1624,31 @@ function ToolCallGroup({
                     topLevel.push(tc);
                   }
                 }
-                return topLevel.map((tc, i) => {
-                  const children = childrenByParent.get(tc.id) ?? [];
-                  const isLastTop = i === topLevel.length - 1;
+                const railEntries = compactToolActivityRows(
+                  topLevel,
+                  childrenByParent,
+                  recoveredWithAnswer,
+                  waitingForUser,
+                );
+                return railEntries.map((entry, i) => {
+                  const isLastTop = i === railEntries.length - 1;
                   return (
                     <motion.div
-                      key={toolCallRenderKey(tc, i)}
-                      initial={{ opacity: 0, x: -8 }}
+                      key={toolCallRenderKey(entry.toolCall, i)}
+                      initial={reduceMotion || e2eForceExpanded ? false : { opacity: 0, x: -8 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.15, delay: i * 0.03 }}
+                      transition={{
+                        duration: reduceMotion || e2eForceExpanded ? 0 : 0.15,
+                        delay: reduceMotion || e2eForceExpanded ? 0 : i * 0.03,
+                      }}
                     >
                       <ToolCallRailItem
-                        toolCall={tc}
+                        toolCall={entry.toolCall}
                         isLast={isLastTop}
-                        childToolCalls={children}
+                        childToolCalls={entry.childToolCalls}
+                        groupedToolCalls={entry.groupedToolCalls}
+                        errorRecovered={recoveredWithAnswer}
+                        waitingForUser={waitingForUser}
                         onAskUserReply={onAskUserReply}
                       />
                     </motion.div>
@@ -1464,6 +1661,18 @@ function ToolCallGroup({
       </AnimatePresence>
     </div>
   );
+}
+
+function ToolCallGroup(props: ToolCallGroupProps) {
+  // ACP emits one synthetic startup call per configured MCP server on every
+  // turn. They describe connection health, not work performed for this answer,
+  // so Connections owns their presentation instead of the chat transcript.
+  const activityToolCalls = props.toolCalls.filter(
+    (toolCall) => presentMcpStartup(toolCall) === null,
+  );
+
+  if (activityToolCalls.length === 0) return null;
+  return <ToolActivityGroup {...props} toolCalls={activityToolCalls} />;
 }
 
 // Renders message content with interleaved text and tool call blocks
@@ -1484,6 +1693,8 @@ export function MessageContent({
   onDismissConnectionAction,
   onAnswerAgentAction,
   onAskUserReply,
+  onSendPrompt,
+  markdownOptions,
 }: {
   message: Message;
   isGenerating?: boolean;
@@ -1501,8 +1712,12 @@ export function MessageContent({
   onDismissConnectionAction?: (messageId: string, connectionId: string) => void;
   onAnswerAgentAction?: (block: Extract<ContentBlock, { type: "agent_action" }>, selectedOptionId?: string) => Promise<boolean> | boolean;
   onAskUserReply?: (reply: string, displayLabel: string) => void | Promise<void>;
+  onSendPrompt?: (prompt: string, displayLabel: string) => void | Promise<void>;
+  /** Bounded renderer extensions for embedded Chat surfaces such as meetings. */
+  markdownOptions?: MarkdownBlockOptions;
 }) {
   const isUser = message.role === "user";
+  const chartPromptSender = !isUser && !isGenerating ? onSendPrompt : undefined;
   const sourceCitations = isUser ? [] : sourceCitationsFromMessage(message);
   const sourceFooter = !deferSourceFooter && sourceCitations.length > 0 ? (
     <SourceCitationFooter citations={sourceCitations} onOpenFile={onOpenViewerPath} />
@@ -1665,12 +1880,14 @@ export function MessageContent({
       ? "interrupted — app closed mid-task"
       : undefined;
     const workSummaryOverride = stoppedSummary || interruptedSummary;
+    const recoveredWithAnswer = !isGenerating && hasAssistantTextBody(message);
     return (
       <div className="space-y-2 min-w-0 w-full overflow-hidden">
         {displayGroups.map((group) => {
           if (group.type === "text") {
             return (
               <MarkdownBlock
+                {...markdownOptions}
                 key={`text-${group.key}`}
                 text={group.text}
                 isUser={isUser}
@@ -1682,7 +1899,7 @@ export function MessageContent({
                   if (language === "app-stats") {
                     return <AppStatsBlock content={content} />;
                   }
-                  return renderChartFence(language, content);
+                  return renderChartFence(language, content, chartPromptSender);
                 }}
               />
             );
@@ -1738,6 +1955,7 @@ export function MessageContent({
                 workStartedAtMs={message.timestamp}
                 hideSummary={hideToolSummary}
                 forceCollapsed={forceCollapseTools}
+                recoveredWithAnswer={recoveredWithAnswer}
                 onAskUserReply={onAskUserReply}
               />
             );
@@ -1760,6 +1978,7 @@ export function MessageContent({
                 workStartedAtMs={message.timestamp}
                 hideSummary={hideToolSummary}
                 forceCollapsed={forceCollapseTools}
+                recoveredWithAnswer={recoveredWithAnswer}
                 onAskUserReply={onAskUserReply}
               />
             );
@@ -1794,6 +2013,7 @@ export function MessageContent({
       {attachmentsRow}
       {displayText ? (
         <MarkdownBlock
+          {...markdownOptions}
           text={displayText}
           isUser={isUser}
           onOpenViewerPath={onOpenViewerPath}
@@ -1804,7 +2024,7 @@ export function MessageContent({
             if (language === "app-stats") {
               return <AppStatsBlock content={content} />;
             }
-            return renderChartFence(language, content);
+            return renderChartFence(language, content, chartPromptSender);
           }}
         />
       ) : null}

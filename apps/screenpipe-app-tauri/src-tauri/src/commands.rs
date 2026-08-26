@@ -10,6 +10,7 @@ mod native_actions;
 pub(crate) mod overlay_anchor;
 
 use crate::{
+    analytics::{AnalyticsManager, Attribution},
     native_notification, native_shortcut_reminder,
     store::{OnboardingStore, SettingsStore},
     updates::is_enterprise_build,
@@ -23,6 +24,14 @@ use tauri::{Emitter, Manager};
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
+
+/// Install the native timeline's action trampoline and placement listeners at
+/// app startup. Timeline attachment must not depend on whether the optional
+/// shortcut reminder happened to be shown first.
+#[cfg(target_os = "macos")]
+pub(crate) fn install_native_timeline_bridge(app_handle: &tauri::AppHandle) {
+    native_actions::install_shortcut_action_callback(app_handle);
+}
 
 /// Log a `WebviewWindowBuilder::build()` failure with structured context.
 ///
@@ -53,11 +62,12 @@ fn log_webview_build_failure(label: &str, url_hint: &str, err: &(impl std::fmt::
 mod tests {
     use super::{
         enterprise_license_key_sha256, fallback_local_api_config, is_login_callback_scheme,
-        merge_enterprise_file_configs, persist_enterprise_device_config,
+        merge_enterprise_file_configs, normalize_enterprise_config_value,
+        persist_enterprise_device_config,
         persist_recovered_enterprise_device_config, read_enterprise_config_from_path,
         notification_belongs_to_overlay, recovery_anchor_license_key, save_enterprise_team_config,
-        scan_chat_entries_by_mtime, shortcut_overlay_hidden_by_choice, EnterpriseFileConfig,
-        RecoveredEnterpriseDeviceConfig,
+        scan_chat_entries_by_mtime, shortcut_overlay_hidden_by_choice,
+        should_resume_snoozed_overlay, EnterpriseFileConfig, RecoveredEnterpriseDeviceConfig,
     };
 
     /// `get_local_api_config` must never await the server mutex.
@@ -113,15 +123,20 @@ mod tests {
         assert_eq!(config["port"], 3030);
     }
 
-    /// The overlay ships unhideable. A stored `showShortcutOverlay: false` —
-    /// whether left over from before this shipped or set while the remote
-    /// capability was on — must stay inert until the flag grants it back.
     #[test]
-    fn a_stored_hide_choice_only_counts_once_remote_policy_allows_it() {
-        assert!(!shortcut_overlay_hidden_by_choice(false, false));
-        assert!(!shortcut_overlay_hidden_by_choice(false, true));
-        assert!(shortcut_overlay_hidden_by_choice(true, false));
-        assert!(!shortcut_overlay_hidden_by_choice(true, true));
+    fn saved_choice_and_active_snooze_hide_the_shortcut_overlay() {
+        assert!(shortcut_overlay_hidden_by_choice(false, None, 100));
+        assert!(shortcut_overlay_hidden_by_choice(true, Some(101), 100));
+        assert!(!shortcut_overlay_hidden_by_choice(true, Some(100), 100));
+        assert!(!shortcut_overlay_hidden_by_choice(true, None, 100));
+    }
+
+    #[test]
+    fn only_the_matching_expired_snooze_may_restore_the_overlay() {
+        assert!(should_resume_snoozed_overlay(true, Some(100), 100, 100));
+        assert!(!should_resume_snoozed_overlay(false, Some(100), 100, 100));
+        assert!(!should_resume_snoozed_overlay(true, Some(200), 100, 100));
+        assert!(!should_resume_snoozed_overlay(true, Some(100), 100, 99));
     }
 
     #[test]
@@ -294,6 +309,19 @@ mod tests {
     }
 
     #[test]
+    fn registry_enterprise_key_ignores_blank_values() {
+        assert_eq!(
+            normalize_enterprise_config_value(Some("  ENT-REGISTRY-KEY  ".to_string())),
+            Some("ENT-REGISTRY-KEY".to_string())
+        );
+        assert_eq!(
+            normalize_enterprise_config_value(Some("   ".to_string())),
+            None
+        );
+        assert_eq!(normalize_enterprise_config_value(None), None);
+    }
+
+    #[test]
     fn chat_entries_missing_dir_is_empty() {
         // First run (no chats dir yet) must be a clean empty list, not an error.
         let res =
@@ -370,6 +398,17 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
     is_enterprise_build(&app_handle)
 }
 
+/// Whether the running local API currently enforces the rolling history window.
+/// This is the authoritative app-wide value shared by every webview and backend
+/// route, so detached windows do not depend on duplicating account hydration.
+#[tauri::command]
+#[specta::specta]
+pub fn is_history_access_restricted(
+    state: tauri::State<'_, crate::recording::RecordingState>,
+) -> bool {
+    state.history_access.is_restricted()
+}
+
 /// Whether an automated environment has force-disabled telemetry
 /// (`SCREENPIPE_DISABLE_TELEMETRY` / `GITHUB_ACTIONS` / `CI`).
 ///
@@ -384,6 +423,18 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
 #[specta::specta]
 pub fn is_telemetry_disabled_by_env() -> bool {
     screenpipe_engine::analytics::telemetry_disabled_by_env()
+}
+
+/// Return the website UTM attribution already resolved at app startup.
+///
+/// This is read-only and never triggers another network request. Analytics can
+/// be disabled before the manager is installed, so absence is a normal result.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_onboarding_attribution(app_handle: tauri::AppHandle) -> Option<Attribution> {
+    let analytics = app_handle.try_state::<std::sync::Arc<AnalyticsManager>>()?;
+    let analytics = std::sync::Arc::clone(&analytics);
+    analytics.attribution_snapshot().await
 }
 
 /// Return the macOS bundle identifier of the running app
@@ -678,6 +729,13 @@ fn recovery_anchor_license_key<'a>(
     bundled_license_key.unwrap_or(rejected_license_key)
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn normalize_enterprise_config_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Preserve bundled/MDM precedence except for a recovery record tied to the
 /// exact bundled key it replaces. A later MDM key automatically wins because
 /// its fingerprint no longer matches.
@@ -706,10 +764,57 @@ fn merge_enterprise_file_configs(
     bundled
 }
 
+#[cfg(target_os = "windows")]
+fn read_enterprise_config_from_windows_registry() -> Option<EnterpriseFileConfig> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    // Intune runs 64-bit PowerShell by default, but older deployment scripts
+    // may have written through a 32-bit host. Prefer the documented 64-bit view
+    // and fall back to the 32-bit view so upgrades do not strand those fleets.
+    for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+        let Ok(key) = hklm.open_subkey_with_flags("SOFTWARE\\screenpipe", KEY_READ | view) else {
+            continue;
+        };
+        let license_key = normalize_enterprise_config_value(
+            key.get_value::<String, _>("EnterpriseLicenseKey").ok(),
+        );
+        if license_key.is_some() {
+            info!(
+                "enterprise: license key loaded from HKLM\\SOFTWARE\\screenpipe ({})",
+                if view == KEY_WOW64_64KEY {
+                    "64-bit view"
+                } else {
+                    "32-bit view"
+                }
+            );
+            return Some(EnterpriseFileConfig {
+                license_key,
+                ..EnterpriseFileConfig::default()
+            });
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_enterprise_config_from_windows_registry() -> Option<EnterpriseFileConfig> {
+    None
+}
+
+/// Read an administrator-deployed config. An executable-adjacent file is the
+/// explicit cross-platform contract and therefore wins as a complete config;
+/// the Windows registry is the documented Intune fallback when no such file is
+/// bundled.
+fn read_enterprise_config_from_deployment() -> Option<EnterpriseFileConfig> {
+    read_enterprise_config_from_exe_dir().or_else(read_enterprise_config_from_windows_registry)
+}
+
 /// Read enterprise device config. Bundled/MDM config is authoritative unless
-/// the user file carries a validated recovery for that exact bundled key.
+/// the user file carries a validated recovery for that exact deployed key.
 pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
-    let bundled = read_enterprise_config_from_exe_dir();
+    let bundled = read_enterprise_config_from_deployment();
     let user_path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
     let user = if user_path.exists() {
         info!(
@@ -721,13 +826,14 @@ pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
         None
     };
     if bundled.is_none() && user.is_none() {
-        info!("enterprise: no enterprise.json found in any location");
+        info!("enterprise: no deployed or user enterprise config found");
     }
     merge_enterprise_file_configs(bundled, user)
 }
 
-/// Read the enterprise license key from `enterprise.json`.
-/// Returns None if no file is found or is invalid.
+/// Read the enterprise license key from deployment config (`enterprise.json`
+/// or the documented Windows registry value) and the user recovery config.
+/// Returns None if no valid key is found.
 #[tauri::command]
 #[specta::specta]
 pub fn get_enterprise_license_key() -> Option<String> {
@@ -883,7 +989,8 @@ pub fn persist_recovered_enterprise_device_config(
     // A user recovery overlays the executable-adjacent file. Keep every
     // subsequent rotation tied to that immutable source key so recovery B can
     // replace recovery A without making the overlay disappear on restart.
-    let bundled_license_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    let bundled_license_key =
+        read_enterprise_config_from_deployment().and_then(|cfg| cfg.license_key);
     let recovery_anchor =
         recovery_anchor_license_key(bundled_license_key.as_deref(), replaced_license_key);
     persist_enterprise_device_config_inner(Some(license_key), ingest_url, Some(recovery_anchor))
@@ -894,7 +1001,7 @@ pub fn persist_recovered_enterprise_device_config(
 #[tauri::command]
 #[specta::specta]
 pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
-    let bundled_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    let bundled_key = read_enterprise_config_from_deployment().and_then(|cfg| cfg.license_key);
     match bundled_key
         .as_deref()
         .filter(|key| *key != license_key.as_str())
@@ -1061,6 +1168,14 @@ pub async fn set_cloud_token(
         .as_ref()
         .map(|settings| settings.restricts_paid_local_features())
         .unwrap_or(true);
+    if let Some(settings) = settings.as_ref() {
+        crate::recording::refresh_history_access_policy(&state.history_access, settings);
+    } else {
+        // Missing/corrupt settings are unattributed on consumer builds.
+        state
+            .history_access
+            .set_last_24_hours(!cfg!(feature = "enterprise-build"));
+    }
     let pipe_manager = {
         let server = state.server.lock().await;
         server.as_ref().map(|core| core.pipe_manager.clone())
@@ -1711,6 +1826,11 @@ fn login_url_with_intent(
         }
         if let Some(scheme) = return_scheme {
             query.append_pair("return_scheme", scheme);
+            // The website only honors a non-consumer scheme when the caller
+            // advertises this contract. That keeps deploy order safe: older
+            // Enterprise builds requested their scheme but dropped it during
+            // warm-instance forwarding on Windows and Linux.
+            query.append_pair("callback_version", crate::deep_link::AUTH_CALLBACK_VERSION);
         }
     }
     Ok(url.to_string())
@@ -1737,6 +1857,10 @@ mod login_url_intent_tests {
             pairs.get("return_scheme").map(|value| value.as_ref()),
             Some("screenpipe")
         );
+        assert_eq!(
+            pairs.get("callback_version").map(|value| value.as_ref()),
+            Some("1")
+        );
     }
 
     #[test]
@@ -1753,24 +1877,27 @@ mod login_url_intent_tests {
             pairs.get("return_scheme").map(|value| value.as_ref()),
             Some("screenpipe-enterprise")
         );
+        assert_eq!(
+            pairs.get("callback_version").map(|value| value.as_ref()),
+            Some("1")
+        );
     }
 }
 
 /// The custom URL scheme this build registers for deep links. The enterprise
 /// build uses a distinct scheme so it does not collide with the consumer app's
 /// `screenpipe://` on machines that have both installed (see #3890). Login
-/// URLs pass a `return_scheme` query param so the website can redirect back
-/// to the right build; until the website supports the param it is ignored and
-/// redirects stay on `screenpipe://`, matching the consumer path.
+/// URLs pass an allowlisted `return_scheme` plus a versioned callback contract
+/// so the website can redirect back to the right build without making rollout
+/// order unsafe for older Enterprise clients.
 pub fn deep_link_scheme() -> &'static str {
-    if cfg!(feature = "enterprise-build") {
-        "screenpipe-enterprise"
-    } else {
-        "screenpipe"
-    }
+    crate::deep_link::scheme()
 }
 
 fn is_login_callback_scheme(scheme: &str) -> bool {
+    // Keep accepting the old consumer callback inside the embedded WebView for
+    // fallback compatibility during rollout. OS-level routing remains strict
+    // and is handled by deep_link::is_for_current_build.
     scheme == deep_link_scheme() || scheme == "screenpipe"
 }
 
@@ -1817,12 +1944,12 @@ pub async fn open_login_window(
     #[cfg(target_os = "macos")]
     {
         // ASWebAuthenticationSession intercepts the redirect itself (no OS
-        // scheme routing), so the consumer `screenpipe` scheme cannot collide
-        // with another installed build here (#3890) and stays correct until
-        // the website honours `return_scheme`.
+        // scheme routing), but still use the same versioned build scheme as
+        // Windows/Linux so the website contract is identical everywhere.
+        let callback_scheme = deep_link_scheme();
         let callback_url = match crate::auth_session::start_session(
-            login_url_with_intent(auth_mode, None)?,
-            "screenpipe".to_string(),
+            login_url_with_intent(auth_mode, Some(callback_scheme))?,
+            callback_scheme.to_string(),
             fresh_session,
         )
         .await
@@ -2312,9 +2439,36 @@ pub async fn ensure_webview_focus(_app_handle: tauri::AppHandle) -> Result<(), S
     Ok(())
 }
 
-/// Navigate from Search to a timestamp on the Main timeline.
-/// Shows Main, emits the navigation event from the app handle (not a webview),
-/// then closes the Search window.
+fn validated_timeline_origin(origin: Option<&str>) -> Result<Option<&str>, String> {
+    match origin {
+        None => Ok(None),
+        Some("home" | "main" | "main-window") => Ok(origin),
+        Some(other) => Err(format!("invalid timeline origin: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod search_navigation_origin_tests {
+    use super::validated_timeline_origin;
+
+    #[test]
+    fn accepts_only_timeline_host_labels() {
+        assert_eq!(validated_timeline_origin(Some("home")).unwrap(), Some("home"));
+        assert_eq!(validated_timeline_origin(Some("main")).unwrap(), Some("main"));
+        assert_eq!(
+            validated_timeline_origin(Some("main-window")).unwrap(),
+            Some("main-window")
+        );
+        assert_eq!(validated_timeline_origin(None).unwrap(), None);
+        assert!(validated_timeline_origin(Some("search")).is_err());
+    }
+}
+
+/// Navigate from Search to the timeline that opened it.
+///
+/// Native Swift timelines are addressed by their host-window label. Global
+/// Search defaults to the overlay's `main` label on macOS; non-macOS surfaces
+/// retain the legacy React event.
 #[tauri::command]
 #[specta::specta]
 pub async fn search_navigate_to_timeline(
@@ -2324,7 +2478,69 @@ pub async fn search_navigate_to_timeline(
     search_terms: Option<Vec<String>>,
     search_results_json: Option<String>,
     search_query: Option<String>,
+    timeline_origin: Option<String>,
 ) -> Result<(), String> {
+    let timeline_origin = validated_timeline_origin(timeline_origin.as_deref())?;
+
+    #[cfg(target_os = "macos")]
+    if crate::native_timeline::is_available() {
+        // Global Search has no timeline origin. On macOS its destination is
+        // still the native Timeline attached to the overlay, not the hidden
+        // React fallback inside that overlay. The old origin-less branch only
+        // emitted `search-navigate-to-timestamp`, so the visible native child
+        // opened at the live edge and never received the clicked frame.
+        let origin = timeline_origin.unwrap_or("main");
+        match origin {
+            "home" => ShowRewindWindow::Home { page: None }
+                .show(&app_handle)
+                .map_err(|e| e.to_string())?,
+            "main" | "main-window" => ShowRewindWindow::Main
+                .show(&app_handle)
+                .map_err(|e| e.to_string())?,
+            _ => unreachable!("timeline origin was validated"),
+        };
+
+        // The source timeline normally remains attached while Search is
+        // visible. Retry as well so a restored or newly-created overlay can
+        // finish mounting its native child before the hand-off arrives. Every
+        // retry keeps the same id: Swift accepts the first delivery and ignores
+        // the rest, so a delayed retry cannot reset an arrow/strip selection.
+        let navigation_id = uuid::Uuid::new_v4().to_string();
+        let _ = crate::native_timeline::navigate_to_search_result(
+            &timestamp,
+            frame_id,
+            origin,
+            search_terms.as_deref(),
+            search_results_json.as_deref(),
+            search_query.as_deref(),
+            &navigation_id,
+        );
+
+        let app = app_handle.clone();
+        let timestamp_retry = timestamp.clone();
+        let origin_retry = origin.to_string();
+        let search_terms_retry = search_terms.clone();
+        let search_results_retry = search_results_json.clone();
+        let search_query_retry = search_query.clone();
+        let navigation_id_retry = navigation_id.clone();
+        tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                let _ = crate::native_timeline::navigate_to_search_result(
+                    &timestamp_retry,
+                    frame_id,
+                    &origin_retry,
+                    search_terms_retry.as_deref(),
+                    search_results_retry.as_deref(),
+                    search_query_retry.as_deref(),
+                    &navigation_id_retry,
+                );
+            }
+            let _ = ShowRewindWindow::Search { query: None }.close(&app);
+        });
+        return Ok(());
+    }
+
     // Show the Main timeline
     ShowRewindWindow::Main
         .show(&app_handle)
@@ -2802,12 +3018,20 @@ pub async fn set_window_size(
 pub async fn open_search_window(
     app_handle: tauri::AppHandle,
     query: Option<String>,
+    timeline_origin: Option<String>,
 ) -> Result<(), String> {
-    ShowRewindWindow::Main
-        .close(&app_handle)
-        .map_err(|e| e.to_string())?;
+    let timeline_origin = validated_timeline_origin(timeline_origin.as_deref())?;
+    if timeline_origin.is_some() {
+        // Match `show_window(Search)`: hide the overlay without restoring the
+        // previous foreground app, so the Search panel can take focus cleanly.
+        hide_main_window(app_handle.clone());
+    } else {
+        ShowRewindWindow::Main
+            .close(&app_handle)
+            .map_err(|e| e.to_string())?;
+    }
     ShowRewindWindow::Search { query }
-        .show(&app_handle)
+        .show_with_search_origin(&app_handle, timeline_origin)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -2886,34 +3110,104 @@ fn shortcut_reminder_payload(
     map
 }
 
-/// Whether a stored "keep the overlay hidden" choice may be honored at all.
-/// The overlay is the app's only always-on surface — it carries recording
-/// health, live meeting state and meeting notifications — so it ships
-/// unhideable and a stale stored `false` stays inert. `overlay-hiding-control`
-/// (see `lib/desktop-remote-control.ts`) can grant the capability back
-/// remotely, at which point the user's own choice starts counting again.
+/// Whether the user's persistent choice or temporary snooze hides the normal
+/// shortcut reminder. Confirmed recording incidents bypass this predicate and
+/// use the same small surface only for recovery.
 pub(crate) fn shortcut_overlay_hidden_by_choice(
-    allow_hiding: bool,
     show_overlay: bool,
+    snoozed_until: Option<i64>,
+    now_unix: i64,
 ) -> bool {
-    allow_hiding && !show_overlay
+    !show_overlay || snoozed_until.is_some_and(|until| until > now_unix)
 }
 
-/// Suppression is otherwise a system decision (timeline off, headless), never
-/// a stored dismissal.
+const SHORTCUT_OVERLAY_HOUR_SNOOZE_SECONDS: i64 = 60 * 60;
+
+fn should_resume_snoozed_overlay(
+    show_overlay: bool,
+    stored_until: Option<i64>,
+    expected_until: i64,
+    now_unix: i64,
+) -> bool {
+    show_overlay && stored_until == Some(expected_until) && expected_until <= now_unix
+}
+
+fn schedule_shortcut_overlay_resume(app_handle: tauri::AppHandle, expected_until: i64) {
+    tauri::async_runtime::spawn(async move {
+        let delay_seconds = expected_until
+            .saturating_sub(chrono::Utc::now().timestamp())
+            .max(0) as u64;
+        tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
+
+        let Ok(Some(mut store)) = crate::store::SettingsStore::get(&app_handle) else {
+            return;
+        };
+        let now_unix = chrono::Utc::now().timestamp();
+        if !should_resume_snoozed_overlay(
+            store.show_shortcut_overlay,
+            store.shortcut_overlay_snoozed_until,
+            expected_until,
+            now_unix,
+        ) {
+            return;
+        }
+
+        store.shortcut_overlay_snoozed_until = None;
+        if let Err(error) = store.save(&app_handle) {
+            warn!("failed to clear expired shortcut overlay snooze: {}", error);
+            return;
+        }
+        if let Err(error) = show_shortcut_reminder_impl(app_handle, true, true).await {
+            warn!("failed to restore shortcut overlay after snooze: {}", error);
+        }
+    });
+}
+
+/// Honor the saved preference on every startup. Expired snoozes are cleared so
+/// Settings and subsequent launches reflect the actual state.
 pub(crate) async fn maybe_show_shortcut_reminder_on_startup(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let now_unix = chrono::Utc::now().timestamp();
     if shortcut_overlay_hidden_by_choice(
-        store.allow_hiding_shortcut_overlay,
         store.show_shortcut_overlay,
+        store.shortcut_overlay_snoozed_until,
+        now_unix,
     ) {
-        info!("shortcut overlay stays hidden: remote policy allows it and the user turned it off");
+        if store.show_shortcut_overlay {
+            if let Some(until) = store.shortcut_overlay_snoozed_until {
+                schedule_shortcut_overlay_resume(app_handle, until);
+            }
+        }
+        info!("shortcut overlay stays hidden: saved preference or one-hour snooze");
         return Ok(());
+    }
+    if store
+        .shortcut_overlay_snoozed_until
+        .is_some_and(|until| until <= now_unix)
+    {
+        store.shortcut_overlay_snoozed_until = None;
+        store.save(&app_handle)?;
     }
 
     show_shortcut_reminder_impl(app_handle, true, true).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn snooze_shortcut_reminder_for_hour(
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let until = chrono::Utc::now()
+        .timestamp()
+        .saturating_add(SHORTCUT_OVERLAY_HOUR_SNOOZE_SECONDS);
+    store.show_shortcut_overlay = true;
+    store.shortcut_overlay_snoozed_until = Some(until);
+    store.save(&app_handle)?;
+    schedule_shortcut_overlay_resume(app_handle.clone(), until);
+    hide_shortcut_reminder(app_handle).await
 }
 
 #[tauri::command]
@@ -2922,6 +3216,22 @@ pub async fn show_shortcut_reminder(
     app_handle: tauri::AppHandle,
     _shortcut: String,
 ) -> Result<(), String> {
+    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let now_unix = chrono::Utc::now().timestamp();
+    if shortcut_overlay_hidden_by_choice(
+        store.show_shortcut_overlay,
+        store.shortcut_overlay_snoozed_until,
+        now_unix,
+    ) {
+        return Ok(());
+    }
+    if store
+        .shortcut_overlay_snoozed_until
+        .is_some_and(|until| until <= now_unix)
+    {
+        store.shortcut_overlay_snoozed_until = None;
+        store.save(&app_handle)?;
+    }
     show_shortcut_reminder_impl(app_handle, true, true).await
 }
 
@@ -2970,6 +3280,9 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
         if native_shortcut_reminder::is_available() {
             info!("using the native shortcut reminder");
+            native_shortcut_reminder::set_capture_protected(!crate::window::overlay_is_capturable(
+                &store,
+            ));
             use crate::recording::RecordingState;
             use std::time::Duration;
 
@@ -3161,7 +3474,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
             // Clone window to pass into main thread closure
             let window_clone = window.clone();
-            let capturable = crate::window::app_windows_are_capturable(&app_handle);
+            let capturable = crate::window::native_overlay_is_capturable(&app_handle);
             let _ = app_handle.run_on_main_thread(move || {
                 use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
 
@@ -3267,10 +3580,11 @@ pub async fn hide_shortcut_reminder(app_handle: tauri::AppHandle) -> Result<(), 
     Ok(())
 }
 
-/// Current recording-health overlay state: "normal" | "failure" | "fixing" |
-/// "recovered", optionally suffixed "|<detail>" (a concise failure reason or
-/// boot-phase label while fixing). The shortcut-reminder webview pulls this on
-/// mount, then stays current via the "recording-health-state" event.
+/// Current recording-health overlay state: "normal" | "failure" |
+/// "recovering" | "fixing" | "recovered", optionally suffixed "|<detail>" (a
+/// concise failure reason or boot-phase label while fixing). The
+/// shortcut-reminder webview pulls this on mount, then stays current via the
+/// "recording-health-state" event.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_recording_health_state() -> String {
@@ -3497,23 +3811,18 @@ pub async fn show_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
 ) -> Result<(), String> {
-    deliver_notification_panel(app_handle, payload, true)
+    deliver_notification_panel(app_handle, payload)
         .await
         .map(|_| ())
 }
 
 /// Render an alert, returning what actually happened to it.
 ///
-/// `apply_repeat_gate` exists because the repeat gate is check-and-record, so
-/// running it twice for one alert makes the second call collide with the
-/// record the first call just wrote. `/notify` already gates before it
-/// persists, so it passes `false` and stays the single recorder for that path;
-/// the direct callers (capture-stall, audio device/health) come straight here
-/// and pass `true`.
+/// This is the single check-and-record owner for repeat suppression. `/notify`
+/// only peeks before persisting, while direct callers come straight here.
 pub(crate) async fn deliver_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
-    apply_repeat_gate: bool,
 ) -> Result<NotificationDelivery, String> {
     use tauri::{Emitter, WebviewWindowBuilder};
 
@@ -3548,14 +3857,12 @@ pub(crate) async fn deliver_notification_panel(
         crate::notifications::gate::title_from_payload(&payload).unwrap_or_default();
     let notification_body =
         crate::notifications::gate::body_from_payload(&payload).unwrap_or_default();
-    if apply_repeat_gate
-        && crate::notifications::gate::repeat_suppressed_now(
-            notification_type.as_deref(),
-            notification_pipe.as_deref(),
-            &notification_title,
-            &notification_body,
-        )
-    {
+    if crate::notifications::gate::repeat_suppressed_now(
+        notification_type.as_deref(),
+        notification_pipe.as_deref(),
+        &notification_title,
+        &notification_body,
+    ) {
         info!(
             "show_notification_panel: suppressed (repeat within cooldown, type={:?})",
             notification_type
@@ -3759,7 +4066,9 @@ pub(crate) async fn deliver_notification_panel(
             // steals focus. orderFront: in the main thread block handles visibility.
 
             let window_clone = window.clone();
-            let capturable = crate::window::app_windows_are_capturable(&app_handle);
+            // Notifications are ordinary user-facing app UI, not the recording
+            // overlay controlled by Settings > Display.
+            let capturable = true;
             let _ = app_handle.run_on_main_thread(move || {
                 use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
 
@@ -3902,6 +4211,11 @@ fn register_window_shortcuts_inner(app_handle: tauri::AppHandle) -> Result<(), S
                     for label in [RewindWindowId::Main.label(), "main-window"] {
                         if let Some(w) = app.get_webview_window(label) {
                             if w.is_visible().unwrap_or(false) {
+                                #[cfg(target_os = "macos")]
+                                if crate::native_timeline::dismiss_search_review(label) {
+                                    delivered = true;
+                                    break;
+                                }
                                 let _ = app.emit_to(label, "escape-pressed", ());
                                 delivered = true;
                                 break;
@@ -4263,16 +4577,12 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
         let obsidian_uri = format!("obsidian://open?path={}", urlencoding::encode(&path));
-        let mut a = Command::new("cmd");
-        a.args(["/C", "start", "", &obsidian_uri]);
-        a.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let mut b = Command::new("cmd");
-        b.args(["/C", "start", "", &path]);
-        b.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if a.spawn().is_ok() || b.spawn().is_ok() {
+        if open_windows_shell_target(obsidian_uri).is_ok() {
+            return Ok(());
+        }
+
+        if open_windows_shell_target(path.clone()).is_ok() {
             Ok(())
         } else {
             Err(format!("failed to open note path: {}", path))
@@ -4294,23 +4604,43 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
 pub fn open_windows_shell_target(target: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", &target])
-            .creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let target = target.trim().to_string();
+        if target.is_empty() {
+            return Err("failed to open Windows shell target: target is empty".to_string());
+        }
 
-        match cmd.status() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(status) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, status
-            )),
-            Err(e) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, e
-            )),
+        let operation = "open"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let target_wide = target
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+
+        let result_code = result.0 as isize;
+        if result_code > 32 {
+            Ok(())
+        } else {
+            Err(format!(
+                "failed to open Windows shell target {}: ShellExecuteW returned {}",
+                target, result_code
+            ))
         }
     }
 
@@ -4511,6 +4841,16 @@ fn dir_size(path: &std::path::Path) -> u64 {
 #[specta::specta]
 pub fn set_autostart(app_handle: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+
+    #[cfg(all(feature = "enterprise-build", target_os = "windows"))]
+    if crate::enterprise_persistence::installed() {
+        // The protected service owns startup for this package. Keep the
+        // user-writable Run entry absent even if an old setting is toggled.
+        return app_handle
+            .autolaunch()
+            .disable()
+            .map_err(|error| error.to_string());
+    }
 
     #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
     crate::enterprise_autostart::set_macos_employee_autostart(&app_handle, enabled)?;

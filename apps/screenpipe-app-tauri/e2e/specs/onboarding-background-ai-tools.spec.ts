@@ -150,10 +150,27 @@ async function callActivitySummaryThroughMcp(
       await waitForAppReady();
     });
 
-    it("connects detected Codex and Cursor configs in the Rust background task", async () => {
+    it("connects detected Claude Code, Codex, Cursor, Gemini, and Runner configs in the Rust background task", async () => {
+      const claudeCodeConfig = resolve(E2E_AI_TOOLS_HOME, ".claude.json");
       const codexConfig = resolve(E2E_AI_TOOLS_HOME, ".codex", "config.toml");
       const cursorConfig = resolve(E2E_AI_TOOLS_HOME, ".cursor", "mcp.json");
+      const geminiConfig = resolve(E2E_AI_TOOLS_HOME, ".gemini", "settings.json");
+      const runnerConfig = resolve(E2E_AI_TOOLS_HOME, ".runner", "mcp.json");
       const requiredSkills = [
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".claude",
+          "skills",
+          "screenpipe-api",
+          "SKILL.md",
+        ),
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".claude",
+          "skills",
+          "screenpipe-cli",
+          "SKILL.md",
+        ),
         resolve(
           E2E_AI_TOOLS_HOME,
           ".codex",
@@ -178,6 +195,20 @@ async function callActivitySummaryThroughMcp(
         resolve(
           E2E_AI_TOOLS_HOME,
           ".cursor",
+          "skills",
+          "screenpipe-cli",
+          "SKILL.md",
+        ),
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".gemini",
+          "skills",
+          "screenpipe-api",
+          "SKILL.md",
+        ),
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".gemini",
           "skills",
           "screenpipe-cli",
           "SKILL.md",
@@ -187,9 +218,19 @@ async function callActivitySummaryThroughMcp(
       await browser.waitUntil(
         () =>
           requiredSkills.every(existsSync) &&
+          Boolean(
+            JSON.parse(readFileSync(claudeCodeConfig, "utf8")).mcpServers
+              ?.screenpipe,
+          ) &&
           readFileSync(codexConfig, "utf8").includes(
             "[mcp_servers.screenpipe]",
-          ),
+          ) &&
+          Boolean(
+            JSON.parse(readFileSync(geminiConfig, "utf8")).mcpServers
+              ?.screenpipe,
+          ) &&
+          JSON.parse(readFileSync(runnerConfig, "utf8")).mcpServers
+            ?.screenpipe?.type === "stdio",
         {
           timeout: t(30_000),
           interval: 250,
@@ -211,6 +252,11 @@ async function callActivitySummaryThroughMcp(
       );
       expect(codex).toContain('SCREENPIPE_MCP_CLIENT = "codex"');
 
+      const claudeCode = JSON.parse(readFileSync(claudeCodeConfig, "utf8"));
+      expect(claudeCode.mcpServers.screenpipe.env.SCREENPIPE_MCP_CLIENT).toBe(
+        "claude-code",
+      );
+
       const cursor = JSON.parse(readFileSync(cursorConfig, "utf8"));
       expect(cursor.theme).toBe("dark");
       expect(cursor.mcpServers.existing.command).toBe("existing-server");
@@ -220,9 +266,30 @@ async function callActivitySummaryThroughMcp(
         SCREENPIPE_MCP_CLIENT: "cursor",
       });
 
+      const gemini = JSON.parse(readFileSync(geminiConfig, "utf8"));
+      expect(gemini.ui.theme).toBe("GitHub");
+      expect(gemini.mcpServers.existing.command).toBe("gemini-existing");
+      expect(gemini.mcpServers.screenpipe.env).toEqual({
+        SCREENPIPE_API_URL: `http://localhost:${api.port}`,
+        SCREENPIPE_LOCAL_API_KEY: api.key,
+        SCREENPIPE_MCP_CLIENT: "gemini",
+      });
+
+      const runner = JSON.parse(readFileSync(runnerConfig, "utf8"));
+      expect(runner.workspace).toBe("kept");
+      expect(runner.mcpServers.existing.url).toBe("https://example.com/mcp");
+      expect(runner.mcpServers.screenpipe.type).toBe("stdio");
+      expect(runner.mcpServers.screenpipe.env).toEqual({
+        SCREENPIPE_API_URL: `http://localhost:${api.port}`,
+        SCREENPIPE_LOCAL_API_KEY: api.key,
+        SCREENPIPE_MCP_CLIENT: "runner",
+      });
+
       if (process.platform !== "win32") {
         expect(statSync(codexConfig).mode & 0o777).toBe(0o600);
         expect(statSync(cursorConfig).mode & 0o777).toBe(0o600);
+        expect(statSync(geminiConfig).mode & 0o777).toBe(0o600);
+        expect(statSync(runnerConfig).mode & 0o777).toBe(0o600);
       }
 
       const result = (await callActivitySummaryThroughMcp(

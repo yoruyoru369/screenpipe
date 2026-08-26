@@ -33,6 +33,122 @@ use objc2_app_kit::NSPasteboard;
 /// and cause a SIGABRT in CFDictionarySetValue / __CFBasicHashRehash.
 static AX_QUERY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+/// Process-wide ceiling for any AX call that does not set its own timeout.
+///
+/// macOS defaults to roughly 6s per message. AX reads are synchronous IPC
+/// serviced on the *target app's* main thread, so an unbounded read against a
+/// busy app stalls that app's UI — including drag loops — for as long as we are
+/// willing to wait. Several focus-path reads (`focused_app`, `focused_window`,
+/// `focused_ui_element`, `element_at_pos`) run straight off AX notifications
+/// with no debounce and previously inherited that 6s default.
+///
+/// 1s is deliberately looser than the 0.1–0.2s per-element bounds the walker
+/// sets, so it only ever acts as a backstop: `AXUIElementSetMessagingTimeout`
+/// on a specific element still overrides it for that element.
+const AX_DEFAULT_TIMEOUT_SECS: f32 = 1.0;
+
+/// Apply [`AX_DEFAULT_TIMEOUT_SECS`] as this process's default AX timeout.
+///
+/// Passing the system-wide element to `AXUIElementSetMessagingTimeout` sets the
+/// default for every message the app sends, so this only needs to land once —
+/// hence the `Once`, which also keeps it off the hot notification path.
+pub(crate) fn ensure_global_ax_timeout() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let sys = ax::UiElement::sys_wide();
+        match sys.set_messaging_timeout_secs(AX_DEFAULT_TIMEOUT_SECS) {
+            Ok(()) => debug!(
+                "AX default messaging timeout set to {}s (was the ~6s system default)",
+                AX_DEFAULT_TIMEOUT_SECS
+            ),
+            Err(e) => warn!(
+                "failed to set AX default messaging timeout: {:?} — unbounded AX reads \
+                 can stall the target app's main thread for ~6s",
+                e
+            ),
+        }
+    });
+}
+
+#[repr(C)]
+struct ProcessSerialNumber {
+    high_long_of_psn: u32,
+    low_long_of_psn: u32,
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn GetFrontProcess(psn: *mut ProcessSerialNumber) -> i16;
+    fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *mut i32) -> i32;
+}
+
+/// Return the currently frontmost process with two scalar Process Manager
+/// calls. Unlike NSWorkspace notifications, this is synchronous and does not
+/// require an AppKit run loop to have processed an activation event.
+pub fn get_focused_pid_fresh() -> Option<i32> {
+    let mut psn = ProcessSerialNumber {
+        high_long_of_psn: 0,
+        low_long_of_psn: 0,
+    };
+    let mut pid = 0i32;
+    let status = unsafe { GetFrontProcess(&mut psn) };
+    if status == 0 {
+        let status = unsafe { GetProcessPID(&psn, &mut pid) };
+        if status == 0 && pid > 0 {
+            return Some(pid);
+        }
+    }
+
+    // Failure-only fallback for systems where the deprecated Process Manager
+    // symbols stop resolving correctly. This allocates a WindowServer list,
+    // so it must not be the normal capture path.
+    get_focused_pid_via_window_server()
+}
+
+fn get_focused_pid_via_window_server() -> Option<i32> {
+    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
+    use core_foundation::number::{CFNumber, CFNumberRef};
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+    };
+
+    let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+    let list = copy_window_info(options, kCGNullWindowID)?;
+    let count = unsafe { CFArrayGetCount(list.as_concrete_TypeRef()) };
+    for i in 0..count {
+        unsafe {
+            let dict_ref = CFArrayGetValueAtIndex(list.as_concrete_TypeRef(), i);
+            if dict_ref.is_null() {
+                continue;
+            }
+            let dict = dict_ref as CFDictionaryRef;
+            let get_i64 = |key| -> Option<i64> {
+                let mut value = std::ptr::null();
+                if CFDictionaryGetValueIfPresent(dict, key as *const _, &mut value) != 0
+                    && !value.is_null()
+                {
+                    CFNumber::wrap_under_get_rule(value as CFNumberRef).to_i64()
+                } else {
+                    None
+                }
+            };
+
+            // Layer 0 = normal application windows. Menus, overlays, and
+            // status items live on higher layers and must not own focus.
+            if get_i64(kCGWindowLayer) != Some(0) {
+                continue;
+            }
+            if let Some(pid) = get_i64(kCGWindowOwnerPID) {
+                return Some(pid as i32);
+            }
+        }
+    }
+    None
+}
+
 /// Process-wide ground truth for macOS Input Monitoring, learned from the ONE
 /// real CGEventTap we create in `run_event_tap` / `run_activity_only_tap`.
 ///
@@ -281,6 +397,9 @@ impl UiRecorder {
                 perms.input_monitoring
             );
         }
+
+        // Bound every AX read this process makes before any of them can run.
+        ensure_global_ax_timeout();
 
         let (tx, rx) = bounded::<UiEvent>(self.config.max_buffer_size);
         let stop = Arc::new(AtomicBool::new(false));
@@ -2084,6 +2203,13 @@ fn get_string_attr(elem: &ax::UiElement, attr: &ax::Attr) -> Option<String> {
 
 fn get_focused_window_title(pid: i32) -> Option<String> {
     let app = ax::UiElement::with_app_pid(pid);
+
+    // Runs on every AX focus notification with no debounce, so it is the most
+    // frequent unbounded read we make. Match the 0.1s the click/context paths
+    // already use rather than leaning on the 1s process default: a slow app
+    // should cost us a missing title, not a stalled observer thread.
+    let _ = app.set_messaging_timeout_secs(0.1);
+
     let focused = app.attr_value(ax::attr::focused_window()).ok()?;
 
     if focused.get_type_id() == ax::UiElement::type_id() {

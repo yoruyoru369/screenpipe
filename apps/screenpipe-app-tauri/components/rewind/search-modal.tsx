@@ -3246,6 +3246,8 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                     <div
                       key={result.frame_id}
                       data-index={index}
+                      data-frame-id={result.frame_id}
+                      data-timestamp={result.timestamp}
                       data-nav-index={pos}
                       onClick={() => {
                         if (thumbnailReady) handleSelectResult(result);

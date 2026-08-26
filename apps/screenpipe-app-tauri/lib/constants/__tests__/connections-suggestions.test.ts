@@ -7,6 +7,8 @@ import {
   getSuggestedConnectionsForDevice,
   isSuggestedForThisDevice,
   compareConnectionTiles,
+  connectionMatchesSearch,
+  CONNECTION_HARDCODED_DESCRIPTIONS,
   type ConnectionSuggestionTile,
 } from "../connections";
 
@@ -82,5 +84,39 @@ describe("connection suggestions", () => {
     );
 
     expect(group.map((t) => t.id)).toEqual(["github", "linear"]);
+  });
+});
+
+describe("connection search", () => {
+  const gmail = tile("gmail", {
+    name: "Gmail",
+    description: "Read your Gmail inbox",
+  });
+
+  it.each(["gmail", "google", "google mail", "email", "mail"])(
+    "finds Gmail with %s",
+    (query) => {
+      expect(connectionMatchesSearch(gmail, query)).toBe(true);
+    },
+  );
+
+  it("does not match unrelated searches", () => {
+    expect(connectionMatchesSearch(gmail, "calendar")).toBe(false);
+  });
+
+  it.each(["claude", "claude desktop", "claude code", "anthropic"])(
+    "finds the merged Claude tile with %s",
+    (query) => {
+      expect(connectionMatchesSearch(tile("claude", { name: "Claude" }), query)).toBe(true);
+    },
+  );
+});
+
+describe("connection copy", () => {
+  it("keeps implementation details out of the default descriptions", () => {
+    const copy = Object.values(CONNECTION_HARDCODED_DESCRIPTIONS).join(" ");
+
+    expect(copy).not.toMatch(/\b(MCP|VPS|CLI|Composio)\b/i);
+    expect(copy).not.toMatch(/managed auth|config/i);
   });
 });

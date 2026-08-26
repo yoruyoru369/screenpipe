@@ -6,6 +6,8 @@ name: Linux AppImage Smoke
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "11 10 * * *"
   pull_request:
     branches: [main]
     paths:
@@ -18,12 +20,12 @@ on:
       - ".github/workflows/release-app.yml"
       - ".github/workflows/release-enterprise.yml"
       - "apps/screenpipe-app-tauri/scripts/pre_build.js"
-      - "apps/screenpipe-app-tauri/src-tauri/**"
       - "apps/screenpipe-app-tauri/package.json"
       - "apps/screenpipe-app-tauri/bun.lock"
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
+      - "apps/screenpipe-app-tauri/src-tauri/Cargo.toml"
+      - "apps/screenpipe-app-tauri/src-tauri/Cargo.lock"
+      - "apps/screenpipe-app-tauri/src-tauri/build.rs"
+      - "apps/screenpipe-app-tauri/src-tauri/tauri*.conf.json"
 
 concurrency:
   group: linux-appimage-smoke-${{ github.ref }}
@@ -357,6 +359,10 @@ jobs:
               # hard failure here rather than something the host quietly satisfies.
               if [ ! -e squashfs-root/usr/lib/libopenblas.so.0 ]; then
                 echo "::error::libopenblas.so.0 is not bundled in the AppImage; OCR breaks on hosts without the system package"
+                exit 1
+              fi
+              if [ ! -e squashfs-root/usr/lib/libgfortran.so.5 ]; then
+                echo "::error::libgfortran.so.5 is not bundled in the AppImage; the app fails startup on minimal Linux hosts"
                 exit 1
               fi
               check_ldd squashfs-root/usr/lib/libopenblas.so.0 /tmp/openblas.ldd

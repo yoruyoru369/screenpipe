@@ -23,7 +23,7 @@ oasgen = { workspace = true }
 screenpipe-events = { path = "../screenpipe-events" }
 screenpipe-screen = { path = "../screenpipe-screen" }
 screenpipe-audio = { path = "../screenpipe-audio" }
-screenpipe-core = { path = "../screenpipe-core", features = ["security", "cloud-sync", "secrets"] }
+screenpipe-core = { path = "../screenpipe-core", features = ["security", "cloud-sync", "secrets", "acp"] }
 screenpipe-db = { path = "../screenpipe-db" }
 screenpipe-redact = { path = "../screenpipe-redact", features = ["opf-text"] }
 screenpipe-resource = { path = "../screenpipe-resource" }
@@ -150,6 +150,7 @@ tempfile = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 tiktoken-rs = "0.11.0"
+wiremock = { workspace = true }
 
 # Lock-free queue used by tests/consumer_sleep_test.rs to reproduce the
 # OCR frame-drop bug (see the test's docstring). Not needed by the crate

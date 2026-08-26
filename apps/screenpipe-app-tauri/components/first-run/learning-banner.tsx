@@ -7,12 +7,11 @@
 import React from "react";
 import { emit } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
-import { Clock, Loader2 } from "lucide-react";
+import { ChevronDown, Clock, ListChecks, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   formatCountdown,
   type FirstRunCapturedApp,
-  type FirstRunEmptyReason,
 } from "@/lib/first-run/learning-window";
 import { appIconUrl } from "@/lib/first-run/recent-activity";
 import { AgentHandoffPicker } from "@/components/first-run/agent-handoff-picker";
@@ -21,29 +20,13 @@ import {
   useLearningWindow,
   type LearningWindowOptions,
 } from "@/lib/first-run/use-learning-window";
-
-/**
- * Why the window closed with nothing, in the user's terms.
- *
- * The engine already distinguishes these cases, so we say which one happened
- * instead of a single vague "nothing yet" — the fix is different for each.
- */
-const EMPTY_COPY: Record<FirstRunEmptyReason, string> = {
-  not_recording:
-    "Recording is not running, so there was nothing to read. Start it and this fills in on its own.",
-  no_capture_in_range:
-    "Recording is on but nothing was captured yet. This usually means the screen did not change much.",
-  empty_but_recording:
-    "Recording is on and still warming up. Nothing has been indexed yet.",
-  no_frames_captured:
-    "Recording is on but no screens were captured in that window. If this keeps happening, check Screen Recording permission.",
-  below_frame_floor:
-    "Only a few screens were captured — not enough to say anything true about your work yet. Keep working and this fills in.",
-  single_app_below_floor:
-    "Everything captured came from a single app, which is too thin to summarize. This fills in as you move between apps.",
-  unknown:
-    "Nothing was captured in that window. Screenpipe keeps reading in the background as you work.",
-};
+import { FirstRunNextSteps } from "@/components/first-run/next-steps";
+import {
+  dismissFirstRunSearchShortcutFromParent,
+  FirstRunSearchShortcutPractice,
+} from "@/components/first-run/search-shortcut-practice";
+import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
+import { sendFirstRunSummaryNotification } from "@/lib/first-run/summary-notification";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
   const [failed, setFailed] = React.useState(false);
@@ -54,7 +37,7 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
       className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden border border-border text-[10px] font-medium uppercase text-muted-foreground"
     >
       {failed ? (
-        (app.name.trim().charAt(0) || "?")
+        app.name.trim().charAt(0) || "?"
       ) : (
         // Icons come from the local app server, not a remote host, so
         // next/image optimization does not apply. Same as the timeline.
@@ -70,47 +53,321 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
   );
 }
 
+export function FirstRunReadyPanel({
+  handoffTargets,
+  handoffHint,
+  onOpenSummary,
+  onPickAgent,
+  onDismiss,
+  nextSteps,
+}: {
+  handoffTargets: readonly AgentHandoffTarget[];
+  handoffHint: string | null;
+  onOpenSummary: () => void;
+  onPickAgent: (target: AgentHandoffTarget) => void;
+  onDismiss: () => void;
+  nextSteps: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="p-5">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 bg-signal" aria-hidden="true" />
+          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
+            first result · ready
+          </span>
+        </div>
+        <h2 className="mt-3 font-mono text-base font-semibold lowercase text-foreground">
+          screenpipe learned enough to help
+        </h2>
+        <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-muted-foreground">
+          an evidence-backed summary of the apps and activity captured since setup
+          is waiting in a new chat.
+        </p>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            className="h-8 border-foreground bg-foreground px-3 text-[10px] text-background hover:bg-background hover:text-foreground"
+            data-testid="first-run-open-summary"
+            onClick={onOpenSummary}
+          >
+            open the summary
+          </Button>
+          <AgentHandoffPicker targets={handoffTargets} onPick={onPickAgent} />
+        </div>
+        {handoffHint && (
+          <p
+            className="mt-2 text-[11px] leading-relaxed text-muted-foreground"
+            data-testid="first-run-ask-agent-hint"
+            role="status"
+          >
+            {handoffHint}
+          </p>
+        )}
+      </div>
+
+      {nextSteps}
+
+      <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
+        <p className="text-[10px] leading-relaxed text-muted-foreground">
+          screenpipe is ready now. these optional setups remain available from
+          Automations and Connections.
+        </p>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 shrink-0 px-2 text-[9px]"
+          onClick={onDismiss}
+        >
+          this is ready
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function FirstRunSetupReadyPanel({
+  onDismiss,
+  nextSteps,
+}: {
+  onDismiss: () => void;
+  nextSteps: React.ReactNode;
+}) {
+  return (
+    <div data-testid="first-run-setup-ready">
+      <div className="p-5">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 bg-signal" aria-hidden="true" />
+          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
+            setup · ready
+          </span>
+        </div>
+        <h2 className="mt-3 font-mono text-base font-semibold lowercase text-foreground">
+          screenpipe is ready
+        </h2>
+        <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-muted-foreground">
+          there was not enough activity in this short setup window to write a
+          useful first summary. you can still enable your daily summary now.
+        </p>
+      </div>
+
+      {nextSteps}
+
+      <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
+        <p className="text-[10px] leading-relaxed text-muted-foreground">
+          these optional setups remain available from Automations and
+          Connections.
+        </p>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 shrink-0 px-2 text-[9px]"
+          data-testid="first-run-setup-complete"
+          onClick={onDismiss}
+        >
+          this is ready
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function FirstRunSetupDock({
+  onDismiss,
+  nextSteps,
+}: {
+  onDismiss: () => void;
+  nextSteps: React.ReactNode;
+}) {
+  const [expanded, setExpanded] = React.useState(false);
+
+  return (
+    <div data-testid="first-run-setup-dock">
+      <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-signal text-signal">
+          <ListChecks className="h-4 w-4" aria-hidden="true" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
+            getting started
+          </p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+            your summary is open. daily summary, digital clone, and calendar
+            setup stay available here while you chat.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 px-2 text-[9px]"
+            data-testid="first-run-toggle-setup"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            {expanded ? "close setup" : "open setup"}
+            <ChevronDown
+              className={`h-3 w-3 transition-transform duration-150 ${
+                expanded ? "rotate-180" : ""
+              }`}
+              aria-hidden="true"
+            />
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2 text-[9px]"
+            data-testid="first-run-hide-setup"
+            onClick={onDismiss}
+          >
+            hide tips
+          </Button>
+        </div>
+      </div>
+
+      {expanded && nextSteps}
+    </div>
+  );
+}
+
 /**
  * First-run learning window.
  *
  * Renders nothing outside the window, so it is safe to mount unconditionally
  * on the surface the user lands on after onboarding.
  */
-export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
-  const { phase, capturedApps, remainingMs, chatId, emptyReason, dismiss } =
-    useLearningWindow(props);
-  const { targets: handoffTargets, hint: handoffHint, askAgent } =
-    useAgentHandoff(phase === "ready");
+export function FirstRunLearningBanner(
+  props: LearningWindowOptions & { fallback?: React.ReactNode } = {},
+) {
+  const { fallback, ...learningOptions } = props;
+  const {
+    phase,
+    capturedApps,
+    remainingMs,
+    chatId,
+    summaryOpenedAt,
+    notificationSentAt,
+    showProgress,
+    markSummaryOpened,
+    markNotificationSent,
+    dismiss,
+  } = useLearningWindow(learningOptions);
+  const {
+    targets: handoffTargets,
+    resolved: handoffResolved,
+    preferredTarget,
+    hint: handoffHint,
+    askAgent,
+  } = useAgentHandoff(
+    phase === "ready" && !summaryOpenedAt,
+    capturedApps,
+  );
 
+  React.useEffect(() => {
+    if (
+      phase !== "ready" ||
+      !chatId ||
+      summaryOpenedAt ||
+      notificationSentAt ||
+      !handoffResolved
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void sendFirstRunSummaryNotification(preferredTarget)
+      .then(() => {
+        if (cancelled) return;
+        markNotificationSent();
+        posthog.capture("first_run_summary_notification_sent", {
+          agent: preferredTarget?.id ?? null,
+          has_agent_action: Boolean(preferredTarget),
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        posthog.capture("first_run_summary_notification_failed", {
+          has_agent_action: Boolean(preferredTarget),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    chatId,
+    handoffResolved,
+    markNotificationSent,
+    notificationSentAt,
+    phase,
+    preferredTarget,
+    summaryOpenedAt,
+  ]);
+
+  // Only show progress when setup just caused it. A foreground empty result is
+  // still a terminal onboarding state: hiding it also hid the daily-summary
+  // setup and made the two-minute card appear to vanish. Background retries
+  // remain quiet unless they produce a summary worth opening.
   if (
-    phase !== "learning" &&
-    phase !== "writing" &&
     phase !== "ready" &&
-    phase !== "empty"
+    !(
+      showProgress &&
+      (phase === "learning" || phase === "writing" || phase === "empty")
+    )
   ) {
-    return null;
+    return fallback ? <>{fallback}</> : null;
   }
 
   const openSummary = async () => {
     if (!chatId) return;
-    // Distinct from dismiss(). Opening the summary and clicking "Later" both
-    // close the banner, so without this they collapse into one event and the
-    // activation question this whole flow exists to answer — did the user read
-    // what we found? — becomes unmeasurable.
+    // Distinct from dismiss(). Opening the result keeps optional setup alive,
+    // while hiding the dock explicitly retires it.
     posthog.capture("first_run_summary_opened");
     try {
       await emit("chat-load-conversation", { conversationId: chatId });
+      markSummaryOpened();
     } catch {
-      // The chat is still in the sidebar even if the focus hint does not land.
+      // Keep the full result card so the user can retry instead of collapsing
+      // setup around a summary that did not open.
     }
-    dismiss({ opened: true });
   };
+
+  // Once the result opens, keep setup as a compact workspace-level control
+  // instead of destroying it or leaving the large onboarding card above every
+  // chat. A blank chat can still render its normal starter beneath the dock.
+  if (phase === "ready" && summaryOpenedAt) {
+    return (
+      <>
+        <section
+          data-testid="first-run-learning-banner"
+          data-phase="ready"
+          className="mx-auto mb-4 w-full max-w-3xl overflow-hidden border border-border bg-background"
+        >
+          <FirstRunSearchShortcutPractice />
+          <FirstRunSetupDock
+            onDismiss={() => {
+              dismissFirstRunSearchShortcutFromParent();
+              dismiss();
+            }}
+            nextSteps={
+              <FirstRunNextSteps userToken={learningOptions.userToken} />
+            }
+          />
+        </section>
+        {fallback ? <>{fallback}</> : null}
+      </>
+    );
+  }
 
   return (
     <section
       data-testid="first-run-learning-banner"
       data-phase={phase}
-      className="border border-border bg-background p-4"
+      className={`mx-auto mb-4 w-full border border-border bg-background ${
+        phase === "ready" || phase === "empty"
+          ? "max-w-3xl overflow-hidden"
+          : "max-w-3xl p-4"
+      }`}
     >
       {phase === "learning" && (
         <div className="flex flex-col gap-2">
@@ -162,8 +419,8 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
               ceiling, so a timer here would tick to 0:00 and then keep
               spinning. */}
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Screenpipe saw enough. Putting the summary together now — this
-            takes a few seconds.
+            Screenpipe saw enough. Putting the summary together now — this takes
+            a few seconds.
           </p>
           {capturedApps.length > 0 && (
             <div className="flex items-center gap-2 pt-0.5">
@@ -181,76 +438,25 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
       )}
 
       {phase === "ready" && (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs font-medium text-foreground">
-            Here is what Screenpipe saw
-          </p>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            A summary of the apps and activity captured since setup is waiting
-            in a new chat.
-          </p>
-          <div className="flex items-center gap-2 pt-1">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-[11px]"
-              data-testid="first-run-open-summary"
-              onClick={openSummary}
-            >
-              Open the summary
-            </Button>
-            {/* Setup already wired these agents over MCP, so they can answer
-                from real captured context. Offered second, never instead: the
-                summary is guaranteed to exist, the handoff depends on another
-                app being where we think it is. */}
-            <AgentHandoffPicker
-              targets={handoffTargets}
-              onPick={(target) => void askAgent(target)}
-            />
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 text-[11px]"
-              onClick={() => dismiss()}
-            >
-              Later
-            </Button>
-          </div>
-          {handoffHint && (
-            <p
-              className="text-[11px] leading-relaxed text-muted-foreground"
-              data-testid="first-run-ask-agent-hint"
-              role="status"
-            >
-              {handoffHint}
-            </p>
-          )}
-        </div>
+        <FirstRunReadyPanel
+          handoffTargets={handoffTargets}
+          handoffHint={handoffHint}
+          onOpenSummary={() => void openSummary()}
+          onPickAgent={(target) => void askAgent(target)}
+          onDismiss={() => dismiss()}
+          nextSteps={
+            <FirstRunNextSteps userToken={learningOptions.userToken} />
+          }
+        />
       )}
 
       {phase === "empty" && (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs font-medium text-foreground">
-            Nothing to summarize yet
-          </p>
-          <p
-            className="text-[11px] leading-relaxed text-muted-foreground"
-            data-testid="first-run-empty-reason"
-          >
-            {EMPTY_COPY[emptyReason ?? "unknown"]}
-          </p>
-          <div className="pt-1">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-[11px]"
-              data-testid="first-run-dismiss-empty"
-              onClick={() => dismiss()}
-            >
-              Got it
-            </Button>
-          </div>
-        </div>
+        <FirstRunSetupReadyPanel
+          onDismiss={() => dismiss()}
+          nextSteps={
+            <FirstRunNextSteps userToken={learningOptions.userToken} />
+          }
+        />
       )}
     </section>
   );

@@ -28,7 +28,30 @@ const EXCLUDED_APPS: &[&str] = &[
     "keychain access",
     "screenpipe",
     "loginwindow",
+    // Apple's screenshot UI (Cmd+Shift+3/4/5). `screencaptureui` is the process
+    // name, "screenshot" the localized app name; which one reaches us depends on
+    // whether the caller resolved the pid via proc_name or NSRunningApplication.
+    //
+    // Excluded for latency, not privacy. Pressing the shortcut makes this app
+    // frontmost, and mouse-down maps to `CaptureTrigger::Click`, so the walk
+    // fires exactly while the user is dragging the selection. Every AX read is
+    // synchronous IPC serviced on the *target's* main thread — the same thread
+    // drawing the selection rectangle — so walking it stutters the drag it is
+    // trying to observe. The overlay is a crosshair and a toolbar: no text worth
+    // indexing. Screen frames are unaffected; this skips the a11y walk only.
+    "screencaptureui",
+    "screenshot",
 ];
+
+/// Substring match against the lowercased app name, matching the two call sites
+/// that gate a11y capture. Broad by design: `EXCLUDED_APPS` entries are brand or
+/// process fragments, so "screenshot" also covers third-party screenshot tools.
+/// That is the intended trade — none of them carry indexable a11y text.
+fn is_excluded_app(app_lower: &str) -> bool {
+    EXCLUDED_APPS
+        .iter()
+        .any(|excluded| app_lower.contains(excluded))
+}
 
 /// Known browser app names (lowercase). Matches vision crate's list.
 const BROWSER_NAMES: &[&str] = &[
@@ -718,6 +741,11 @@ impl MacosTreeWalker {
 }
 
 impl TreeWalkerPlatform for MacosTreeWalker {
+    fn update_config(&mut self, mut config: TreeWalkerConfig) {
+        config.compile_patterns_reusing(Some(&self.config));
+        self.config = config;
+    }
+
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         // Wrap in autorelease pool — cidre AX/NS APIs create autoreleased
         // ObjC objects. Without this, objects accumulate on the tokio
@@ -757,9 +785,7 @@ fn check_focused_window_filters_inner(
     };
     let window_name = get_string_attr(&window, ax::attr::title()).unwrap_or_default();
     let app_lower = app_name.to_lowercase();
-    let excluded = EXCLUDED_APPS
-        .iter()
-        .any(|excluded| app_lower.contains(excluded));
+    let excluded = is_excluded_app(&app_lower);
 
     let native_incognito =
         if config.ignore_incognito_windows {
@@ -799,9 +825,9 @@ impl MacosTreeWalker {
                 None => return Ok(TreeWalkResult::NotFound),
             };
 
-        // Skip excluded apps (password managers, etc.)
+        // Skip excluded apps (password managers, screenshot overlays, etc.)
         let app_lower = app_name.to_lowercase();
-        if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
+        if is_excluded_app(&app_lower) {
             return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
         }
 
@@ -2401,61 +2427,15 @@ fn get_bool_attr(elem: &ax::UiElement, attr: &ax::Attr) -> Option<bool> {
     })
 }
 
-/// Frontmost app pid straight from the window server: owner of the first
-/// layer-0 window in CGWindowList's front-to-back z-order. Unlike
-/// NSWorkspace's `isActive`/`frontmostApplication` (KVO/notification-driven
-/// — silently stale in processes without a pumping AppKit run loop: CLI
-/// tools, plain worker threads), the window server answers fresh on every
-/// query, and pids/layers need no extra TCC permission.
-fn frontmost_pid_via_window_server() -> Option<i32> {
-    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
-    use core_foundation::base::TCFType;
-    use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
-    use core_foundation::number::{CFNumber, CFNumberRef};
-    use core_foundation::string::CFString;
-    use core_graphics::window::{
-        copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-        kCGWindowListOptionOnScreenOnly,
-    };
-
-    let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
-    let list = copy_window_info(options, kCGNullWindowID)?;
-    let count = unsafe { CFArrayGetCount(list.as_concrete_TypeRef()) };
-    for i in 0..count {
-        unsafe {
-            let dict_ref = CFArrayGetValueAtIndex(list.as_concrete_TypeRef(), i);
-            if dict_ref.is_null() {
-                continue;
-            }
-            let dict = dict_ref as CFDictionaryRef;
-            let get_i64 = |key: &str| -> Option<i64> {
-                let k = CFString::new(key);
-                let mut v = std::ptr::null();
-                if CFDictionaryGetValueIfPresent(dict, k.as_concrete_TypeRef() as *const _, &mut v)
-                    != 0
-                    && !v.is_null()
-                {
-                    CFNumber::wrap_under_get_rule(v as CFNumberRef).to_i64()
-                } else {
-                    None
-                }
-            };
-            // Layer 0 = normal app windows; menus/overlays/status items sit
-            // on higher layers and must not win "frontmost".
-            if get_i64("kCGWindowLayer") != Some(0) {
-                continue;
-            }
-            if let Some(pid) = get_i64("kCGWindowOwnerPID") {
-                return Some(pid as i32);
-            }
-        }
-    }
-    None
-}
-
 fn resolve_focused_ax_app(
     capture_app_identity: bool,
 ) -> Option<(Retained<ax::UiElement>, i32, String, Option<String>)> {
+    // The walker runs from the engine's capture pipeline, which can be live
+    // without `MacosUiRecorder::start`. Bound AX here too so `focused_app()` /
+    // `pid()` below can never inherit the ~6s system default. `Once`, so this
+    // is an atomic load after the first walk.
+    crate::platform::macos::ensure_global_ax_timeout();
+
     // The AX system-wide focusedApplication is not just *empty* for
     // Chromium/Electron apps that haven't materialized their AX tree — it
     // can go STALE, still reporting the previously focused app. A walker
@@ -2483,8 +2463,8 @@ fn resolve_focused_ax_app(
         }
         None
     });
-    let front_pid =
-        frontmost_pid_via_window_server().or_else(|| ws_active.as_ref().map(|(pid, _, _)| *pid));
+    let front_pid = crate::platform::macos::get_focused_pid_fresh()
+        .or_else(|| ws_active.as_ref().map(|(pid, _, _)| *pid));
 
     let sys = ax::UiElement::sys_wide();
     if let Ok(focused_app) = sys.focused_app() {
@@ -2803,6 +2783,46 @@ fn fill_ax_props(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apple_screenshot_ui_is_excluded_from_walks() {
+        // Both spellings reach `is_excluded_app` depending on whether the pid
+        // was resolved via proc_name or NSRunningApplication.localizedName.
+        assert!(is_excluded_app("screencaptureui"));
+        assert!(is_excluded_app("screenshot"));
+        // Case is normalized by the callers, which lowercase before matching.
+        assert!(is_excluded_app(&"Screenshot".to_lowercase()));
+    }
+
+    #[test]
+    fn excluded_apps_still_cover_credential_managers_and_self() {
+        for app in [
+            "1password",
+            "bitwarden",
+            "lastpass",
+            "dashlane",
+            "keepassxc",
+            "keychain access",
+            "screenpipe",
+            "loginwindow",
+        ] {
+            assert!(is_excluded_app(app), "{app} should stay excluded");
+        }
+    }
+
+    #[test]
+    fn ordinary_apps_are_not_excluded() {
+        for app in [
+            "safari",
+            "google chrome",
+            "slack",
+            "code",
+            "notion",
+            "figma",
+        ] {
+            assert!(!is_excluded_app(app), "{app} must still be walked");
+        }
+    }
 
     #[test]
     fn test_should_skip_role() {

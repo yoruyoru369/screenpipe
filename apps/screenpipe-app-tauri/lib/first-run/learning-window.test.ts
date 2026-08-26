@@ -21,6 +21,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningSummaryOpened,
   markLearningWriting,
   normalizeEmptyReason,
   readLearningWindow,
@@ -131,6 +132,19 @@ describe("evidence gate", () => {
             { name: "Google Chrome", frame_count: 1 },
             { name: "Claude", frame_count: 1 },
           ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("resolves one sustained app from parsed data without screenshots", () => {
+    expect(
+      hasEnoughEvidence(
+        ok({
+          total_frames: 2,
+          total_active_minutes: 2,
+          parsed_context_count: 1,
+          apps: [{ name: "Slack", frame_count: 2 }],
         }),
       ),
     ).toBe(true);
@@ -378,6 +392,28 @@ describe("window lifecycle", () => {
     expect(readLearningWindow().chatId).toBe("chat-1");
   });
 
+  it("keeps setup alive after the summary opens", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+    const opened = markLearningSummaryOpened("2026-08-19T17:00:00.000Z");
+
+    expect(opened.phase).toBe("ready");
+    expect(opened.chatId).toBe("chat-1");
+    expect(opened.summaryOpenedAt).toBe("2026-08-19T17:00:00.000Z");
+    expect(readLearningWindow().summaryOpenedAt).toBe(
+      "2026-08-19T17:00:00.000Z",
+    );
+  });
+
+  it("does not revive setup when a stale open arrives after dismissal", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+    markLearningDone();
+
+    expect(markLearningSummaryOpened().phase).toBe("done");
+    expect(readLearningWindow().summaryOpenedAt).toBeNull();
+  });
+
   it("clears in-progress state when dismissed", () => {
     beginLearningWindow();
     markLearningReady("chat-1");
@@ -390,9 +426,11 @@ describe("window lifecycle", () => {
     const stale = new Date(
       Date.now() - LEARNING_WINDOW_CEILING_MS - 1_000,
     ).toISOString();
-    beginLearningWindow(stale);
+    beginLearningWindow(stale, true);
     // A reload after the ceiling must not show an expired countdown.
-    expect(readLearningWindow().phase).toBe("empty");
+    const settled = readLearningWindow();
+    expect(settled.phase).toBe("empty");
+    expect(settled.showProgress).toBe(true);
   });
 
   it("never rehydrates captured apps, which would show stale evidence", () => {
@@ -534,7 +572,7 @@ describe("classifyEmptyReason", () => {
 describe("writing phase", () => {
   it("resumes a persisted writing phase as ready when the chat was seeded", () => {
     // The process died after seedFirstRunSummaryChat but before markReady.
-    // The summary exists, so send the user to it rather than to an empty state.
+    // The summary exists, so send the user to it rather than settling silently.
     beginLearningWindow(new Date().toISOString());
     markLearningWriting();
     const current = readLearningWindow();
@@ -565,6 +603,33 @@ describe("writing phase", () => {
   });
 });
 
+describe("progress visibility", () => {
+  it("shows progress for an immediate run by default", () => {
+    expect(beginLearningWindow().showProgress).toBe(true);
+  });
+
+  it("persists a background retry through every non-terminal phase", () => {
+    beginLearningWindow(new Date().toISOString(), false);
+    expect(readLearningWindow().showProgress).toBe(false);
+    expect(markLearningWriting().showProgress).toBe(false);
+    expect(markLearningReady("late-chat").showProgress).toBe(false);
+  });
+
+  it("fails quiet for a persisted window from before visibility was stored", () => {
+    localStorage.setItem(
+      "screenpipe.first-run.learning-window.v1",
+      JSON.stringify({
+        phase: "learning",
+        startedAt: new Date().toISOString(),
+        seededAt: null,
+        chatId: null,
+        emptyReason: null,
+      }),
+    );
+    expect(readLearningWindow().showProgress).toBe(false);
+  });
+});
+
 describe("a window that expired while nothing was mounted", () => {
   const seedExpiredLearning = () => {
     window.localStorage.setItem(
@@ -577,6 +642,7 @@ describe("a window that expired while nothing was mounted", () => {
         seededAt: null,
         chatId: null,
         emptyReason: null,
+        showProgress: true,
       }),
     );
   };
@@ -590,13 +656,14 @@ describe("a window that expired while nothing was mounted", () => {
     const state = readLearningWindow();
     expect(state.phase).toBe("empty");
     // Still `unknown` on purpose: the hook re-derives the real engine reason
-    // from the pending flag, so rehydration must not invent a user-visible
+    // from the pending flag, so rehydration must not invent a diagnostic
     // state of its own.
     expect(state.emptyReason).toBe("unknown");
     expect(state.pendingEmptyReport).toBe(true);
+    expect(state.showProgress).toBe(true);
   });
 
-  it("flags the settle rather than inventing a new user-visible reason", () => {
+  it("flags the settle rather than inventing a new diagnostic reason", () => {
     // A rehydrated window must reach the same copy a ceiling-settled one does.
     // An "expired while closed" state replaced an actionable engine reason
     // with a shrug and broke the existing first-run E2E, which asserts the
