@@ -470,9 +470,9 @@ pub use self::activity_ledger::{
     ActivityIntervalDraft, ActivityIntervalRecord, ActivityLedgerObservation, ActivityTaskDraft,
 };
 pub use self::semantic::{
-    SemanticActor, SemanticActorAlias, SemanticActorReference, SemanticAttachResult,
-    SemanticCleanupResult, SemanticContextQuery, SemanticFrameContext,
-    SemanticProjectionWriteResult,
+    SemanticActor, SemanticActorActivity, SemanticActorAlias, SemanticActorChannel,
+    SemanticActorRecentItem, SemanticActorReference, SemanticAttachResult, SemanticCleanupResult,
+    SemanticContextQuery, SemanticFrameContext, SemanticProjectionWriteResult,
 };
 pub(crate) use self::text_positions::{calculate_confidence, match_on_screen_a11y};
 pub use self::text_positions::{

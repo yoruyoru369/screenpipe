@@ -1461,4 +1461,160 @@ mod tests {
             "read-only verification must not store OCR boxes"
         );
     }
+    #[tokio::test]
+    async fn test_actor_context_route_rolls_up_activity_meetings_and_memories() {
+        let (app, db) = setup_test_app().await;
+        let timestamp = Utc::now();
+        db.insert_video_chunk("endpoint-actor-context.mp4", "actor-test-device")
+            .await
+            .unwrap();
+        let frame_id = db
+            .insert_frame(
+                "actor-test-device",
+                Some(timestamp),
+                None,
+                Some("Slack"),
+                Some("release"),
+                true,
+                Some(0),
+            )
+            .await
+            .unwrap();
+
+        let mut tree_builder = SemanticTreeBuilder::new(TreeBudget::default());
+        let source_node = tree_builder
+            .push(
+                None,
+                SemanticNodeInput {
+                    role: "AXStaticText",
+                    text: Some("actor context sentinel"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let tree = tree_builder.finish();
+        let mut item = SemanticItem::new(
+            "message-1",
+            SemanticKind::Message,
+            "slack:release:message-1",
+            IdentityQuality::Stable,
+        );
+        item.actor = Some("伊藤雅生".into());
+        item.body = Some("actor context sentinel".into());
+        item.source_nodes = vec![source_node];
+        let projection =
+            ValidatedProjection::new(vec![item], &tree, OutputBudget::default()).unwrap();
+        let manifest = ParserManifest {
+            id: "conversation-family".into(),
+            parser_version: "1.0.0".into(),
+            schema_version: 1,
+            scope: ParserScope::Family,
+            platforms: vec![Platform::Macos],
+            app_ids: vec!["com.tinyspeck.slackmacgap".into()],
+            executables: Vec::new(),
+            url_patterns: Vec::new(),
+            required_attributes: Vec::new(),
+            app_version: AppVersionRequirement::Any,
+            supported_kinds: vec![SemanticKind::Message],
+            priority: 0,
+        };
+        let app_identity = AppIdentity {
+            platform: Platform::Macos,
+            app_id: Some("com.tinyspeck.slackmacgap".into()),
+            executable: None,
+            display_name: "Slack".into(),
+            version: Some("4.44".into()),
+            browser_url: None,
+        };
+        db.store_semantic_projection(
+            frame_id,
+            &manifest,
+            &app_identity,
+            1,
+            StdDuration::from_micros(500),
+            &projection,
+        )
+        .await
+        .unwrap();
+
+        // A CJK name inside a longer memory: FTS cannot match it, the
+        // substring fallback must.
+        db.insert_memory(
+            "# 伊藤雅生 (Masaki Itoh)\n\nDiscussed the Deal-creation issue.",
+            "personal-crm",
+            None,
+            Some(r#"["person:masaki-itoh","project:aitane"]"#),
+            0.7,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_memory(
+            "unrelated note",
+            "test",
+            None,
+            Some(r#"["project:other"]"#),
+            0.9,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let actor_id = db
+            .search_semantic_actors("伊藤", 10, 0)
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/semantic/actors/{actor_id}/context?days=30&limit=5"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let ctx: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(ctx["actor"]["name"], "伊藤雅生");
+        assert_eq!(ctx["item_count"], 1);
+        assert!(ctx["last_seen"].is_string());
+        assert_eq!(ctx["channels"][0]["app_name"], "Slack");
+        assert_eq!(ctx["recent_items"][0]["excerpt"], "actor context sentinel");
+        assert_eq!(ctx["memories"].as_array().unwrap().len(), 1);
+        assert_eq!(ctx["memories"][0]["source"], "personal-crm");
+        assert_eq!(ctx["memories"][0]["headline"], "伊藤雅生 (Masaki Itoh)");
+        assert_eq!(ctx["related"]["people"][0], "masaki-itoh");
+        assert_eq!(ctx["related"]["projects"][0], "aitane");
+        assert!(ctx["meetings"].as_array().unwrap().is_empty());
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/semantic/actors/999999/context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let invalid = app
+            .oneshot(
+                Request::builder()
+                    .uri("/semantic/actors/0/context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
 }

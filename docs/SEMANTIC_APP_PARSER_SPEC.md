@@ -451,6 +451,11 @@ reconciled actor.
 Actor reconciliation uses the same local API shape as speaker correction:
 
 - `GET /semantic/actors/search?q=...` searches canonical and observed names.
+- `GET /semantic/actors/:id/context?days=90&limit=10` rolls one actor up for
+  agents: first/last capture, per-app item counts, the newest item excerpts,
+  meetings and memories that name the actor or an alias, and the tag
+  namespaces those memories share. Bounded by `days` (max 730) and `limit`
+  (max 50); excerpts are cut to 240 bytes in SQL.
 - `POST /semantic/actors/create` creates an intentionally separate identity.
 - `POST /semantic/actors/update` renames a canonical actor.
 - `POST /semantic/actors/merge` merges identities and their future aliases.

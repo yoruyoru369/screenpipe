@@ -344,6 +344,7 @@ that a user or Pipe can correct without overwriting source evidence.
 
 - `GET /semantic/actors/search?q=Alice&limit=20` — canonical and observed names
 - `GET /search?content_type=parsed&actor_id=12&limit=20` — parsed app data assigned to an actor
+- `GET /semantic/actors/12/context?days=90&limit=10` — one-call person context: `last_seen`, per-app `channels`, newest `recent_items` excerpts, `meetings` and `memories` that name them, `related` tag namespaces. Use it before free-text search for "the thing with Alice" / "which channel do I use with Alice"
 - `POST /semantic/actors/create` `{"name":"Alice Smith"}` — create a separate identity
 - `POST /semantic/actors/update` `{"id":12,"name":"Alice Smith"}` — rename
 - `POST /semantic/actors/merge` `{"actor_to_keep_id":12,"actor_to_merge_id":31}` — merge current and future aliases

@@ -48,9 +48,10 @@ pub use db::{
     ActivityActionRecord, ActivityEvidenceDraft, ActivityEvidenceRecord, ActivityIntervalDraft,
     ActivityIntervalRecord, ActivityLedgerObservation, ActivityTaskDraft, DatabaseManager,
     DeleteTimeRangeResult, ImmediateTx, NewMeetingTranscriptSegment, SemanticActor,
-    SemanticActorAlias, SemanticActorReference, SemanticAttachResult, SemanticCleanupResult,
-    SemanticContextQuery, SemanticFrameContext, SemanticProjectionWriteResult,
-    MEETING_END_REASON_AUTO_END, MEETING_END_REASON_EXPLICIT_STOP, MEETING_END_REASON_SHUTDOWN,
+    SemanticActorActivity, SemanticActorAlias, SemanticActorChannel, SemanticActorRecentItem,
+    SemanticActorReference, SemanticAttachResult, SemanticCleanupResult, SemanticContextQuery,
+    SemanticFrameContext, SemanticProjectionWriteResult, MEETING_END_REASON_AUTO_END,
+    MEETING_END_REASON_EXPLICIT_STOP, MEETING_END_REASON_SHUTDOWN,
 };
 pub use recovery::{
     probe_quarantined_generation_health, rebuild_recovered_fts5_indexes,
