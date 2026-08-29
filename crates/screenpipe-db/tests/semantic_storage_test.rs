@@ -104,11 +104,19 @@ fn discord_app() -> AppIdentity {
 }
 
 async fn insert_frame(db: &DatabaseManager, timestamp: chrono::DateTime<Utc>) -> i64 {
+    insert_frame_in(db, timestamp, "Slack").await
+}
+
+async fn insert_frame_in(
+    db: &DatabaseManager,
+    timestamp: chrono::DateTime<Utc>,
+    app_name: &str,
+) -> i64 {
     db.insert_snapshot_frame(
         "test-device",
         timestamp,
         "/tmp/semantic-frame.jpg",
-        Some("Slack"),
+        Some(app_name),
         Some("release"),
         None,
         true,
@@ -454,7 +462,7 @@ async fn semantic_actors_are_heuristic_correctable_and_durable() {
     assert_eq!(merged.id, alice_id);
     assert_eq!(merged.item_count, 2);
 
-    let discord_frame = insert_frame(&db, now - ChronoDuration::minutes(1)).await;
+    let discord_frame = insert_frame_in(&db, now - ChronoDuration::minutes(1), "Discord").await;
     db.store_semantic_projection(
         discord_frame,
         &manifest(),
@@ -740,4 +748,107 @@ async fn batched_attach_without_work_takes_no_write_transaction() {
         .expect("empty attach succeeds");
     assert_eq!(result.frames_attached, 0);
     assert!(result.missing_run_ids.is_empty());
+}
+
+#[tokio::test]
+async fn actor_activity_rolls_up_channels_and_recent_items() {
+    let db = database().await;
+    let now = Utc::now();
+    let old_frame = insert_frame(&db, now - ChronoDuration::days(200)).await;
+    let slack_frame = insert_frame(&db, now - ChronoDuration::minutes(5)).await;
+    let discord_frame = insert_frame_in(&db, now - ChronoDuration::minutes(1), "Discord").await;
+
+    db.store_semantic_projection(
+        old_frame,
+        &manifest(),
+        &app(),
+        201,
+        Duration::from_micros(100),
+        &projection_with_actor("ancient message", "alice", "slack:channel:old"),
+    )
+    .await
+    .expect("store old observation");
+    db.store_semantic_projection(
+        slack_frame,
+        &manifest(),
+        &app(),
+        202,
+        Duration::from_micros(100),
+        &projection_with_actor("slack message", "alice", "slack:channel:release"),
+    )
+    .await
+    .expect("store slack observation");
+    db.store_semantic_projection(
+        discord_frame,
+        &manifest(),
+        &discord_app(),
+        203,
+        Duration::from_micros(100),
+        &projection_with_actor("discord message", "alice", "discord:channel:release"),
+    )
+    .await
+    .expect("store discord observation");
+
+    // Heuristic assignment scopes provisional actors per app/conversation, so
+    // the same person starts as several actors; reconcile them the way the
+    // UI does before asking for a roll-up.
+    let mut actors = db
+        .search_semantic_actors("alice", 10, 0)
+        .await
+        .expect("search actor");
+    let alice = actors.remove(0);
+    for duplicate in actors {
+        db.merge_semantic_actors(alice.id, duplicate.id)
+            .await
+            .expect("merge duplicate actor");
+    }
+
+    let all = db
+        .get_semantic_actor_activity(alice.id, None, 10)
+        .await
+        .expect("unbounded activity");
+    assert_eq!(
+        all.item_count, 3,
+        "three distinct message items across all time"
+    );
+    assert_eq!(all.recent_items.len(), 3);
+    assert_eq!(
+        all.recent_items[0].excerpt.as_deref(),
+        Some("discord message")
+    );
+    assert_eq!(
+        all.recent_items[2].excerpt.as_deref(),
+        Some("ancient message")
+    );
+    assert!(all.first_seen.unwrap() < all.last_seen.clone().unwrap());
+
+    let recent = db
+        .get_semantic_actor_activity(alice.id, Some(now - ChronoDuration::days(90)), 1)
+        .await
+        .expect("windowed activity");
+    assert_eq!(
+        recent.item_count, 2,
+        "the 200-day-old item is outside the window"
+    );
+    assert_eq!(recent.recent_items.len(), 1, "limit is honored");
+    assert_eq!(recent.recent_items[0].kind, "message");
+    let mut channels: Vec<(String, i64)> = recent
+        .channels
+        .iter()
+        .map(|c| (c.app_name.clone(), c.item_count))
+        .collect();
+    channels.sort();
+    assert_eq!(
+        channels,
+        vec![("Discord".to_string(), 1), ("Slack".to_string(), 1)],
+        "per-app counts exclude the out-of-window slack item"
+    );
+
+    let nobody = db
+        .get_semantic_actor_activity(alice.id + 1000, None, 10)
+        .await
+        .expect("unknown actor is empty, not an error");
+    assert_eq!(nobody.item_count, 0);
+    assert!(nobody.last_seen.is_none());
+    assert!(nobody.channels.is_empty());
 }

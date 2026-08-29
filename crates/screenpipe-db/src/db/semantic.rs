@@ -99,6 +99,39 @@ pub struct SemanticActor {
     pub aliases: Vec<SemanticActorAlias>,
 }
 
+/// Per-app contact footprint for one actor: how many parsed items mention
+/// them inside that app and when the last one was captured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, OaSchema)]
+pub struct SemanticActorChannel {
+    pub app_name: String,
+    pub item_count: i64,
+    pub last_seen: String,
+}
+
+/// A bounded excerpt of one parsed item attributed to an actor. `excerpt`
+/// is capped at the SQL level so large bodies never leave the database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, OaSchema)]
+pub struct SemanticActorRecentItem {
+    pub item_id: i64,
+    pub kind: String,
+    pub title: Option<String>,
+    pub excerpt: Option<String>,
+    pub occurred_at: Option<String>,
+    pub captured_at: String,
+    pub app_name: String,
+    pub window_name: String,
+}
+
+/// Aggregated activity for one actor over an optional time window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, OaSchema)]
+pub struct SemanticActorActivity {
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+    pub item_count: i64,
+    pub channels: Vec<SemanticActorChannel>,
+    pub recent_items: Vec<SemanticActorRecentItem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticActorReference {
     pub item_id: i64,
@@ -170,6 +203,32 @@ struct StoredItemRow {
     actor_id: Option<i64>,
     resolved_actor_name: Option<String>,
     actor_assignment_source: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct SemanticActorChannelRow {
+    app_name: String,
+    item_count: i64,
+    last_seen: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct SemanticActorRecentItemRow {
+    item_id: i64,
+    kind: String,
+    title: Option<String>,
+    excerpt: Option<String>,
+    occurred_at: Option<String>,
+    captured_at: DateTime<Utc>,
+    app_name: String,
+    window_name: String,
+}
+
+#[derive(Debug, FromRow)]
+struct SemanticActorBoundsRow {
+    first_seen: Option<DateTime<Utc>>,
+    last_seen: Option<DateTime<Utc>>,
+    item_count: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -648,6 +707,94 @@ impl DatabaseManager {
             .await?
             .pop()
             .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    /// Bounded activity roll-up for one actor: first/last capture, per-app
+    /// counts, and the newest `limit` item excerpts. Walks
+    /// `semantic_item_actors → semantic_run_items → semantic_runs → frames`,
+    /// the only path that ties an actor to a time and an app. Three small
+    /// indexed queries; `limit` is clamped to 1..=50 and excerpts are cut to
+    /// 240 bytes in SQL so this stays cheap on a large history.
+    pub async fn get_semantic_actor_activity(
+        &self,
+        actor_id: i64,
+        since: Option<DateTime<Utc>>,
+        limit: u32,
+    ) -> Result<SemanticActorActivity, sqlx::Error> {
+        const JOIN: &str = " FROM frames f \
+             JOIN semantic_runs sr ON sr.id = f.semantic_run_id \
+             JOIN semantic_run_items sri ON sri.run_id = sr.id \
+             JOIN semantic_item_actors sia ON sia.item_id = sri.item_id \
+             JOIN semantic_items si ON si.id = sri.item_id \
+             WHERE sr.status = 'handled' AND sia.actor_id = ";
+        let push_scope = |sql: &mut QueryBuilder<Sqlite>| {
+            sql.push(JOIN).push_bind(actor_id).push(" ");
+            if let Some(since) = since {
+                sql.push("AND f.timestamp >= ").push_bind(since).push(" ");
+            }
+        };
+
+        let mut bounds = QueryBuilder::<Sqlite>::new(
+            "SELECT MIN(f.timestamp) AS first_seen, MAX(f.timestamp) AS last_seen, \
+             COUNT(DISTINCT si.id) AS item_count",
+        );
+        push_scope(&mut bounds);
+        let bounds = bounds
+            .build_query_as::<SemanticActorBoundsRow>()
+            .fetch_one(&self.pool)
+            .await?;
+
+        let mut channels = QueryBuilder::<Sqlite>::new(
+            "SELECT f.app_name, COUNT(DISTINCT si.id) AS item_count, \
+             MAX(f.timestamp) AS last_seen",
+        );
+        push_scope(&mut channels);
+        channels.push("GROUP BY f.app_name ORDER BY item_count DESC, last_seen DESC LIMIT 20");
+        let channels = channels
+            .build_query_as::<SemanticActorChannelRow>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut recent = QueryBuilder::<Sqlite>::new(
+            "SELECT si.id AS item_id, si.kind, si.title, \
+             substr(si.body, 1, 240) AS excerpt, si.occurred_at, \
+             MAX(f.timestamp) AS captured_at, f.app_name, f.window_name",
+        );
+        push_scope(&mut recent);
+        recent
+            .push("GROUP BY si.id ORDER BY captured_at DESC LIMIT ")
+            .push_bind(i64::from(limit.clamp(1, 50)));
+        let recent = recent
+            .build_query_as::<SemanticActorRecentItemRow>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(SemanticActorActivity {
+            first_seen: bounds.first_seen.map(|t| t.to_rfc3339()),
+            last_seen: bounds.last_seen.map(|t| t.to_rfc3339()),
+            item_count: bounds.item_count,
+            channels: channels
+                .into_iter()
+                .map(|row| SemanticActorChannel {
+                    app_name: row.app_name,
+                    item_count: row.item_count,
+                    last_seen: row.last_seen.to_rfc3339(),
+                })
+                .collect(),
+            recent_items: recent
+                .into_iter()
+                .map(|row| SemanticActorRecentItem {
+                    item_id: row.item_id,
+                    kind: row.kind,
+                    title: row.title,
+                    excerpt: row.excerpt.filter(|text| !text.is_empty()),
+                    occurred_at: row.occurred_at,
+                    captured_at: row.captured_at.to_rfc3339(),
+                    app_name: row.app_name,
+                    window_name: row.window_name,
+                })
+                .collect(),
+        })
     }
 
     /// Create a user- or Pipe-owned canonical actor. Duplicate names remain

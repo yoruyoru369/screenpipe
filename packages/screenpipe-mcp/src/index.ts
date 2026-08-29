@@ -34,6 +34,7 @@ import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
 import { PKG_VERSION } from "./version";
 import { formatForElementPurpose } from "./element-format";
 import { buildActivitySummaryResult } from "./activity-summary-tool";
+import { buildResolvePersonResult } from "./resolve-person-tool";
 import {
   localContextDayStarts,
   normalizeTime,
@@ -442,6 +443,25 @@ const TOOLS: Tool[] = [
           type: "integer",
           description: "Truncate each result's text via middle-truncation. Use 200-500 to keep responses compact.",
         },
+      },
+    },
+  },
+  {
+    name: "resolve-person",
+    description:
+      "Resolve a person by name (as they appear on screen: 'Alice', '伊藤', 'itoh') to one identity and return bounded " +
+      "context: when and in which apps they were last seen, recent parsed message/document excerpts attributed to them, " +
+      "meetings and memories that name them, and the project/people tags those memories share. Use this FIRST for " +
+      "'the thing with <person>' / 'when did I last talk to <person>' / 'which channel do I use with <person>' before " +
+      "any free-text search. If several people match, it lists candidates — re-run with actor_id.",
+    annotations: { title: "Resolve Person", readOnlyHint: true, openWorldHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Person name or substring as shown on screen. Native or romanized spelling both work." },
+        actor_id: { type: "integer", description: "Semantic actor id from a previous candidate list; skips the name search." },
+        days: { type: "integer", description: "Activity window in days (default 90, max 730)", default: 90 },
+        limit: { type: "integer", description: "Max recent item excerpts (default 10, max 50)", default: 10 },
       },
     },
   },
@@ -1646,6 +1666,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         return { content: contentItems };
+      }
+
+      case "resolve-person": {
+        const result = await buildResolvePersonResult(args as Record<string, unknown>, callAPI);
+        return { content: [{ type: "text", text: result.text }] };
       }
 
       case "list-meetings": {

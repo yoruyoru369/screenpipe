@@ -62,8 +62,9 @@ use crate::{
         retranscribe::retranscribe_meeting_handler,
         search::{keyword_search_handler, search},
         semantic::{
-            create_semantic_actor, merge_semantic_actors, reassign_semantic_actor,
-            reassign_semantic_actor_alias, search_semantic_actors, update_semantic_actor,
+            create_semantic_actor, get_semantic_actor_context, merge_semantic_actors,
+            reassign_semantic_actor, reassign_semantic_actor_alias, search_semantic_actors,
+            update_semantic_actor,
         },
         speakers::{
             delete_speaker_handler, get_similar_speakers_handler, get_speaker_sample_handler,
@@ -893,6 +894,7 @@ impl SCServer {
         let server = Server::axum()
             .get("/search", search)
             .get("/semantic/actors/search", search_semantic_actors)
+            .get("/semantic/actors/:id/context", get_semantic_actor_context)
             .post("/semantic/actors/create", create_semantic_actor)
             .post("/semantic/actors/update", update_semantic_actor)
             .post("/semantic/actors/merge", merge_semantic_actors)
