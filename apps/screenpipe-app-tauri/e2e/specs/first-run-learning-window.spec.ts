@@ -18,13 +18,13 @@
 // What this proves that unit tests cannot:
 //   1. The banner mounts on Home — the surface setup now routes to — and its
 //      countdown is live rather than a frozen first render.
-//   2. A foreground empty result settles durably into useful setup choices.
-//      The real engine reason remains in state/telemetry without making the
-//      internal evidence threshold the user's problem.
+//   2. A foreground empty result settles durably with the real engine reason
+//      preserved. Connection setup already happened inside onboarding and is
+//      never gated on this result.
 //   3. A late retry runs in the background and surfaces only if a summary is
 //      ready. Reopening hours later must not look like onboarding restarted.
-//   4. Foreground terminal choices survive reload until the user dismisses
-//      them; background terminal states stay silent.
+//   4. Foreground empty choices survive reload until the user dismisses them;
+//      a ready result retires after opening or after an app restart.
 //
 // The summary text and the seed-once rules are pure functions covered in
 // lib/first-run/learning-window.test.ts. This spec drives the state machine
@@ -50,7 +50,6 @@ const seedFlags = E2E_SEED_FLAGS.split(",")
 const canRun = seedFlags.includes("onboarding");
 
 const LEARNING_STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
-const SEARCH_SHORTCUT_STORAGE_KEY = "screenpipe.first-run.search-shortcut.v1";
 // The app's own E2E account hook (components/app-entitlement-gate.tsx), compiled
 // in only for e2e builds. Brain sits behind the account gate, and no seed flag
 // creates a signed-in user, so without this the section never renders.
@@ -118,34 +117,6 @@ const storedLearningState = async (): Promise<Record<string, unknown> | null> =>
       return null;
     }
   }, LEARNING_STORAGE_KEY)) as Record<string, unknown> | null;
-
-const emitTauri = async (event: string, payload: unknown): Promise<void> => {
-  await browser.executeAsync(
-    (name: string, value: unknown, done: (result?: unknown) => void) => {
-      const runtime = globalThis as unknown as {
-        __TAURI__?: {
-          event?: {
-            emit: (eventName: string, body: unknown) => Promise<unknown>;
-          };
-        };
-        __TAURI_INTERNALS__?: {
-          invoke: (command: string, args: object) => Promise<unknown>;
-        };
-      };
-      const emit = runtime.__TAURI__?.event?.emit;
-      const promise = emit
-        ? emit(name, value)
-        : runtime.__TAURI_INTERNALS__?.invoke("plugin:event|emit", {
-            event: name,
-            payload: value,
-          });
-      if (!promise) return done();
-      void promise.then(() => done()).catch(() => done());
-    },
-    event,
-    payload,
-  );
-};
 
 /**
  * Seed window state and land on Home.
@@ -309,11 +280,11 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(await bannerCount()).toBe(0);
   });
 
-  it("ends an empty foreground result on useful setup choices", async () => {
+  it("ends an empty foreground result without repeating onboarding setup", async () => {
     // Ceiling already elapsed, so the window must settle on this mount. With
     // recording off the engine answers that it is not recording, and that
-    // exact reason remains available for diagnosis while onboarding still
-    // reaches the daily-summary setup instead of disappearing.
+    // exact reason remains available for diagnosis without reviving connection
+    // setup after onboarding has already finished.
     await openHomeWith(
       learningState({
         startedAt: new Date(Date.now() - 10 * 60 * 1_000).toISOString(),
@@ -345,18 +316,15 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(bodyText).toContain("screenpipe is ready");
     expect(
       await browser.execute(
-        () =>
-          !!document.querySelector(
-            '[data-testid="first-run-next-step-daily-email"]',
-          ),
+        () => !!document.querySelector('[data-testid="first-run-next-steps"]'),
       ),
-    ).toBe(true);
+    ).toBe(false);
 
     const filepath = await saveScreenshot("first-run-empty-ready");
     expect(existsSync(filepath)).toBe(true);
   });
 
-  it("keeps the setup choices across reload until the user dismisses them", async () => {
+  it("keeps the empty result across reload until the user dismisses it", async () => {
     await showWindow({ Home: { page: null } });
     await browser.switchToWindow("home");
     await browser.execute(() => {
@@ -371,16 +339,13 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     await done.click();
     await browser.waitUntil(async () => (await bannerCount()) === 0, {
       timeout: t(10_000),
-      timeoutMsg: "setup choices survived explicit dismissal",
+      timeoutMsg: "empty result survived explicit dismissal",
     });
     expect((await storedLearningState())?.phase).toBe("done");
   });
 
-  it("opens the summary without inventing a user turn or losing setup", async () => {
+  it("opens the summary without inventing a user turn or covering Home", async () => {
     writeSummaryConversation();
-    await browser.execute((key: string) => {
-      window.localStorage.removeItem(key);
-    }, SEARCH_SHORTCUT_STORAGE_KEY);
     await openHomeWith(
       learningState({
         phase: "ready",
@@ -406,29 +371,15 @@ const learningState = (over: Record<string, unknown> = {}) => ({
         const text = (await browser.execute(
           () => document.body.textContent ?? "",
         )) as string;
-        return Boolean(state?.summaryOpenedAt) && text.includes(SUMMARY_TEXT);
+        return state?.phase === "done" && text.includes(SUMMARY_TEXT);
       },
       {
         timeout: t(20_000),
-        timeoutMsg: "summary chat never opened with persistent setup",
+        timeoutMsg: "summary chat did not open and retire the ready card",
       },
     );
 
-    expect(await bannerCount()).toBe(1);
-    expect(await bannerPhase()).toBe("ready");
-    expect(
-      await browser.execute(
-        () => !!document.querySelector('[data-testid="first-run-setup-dock"]'),
-      ),
-    ).toBe(true);
-    expect(
-      await browser.execute(
-        () =>
-          !!document.querySelector(
-            '[data-testid="first-run-search-shortcut-practice"]',
-          ),
-      ),
-    ).toBe(true);
+    expect(await bannerCount()).toBe(0);
 
     const bodyText = (await browser.execute(
       () => document.body.textContent ?? "",
@@ -440,98 +391,14 @@ const learningState = (over: Record<string, unknown> = {}) => ({
 
     const composerAvailable = (await browser.execute(() => {
       const composer = document.querySelector<HTMLTextAreaElement>(
-        'textarea[placeholder^="Ask about your screen"]',
+        '[data-firstrun-target="composer"] textarea',
       );
       return Boolean(composer && !composer.disabled);
     })) as boolean;
     expect(composerAvailable).toBe(true);
 
-    const teachScreenshot = await saveScreenshot(
-      "first-run-summary-shortcut-teach",
-    );
-    expect(existsSync(teachScreenshot)).toBe(true);
-
-    await (
-      await browser.$('[data-testid="first-run-search-shortcut-start"]')
-    ).click();
-    await browser.waitUntil(
-      async () =>
-        Boolean(
-          await browser.execute(
-            () =>
-              !!document.querySelector(
-                '[data-testid="first-run-search-shortcut-waiting"]',
-              ),
-          ),
-        ),
-      {
-        timeout: t(10_000),
-        timeoutMsg: "shortcut lesson never entered its practice state",
-      },
-    );
-    const waitingScreenshot = await saveScreenshot(
-      "first-run-summary-shortcut-waiting",
-    );
-    expect(existsSync(waitingScreenshot)).toBe(true);
-
-    await emitTauri("shortcut-show-search", { success: true });
-    await browser.waitUntil(
-      async () =>
-        Boolean(
-          await browser.execute(
-            () =>
-              !!document.querySelector(
-                '[data-testid="first-run-search-shortcut-complete"]',
-              ),
-          ),
-        ),
-      {
-        timeout: t(10_000),
-        timeoutMsg: "native shortcut event did not complete the lesson",
-      },
-    );
-    const completionScreenshot = await saveScreenshot(
-      "first-run-summary-shortcut-complete",
-    );
-    expect(existsSync(completionScreenshot)).toBe(true);
-    expect(
-      await browser.execute((key: string) => {
-        const raw = window.localStorage.getItem(key);
-        return raw ? JSON.parse(raw) : null;
-      }, SEARCH_SHORTCUT_STORAGE_KEY),
-    ).toMatchObject({ status: "completed", acknowledged: false });
-
-    const done = await browser.$(
-      '[data-testid="first-run-search-shortcut-done"]',
-    );
-    await done.click();
-    expect(
-      await browser.execute((key: string) => {
-        const raw = window.localStorage.getItem(key);
-        return raw ? JSON.parse(raw) : null;
-      }, SEARCH_SHORTCUT_STORAGE_KEY),
-    ).toMatchObject({ status: "completed", acknowledged: true });
-
-    const toggle = await browser.$('[data-testid="first-run-toggle-setup"]');
-    await toggle.click();
-    await browser.waitUntil(
-      async () =>
-        Boolean(
-          await browser.execute(
-            () =>
-              !!document.querySelector('[data-testid="first-run-next-steps"]'),
-          ),
-        ),
-      {
-        timeout: t(10_000),
-        timeoutMsg: "setup dock did not expand over the summary chat",
-      },
-    );
-
-    const expandedScreenshot = await saveScreenshot(
-      "first-run-summary-with-setup-open",
-    );
-    expect(existsSync(expandedScreenshot)).toBe(true);
+    const openedScreenshot = await saveScreenshot("first-run-summary-open");
+    expect(existsSync(openedScreenshot)).toBe(true);
   });
 
   // Regression guard for the bug this spec originally missed: the window used

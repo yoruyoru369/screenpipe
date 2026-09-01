@@ -84,6 +84,30 @@ describe("provider error copy", () => {
     expect(msg).toContain("ollama pull llama3.2");
   });
 
+  it("maps native Ollama tool-capability errors to actionable, non-retryable copy", () => {
+    const raw =
+      'Error: 400: {"message":"registry.ollama.ai/library/qwen2.5vl:3b does not support tools","type":"invalid_request_error","param":null,"code":null,"detail":"untrusted upstream suffix"}';
+
+    const presentation = buildProviderErrorPresentation(raw, {
+      provider: "native-ollama",
+      model: "qwen2.5vl:3b",
+    });
+
+    expect(presentation).toEqual({
+      kind: "provider",
+      message:
+        'Ollama model "qwen2.5vl:3b" does not support tools. Switch your AI preset to an Ollama model that supports tools.',
+      retryable: false,
+    });
+    expect(presentation?.message).not.toContain("untrusted upstream suffix");
+    expect(
+      buildProviderErrorPresentation(raw, {
+        provider: "custom",
+        model: "qwen2.5vl:3b",
+      }),
+    ).toBeNull();
+  });
+
   it("maps screenpipe cloud connection errors to a transient-outage message", () => {
     const msg = buildProviderErrorMessage("Connection error.", {
       provider: "screenpipe-cloud",
@@ -120,6 +144,18 @@ describe("provider error copy", () => {
         buildProviderErrorMessage(raw, { provider: "screenpipe-cloud", model: "auto" })
       ).toContain("screenpipe cloud");
     }
+  });
+
+  it("maps an expired TLS certificate to retryable cloud connectivity copy", () => {
+    const presentation = buildProviderErrorPresentation(
+      "Error: certificate has expired",
+      { provider: "screenpipe-cloud", model: "auto" },
+    );
+
+    expect(presentation).toMatchObject({ kind: "provider", retryable: true });
+    expect(presentation?.message).toContain("screenpipe cloud");
+    expect(presentation?.message.toLowerCase()).toContain("try again");
+    expect(presentation?.message).not.toContain("certificate has expired");
   });
 
   it("maps the daily free-chat wall to tomorrow-or-BYOK copy", () => {
@@ -181,6 +217,23 @@ describe("provider error copy", () => {
     expect(msg).toContain("Custom URL");
     expect(msg).toContain("/v1");
     expect(msg).toContain("Test Connection");
+  });
+
+  it("maps the opaque custom-provider 400 to safe preset guidance", () => {
+    expect(
+      buildProviderErrorMessage("400 status code (no body)", {
+        provider: "custom",
+        model: "gemini-2.5-flash",
+      }),
+    ).toBe(
+      "The custom AI provider rejected the request. Verify the endpoint, model, and API key in Settings → AI.",
+    );
+    expect(
+      buildProviderErrorMessage("400 status code (no body)", {
+        provider: "screenpipe-cloud",
+        model: "auto",
+      }),
+    ).toBeNull();
   });
 
   it("maps the ChatGPT missing-account-id error to reconnect guidance", () => {

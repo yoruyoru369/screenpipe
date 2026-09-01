@@ -20,8 +20,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::async_runtime::JoinHandle;
-#[cfg(target_os = "macos")]
-use tauri::menu::IconMenuItemBuilder;
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::Emitter;
 use tauri::{
@@ -45,6 +43,7 @@ pub use crate::process_exit::QUIT_REQUESTED;
 #[derive(Clone)]
 struct TrayMenuData {
     onboarding_completed: bool,
+    trial_activation_locked: bool,
     show_shortcut: String,
     search_shortcut: String,
     chat_shortcut: String,
@@ -61,11 +60,13 @@ struct TrayMenuData {
 /// Gather all data needed by `create_dynamic_menu` on the current (non-main)
 /// thread so the main-thread closure does zero I/O.
 fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
-    let onboarding_completed = OnboardingStore::get(app)
+    let onboarding = OnboardingStore::get(app)
         .ok()
         .flatten()
-        .map(|o| o.is_completed)
-        .unwrap_or(false);
+        .unwrap_or_default();
+    let onboarding_completed = onboarding.is_completed;
+    let trial_activation_locked =
+        !crate::should_skip_onboarding() && onboarding.blocks_trial_activation_app();
 
     let (default_show, default_search, default_chat) = if cfg!(target_os = "windows") {
         ("Alt+S", "Alt+K", "Alt+L")
@@ -139,6 +140,7 @@ fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
 
     TrayMenuData {
         onboarding_completed,
+        trial_activation_locked,
         show_shortcut,
         search_shortcut,
         chat_shortcut,
@@ -213,8 +215,8 @@ fn plan_includes_business(plan: Option<&str>) -> bool {
 static UPDATE_MENU_ITEM: Lazy<Mutex<Option<MenuItem<Wry>>>> = Lazy::new(|| Mutex::new(None));
 
 /// The active HD stop item is updated in place for countdown changes. Rebuilding
-/// the entire native menu every five seconds retained macOS preview image backing
-/// stores and caused multi-gigabyte heap growth during long meetings.
+/// the entire native menu every five seconds is wasteful and previously caused
+/// multi-gigabyte heap growth during long meetings.
 static HD_STOP_MENU_ITEM: Lazy<Mutex<Option<MenuItem<Wry>>>> = Lazy::new(|| Mutex::new(None));
 
 // Track last known state to avoid unnecessary updates
@@ -290,6 +292,133 @@ fn format_remaining(d: std::time::Duration) -> String {
 
 fn send_notify(title: impl Into<String>, body: impl Into<String>) {
     crate::notifications::client::send(title, body);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TrayRecordingAction {
+    Start,
+    Stop,
+}
+
+impl TrayRecordingAction {
+    fn optimistic_status(self) -> RecordingStatus {
+        match self {
+            Self::Start => RecordingStatus::Starting,
+            Self::Stop => RecordingStatus::Paused,
+        }
+    }
+
+    fn event_payload(self) -> &'static str {
+        match self {
+            Self::Start => "started",
+            Self::Stop => "paused",
+        }
+    }
+
+    fn failure_copy(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Start => ("recording could not resume", "resume"),
+            Self::Stop => ("recording could not pause", "pause"),
+        }
+    }
+}
+
+fn clear_optimistic_status() {
+    let mut status = OPTIMISTIC_STATUS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *status = None;
+}
+
+async fn run_tray_recording_action(
+    app: &AppHandle,
+    action: TrayRecordingAction,
+) -> Result<(), String> {
+    info!(?action, "handling recording action from native tray");
+    let state = app.state::<RecordingState>();
+    match action {
+        TrayRecordingAction::Start => crate::recording::start_capture(state, app.clone()).await?,
+        TrayRecordingAction::Stop => crate::recording::stop_capture(state, app.clone()).await?,
+    }
+
+    // This event is UI-only. The native action above is authoritative so tray
+    // controls continue working when every webview is closed or still loading.
+    let _ = app.emit("tray-recording-state-changed", action.event_payload());
+    Ok(())
+}
+
+fn rebuild_tray_after_recording_action(app: &AppHandle) {
+    let app_for_rebuild = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(error) = force_tray_rebuild(&app_for_rebuild) {
+            error!("tray rebuild failed: {}", error);
+        }
+    });
+}
+
+fn dispatch_tray_recording_action(
+    app: AppHandle,
+    action: TrayRecordingAction,
+    success_notification: Option<(&'static str, &'static str)>,
+) {
+    set_optimistic_status(action.optimistic_status());
+    rebuild_tray_after_recording_action(&app);
+
+    tauri::async_runtime::spawn(async move {
+        let result = run_tray_recording_action(&app, action).await;
+        clear_optimistic_status();
+
+        match result {
+            Ok(()) => {
+                if let Some((title, body)) = success_notification {
+                    send_notify(title, body);
+                }
+            }
+            Err(error) => {
+                let (title, verb) = action.failure_copy();
+                tracing::error!(?action, %error, "native tray recording action failed");
+                send_notify(
+                    title,
+                    format!("screenpipe could not {verb} capture: {error}"),
+                );
+            }
+        }
+
+        rebuild_tray_after_recording_action(&app);
+    });
+}
+
+fn next_tray_recording_action(capture_session_running: bool) -> TrayRecordingAction {
+    if capture_session_running {
+        TrayRecordingAction::Stop
+    } else {
+        TrayRecordingAction::Start
+    }
+}
+
+async fn tray_recording_action(app: &AppHandle) -> TrayRecordingAction {
+    let state = app.state::<RecordingState>();
+    let capture_session_running = state.capture.lock().await.is_some();
+    next_tray_recording_action(capture_session_running)
+}
+
+fn toggle_recording_from_tray(app: &AppHandle) {
+    cancel_pause_timer();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let action = tray_recording_action(&app).await;
+        dispatch_tray_recording_action(app, action, None);
+    });
+}
+
+#[cfg(feature = "e2e")]
+pub(crate) async fn toggle_recording_from_harness(app: AppHandle) -> Result<(), String> {
+    cancel_pause_timer();
+    let action = tray_recording_action(&app).await;
+    set_optimistic_status(action.optimistic_status());
+    let result = run_tray_recording_action(&app, action).await;
+    clear_optimistic_status();
+    result
 }
 
 /// Immediately rebuild the tray menu (called from main thread after optimistic status set).
@@ -648,9 +777,7 @@ fn apply_pending_tray_menu(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
-/// Snapshot current recording/HD/device state into a `MenuState`. Shared by
-/// the periodic refresh loop and the macOS preview-driven rebuild so change
-/// detection can't drift between the two.
+/// Snapshot current recording/HD/device state for the periodic refresh loop.
 fn snapshot_menu_state(data: &TrayMenuData, effective_status: RecordingStatus) -> MenuState {
     let recording_info = get_recording_info();
     let hd = get_high_fps_status();
@@ -721,14 +848,6 @@ fn update_hd_stop_menu_item() {
             debug!("failed to update HD tray countdown in place: {}", e);
         }
     }
-}
-
-/// Rebuild the tray menu after a monitor preview image arrives (macOS only).
-#[cfg(target_os = "macos")]
-pub(crate) fn queue_tray_menu_refresh_for_preview(app: &AppHandle) {
-    let data = prefetch_tray_menu_data(app);
-    let state = snapshot_menu_state(&data, get_effective_recording_status());
-    queue_pending_tray_menu(state, data);
 }
 
 /// Installs the queued tray menu while no menu is open — the only flash-free,
@@ -853,9 +972,6 @@ pub fn setup_tray(app: &AppHandle, update_item: Option<&tauri::menu::MenuItem<Wr
 
         #[cfg(target_os = "macos")]
         tray_menu_level::install();
-
-        #[cfg(target_os = "macos")]
-        crate::tray_monitor_preview::install(app);
 
         // Setup click handlers
         setup_tray_click_handlers(&main_tray)?;
@@ -1045,9 +1161,9 @@ fn create_dynamic_menu(
 ) -> Result<tauri::menu::Menu<Wry>> {
     let mut menu_builder = MenuBuilder::new(app);
 
-    // During onboarding: show only version and quit. Setup cannot be bypassed
-    // from the tray.
-    if !data.onboarding_completed && !data.app_ui_hidden {
+    // During setup or summary-first activation, expose only the safe return
+    // path, Settings, version, and Quit. Product entry points stay unavailable.
+    if (!data.onboarding_completed || data.trial_activation_locked) && !data.app_ui_hidden {
         menu_builder = menu_builder
             .item(
                 &MenuItemBuilder::with_id(
@@ -1061,7 +1177,14 @@ fn create_dynamic_menu(
                 .enabled(false)
                 .build(app)?,
             )
-            .item(&PredefinedMenuItem::separator(app)?)
+            .item(&PredefinedMenuItem::separator(app)?);
+        if data.trial_activation_locked {
+            menu_builder = menu_builder
+                .item(&MenuItemBuilder::with_id("open_app", "Open first summary").build(app)?)
+                .item(&MenuItemBuilder::with_id("settings", "Settings...").build(app)?)
+                .item(&PredefinedMenuItem::separator(app)?);
+        }
+        menu_builder = menu_builder
             .item(&MenuItemBuilder::with_id("quit", "Quit screenpipe").build(app)?);
 
         return menu_builder.build().map_err(Into::into);
@@ -1140,12 +1263,6 @@ fn create_dynamic_menu(
             .filter(|d| d.kind == DeviceKind::Monitor)
             .collect();
         monitors.sort_by(|a, b| a.name.cmp(&b.name));
-        #[cfg(target_os = "macos")]
-        {
-            crate::tray_monitor_preview::clear_registrations();
-            let monitor_ids: Vec<u32> = monitors.iter().filter_map(|d| d.monitor_id).collect();
-            crate::tray_monitor_preview::sync_refresh_monitors(&monitor_ids);
-        }
         for device in monitors {
             let label = format!("  ▣ {}", device.name);
             if let Some(monitor_id) = device.monitor_id {
@@ -1155,39 +1272,13 @@ fn create_dynamic_menu(
                     .map(|d| !d.user_disabled)
                     .unwrap_or(device.active);
 
-                #[cfg(target_os = "macos")]
-                {
-                    crate::tray_monitor_preview::register_monitor_submenu(monitor_id, is_active);
-                    crate::tray_monitor_preview::register_preview_item(monitor_id);
-
-                    let preview =
-                        crate::tray_monitor_preview::preview_image_or_placeholder(monitor_id);
-                    let preview_row =
-                        IconMenuItemBuilder::with_id(format!("monitor_preview_{monitor_id}"), " ")
-                            .enabled(false)
-                            .icon(preview)
-                            .build(app)?;
-
-                    let submenu = SubmenuBuilder::with_id(
-                        app,
-                        format!("toggle_vision_device_{monitor_id}"),
-                        label,
-                    )
-                    .item(&preview_row)
-                    .build()?;
-                    menu_builder = menu_builder.item(&submenu);
-                }
-
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let toggle = CheckMenuItemBuilder::with_id(
-                        format!("toggle_vision_device_{}", monitor_id),
-                        label,
-                    )
-                    .checked(is_active)
-                    .build(app)?;
-                    menu_builder = menu_builder.item(&toggle);
-                }
+                let toggle = CheckMenuItemBuilder::with_id(
+                    format!("toggle_vision_device_{}", monitor_id),
+                    label,
+                )
+                .checked(is_active)
+                .build(app)?;
+                menu_builder = menu_builder.item(&toggle);
             } else {
                 let dot = if device.active { "●" } else { "○" };
                 let fallback_label = format!("  {} ▣ {}", dot, device.name);
@@ -1582,28 +1673,11 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             });
         }
         "start_recording" | "stop_recording" | "toggle_recording" => {
-            // Manual toggle cancels any pending auto-resume — otherwise a user
-            // who paused for 30 min and then resumed early would get re-paused
-            // when the original timer fires.
-            cancel_pause_timer();
-            let status = get_effective_recording_status();
-            let is_recording = status == RecordingStatus::Recording;
-            let (optimistic, event) = if is_recording {
-                (RecordingStatus::Paused, "shortcut-stop-recording")
-            } else {
-                (RecordingStatus::Starting, "shortcut-start-recording")
-            };
-            set_optimistic_status(optimistic);
-            let app = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = app.emit(event, ());
-            });
-            let app2 = app_handle.clone();
-            let _ = app_handle.run_on_main_thread(move || {
-                if let Err(e) = force_tray_rebuild(&app2) {
-                    error!("tray rebuild failed: {}", e);
-                }
-            });
+            // Native tray controls must not depend on a mounted webview. The
+            // disk-pressure stop leaves the server and tray alive even when
+            // Home failed to load, which is exactly when an emitted frontend
+            // shortcut event has no listener and silently loses the click.
+            toggle_recording_from_tray(app_handle);
         }
         id if id.starts_with("pause_") => {
             let mins: u64 = id
@@ -1613,19 +1687,18 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             let total = std::time::Duration::from_secs(mins * 60);
             // Cancel any in-flight pause timer before scheduling a new one.
             cancel_pause_timer();
-            // Pause now (same path as the manual toggle).
-            set_optimistic_status(RecordingStatus::Paused);
-            let app_for_stop = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = app_for_stop.emit("shortcut-stop-recording", ());
-            });
+            // Pause now through the same native path as the manual toggle.
+            dispatch_tray_recording_action(app_handle.clone(), TrayRecordingAction::Stop, None);
             // Schedule auto-resume — also fires a notification so the user knows
             // recording is back on without having to open the menu.
             let app_for_resume = app_handle.clone();
             let handle = tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(total).await;
-                let _ = app_for_resume.emit("shortcut-start-recording", ());
-                send_notify("Recording resumed", "screenpipe is recording again.");
+                dispatch_tray_recording_action(
+                    app_for_resume,
+                    TrayRecordingAction::Start,
+                    Some(("Recording resumed", "screenpipe is recording again.")),
+                );
             });
             *PAUSE_TIMER.lock().unwrap_or_else(|e| e.into_inner()) = Some(PauseTimer {
                 handle,
@@ -2169,6 +2242,22 @@ fn to_accelerator(shortcut: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_capture_session_toggles_to_start() {
+        assert!(matches!(
+            next_tray_recording_action(false),
+            TrayRecordingAction::Start
+        ));
+    }
+
+    #[test]
+    fn running_capture_session_toggles_to_stop() {
+        assert!(matches!(
+            next_tray_recording_action(true),
+            TrayRecordingAction::Stop
+        ));
+    }
 
     #[test]
     fn recording_status_text_distinguishes_meetings_only_audio_states() {

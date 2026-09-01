@@ -293,6 +293,14 @@ export interface ChatHistoryStore {
 
 // Extend SettingsStore with fields added before Rust types are regenerated
 export type Settings = SettingsStore & {
+	/** Enable account data sync for this device. Default false. */
+	dataSyncEnabled?: boolean;
+	/** Friendly name used to partition this device's synced data. */
+	dataSyncDeviceName?: string;
+	/** Start boundary for this device's current explicit opt-in. */
+	dataSyncEnabledAt?: string;
+	/** Account that explicitly enabled Data Sync on this device. */
+	dataSyncAccountId?: string;
 	/** Enable automatic Activities generation. Default false. */
 	activitiesEnabled?: boolean;
 	/** Native Activity generation cadence in minutes. Default 15. */
@@ -318,7 +326,6 @@ export type Settings = SettingsStore & {
 	remoteControlPolicy?: DesktopRemotePolicySnapshot;
 	updateChannel?: UpdateChannel;
 	chatHistory?: ChatHistoryStore;
-	ignoredUrls?: string[];
 	/**
 	 * Entries the capture-category switches created, so turning a category off
 	 * removes only those and never a rule the user wrote by hand.
@@ -451,11 +458,6 @@ export type Settings = SettingsStore & {
 	 *  Meetings ships hidden, which is what puts its compact icon in the
 	 *  top-left chrome strip instead. See `lib/utils/sidebar-nav-layout`. */
 	sidebarNavLayout?: SidebarNavLayout;
-	/** Rollout gate for right-click + drag sidebar customization. Owned by the
-	 *  typed PostHog registry (`sidebar-customization-control`); a persisted
-	 *  layout is still honored when the gate is off, so turning the flag off
-	 *  removes the editing affordances without resetting anyone's sidebar. */
-	enableSidebarCustomization?: boolean;
 	/** Show the chat suggestion chips above the input — the "follow up"
 	 *  questions and the connection-aware suggested prompts. The single inline
 	 *  X on the chips flips this to false; re-enable from Settings → Display.
@@ -665,10 +667,6 @@ export function makeDefaultPresets(isPro: boolean): AIPreset[] {
 	];
 }
 
-// Seed value — module load can't know pro status yet, so fall back to non-pro.
-// ensureDefaultPreset() re-seeds with pro status once settings.user is loaded.
-const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
-
 const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
 
 // "Paid" = any active app entitlement (Basic / Business / Enterprise / Lifetime)
@@ -709,6 +707,7 @@ const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 };
 
 let DEFAULT_SETTINGS: Settings = {
+			dataSyncEnabled: false,
 			activitiesEnabled: false,
 			activitiesIntervalMinutes: 15,
 			aiPresets: makeDefaultPresets(false) as any,
@@ -745,6 +744,7 @@ let DEFAULT_SETTINGS: Settings = {
 			],
 			includedWindows: [],
 			ignoredUrls: [],
+			includedUrls: [],
 			ignoredMeetingApps: [],
 			teamFilters: { ignoredWindows: [], includedWindows: [], ignoredUrls: [] },
 
@@ -822,7 +822,6 @@ let DEFAULT_SETTINGS: Settings = {
 			meetingSummaryPipeSlug: "meeting-summary",
 			filterMusic: true,
 			prioritizeInputLatency: false,
-			enableSidebarCustomization: false,
 			allowHidingShortcutOverlay: false,
 			showShortcutOverlay: true,
 			shortcutOverlaySnoozedUntil: null,
@@ -889,14 +888,29 @@ export function normalizeSettingsArrays(settings: Settings): boolean {
 		aiPresets: makeDefaultPresets(settings.user?.cloud_subscribed === true),
 	};
 	let changed = false;
+	const presets = settings.aiPresets;
+	if (!Array.isArray(presets) || presets.length === 0) {
+		settings.aiPresets = [defaults.aiPresets[0]] as any;
+		changed = true;
+	}
 
 	for (const [key, fallback] of Object.entries(defaults)) {
+		if (key === "aiPresets") continue;
 		if (!Array.isArray(fallback) || Array.isArray(settings[key])) continue;
 		settings[key] = [...fallback];
 		changed = true;
 	}
 
 	return changed;
+}
+
+export function assertValidAiPresetUpdate(value: Partial<Settings>): void {
+	if (
+		"aiPresets" in value &&
+		(!Array.isArray(value.aiPresets) || value.aiPresets.length === 0)
+	) {
+		throw new Error("At least one AI preset is required");
+	}
 }
 
 // Store singleton
@@ -1201,13 +1215,6 @@ function createSettingsStore() {
 		// installs default to "meetings-only" (via createDefaultSettingsObject, which
 		// get() returns directly when there are no stored settings).
 
-		// Migration: Add default presets if user has none
-		if (!Array.isArray(settings.aiPresets) || settings.aiPresets.length === 0) {
-			const isPro = settings.user?.cloud_subscribed === true;
-			settings.aiPresets = makeDefaultPresets(isPro) as any;
-			needsUpdate = true;
-		}
-
 		// b2 seed: the first time we see a logged-in user, replace the anonymous
 		// "screenpipe" placeholder with the pro pair (chat + pipes) IF they're pro.
 		// Anonymous users keep the placeholder forever (which is correct — non-pro
@@ -1240,18 +1247,6 @@ function createSettingsStore() {
 			settings.aiPresets = settings.aiPresets.map((p: any) =>
 				p.id === "pi-agent" ? { ...p, id: "screenpipe-cloud" } : p
 			);
-			needsUpdate = true;
-		}
-
-		// Migration: Add screenpipe-cloud preset for existing users (without touching their existing presets)
-		const hasCloudPreset = settings.aiPresets?.some(
-			(p: any) => p.id === "screenpipe-cloud" || p.provider === "screenpipe-cloud"
-		);
-		if (settings.aiPresets && settings.aiPresets.length > 0 && !hasCloudPreset) {
-			// Only set as default if no other preset is already default
-			const hasDefault = settings.aiPresets.some((p: any) => p.defaultPreset);
-			const cloudPreset = { ...DEFAULT_CLOUD_PRESET, defaultPreset: !hasDefault };
-			settings.aiPresets = [cloudPreset as any, ...settings.aiPresets];
 			needsUpdate = true;
 		}
 
@@ -1426,6 +1421,7 @@ function createSettingsStore() {
 
 	const set = (value: Partial<Settings>) =>
 		enqueueSettingsStoreWrite(async () => {
+			assertValidAiPresetUpdate(value);
 			const store = await getStore();
 			const current = await get();
 			const managedValues = await activeManagedValues(current);
@@ -1573,6 +1569,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	// Install global fetch interceptor to catch 401s from screenpipe.com
 	const settingsRef = useRef(settings);
 	settingsRef.current = settings;
+	const settingsUpdateGenerationRef = useRef(0);
 
 	// Monotonic auth generation, bumped on every explicit sign-out. A
 	// loadUser() call snapshots this at entry; if a sign-out bumps it while the
@@ -1787,6 +1784,16 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	}, [settings.fontSize]);
 
 	const updateSettings = async (updates: Partial<Settings>) => {
+		assertValidAiPresetUpdate(updates);
+		const updateGeneration = ++settingsUpdateGenerationRef.current;
+		const settingsBeforeUpdate = settingsRef.current;
+
+		// Controlled switches and checkboxes must reflect the click immediately.
+		// Waiting for the asynchronous store listener makes React render the old
+		// value again, so the first click appears to undo itself. Persistence stays
+		// authoritative: a failed latest write is rolled back below.
+		setSettings((current) => ({ ...current, ...updates }) as Settings);
+
 		// Every settings mutation funnels through here, which makes this the one
 		// place that can answer "which controls do people actually change" without
 		// wiring ~40 call sites. The payload is redacted to booleans and numbers
@@ -1810,7 +1817,20 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 			// session. Fire-and-forget; the listener above bumps each window's ref.
 			emit("screenpipe-auth-signout").catch(() => {});
 		}
-		await settingsStore.set(updates);
+		try {
+			await settingsStore.set(updates);
+		} catch (error) {
+			// Do not let an older failed write overwrite a newer optimistic click.
+			// The queued newer write (and its store event) owns reconciliation.
+			if (settingsUpdateGenerationRef.current === updateGeneration) {
+				try {
+					setSettings(await settingsStore.get());
+				} catch {
+					setSettings(settingsBeforeUpdate);
+				}
+			}
+			throw error;
+		}
 		// Settings will be updated via the listener
 		if (clearsAccount) {
 			// Account changes must not alter the user's local retention policy.

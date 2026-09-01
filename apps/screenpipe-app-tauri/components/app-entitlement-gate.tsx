@@ -23,6 +23,7 @@ import {
   hasAppEntitlement,
   hasConsumerAppSubscription,
   isDevBillingBypassEnabled,
+  isDevLoginSkipEnabled,
   isDevLoginEnabled,
   isTokenHydrationCandidate,
   isTokenHydrationPending,
@@ -44,6 +45,11 @@ const E2E_ACCOUNT_USER_EVENT = "screenpipe-e2e-seed-account-user";
 const E2E_ACCOUNT_SEED_ENABLED =
   process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true";
 const POLICY_CLOCK_CHECK_INTERVAL_MS = 60_000;
+
+export type StartupAuthenticationStatus =
+  | "authenticated"
+  | "logged_out"
+  | "not_required";
 
 function getDownloadPlatform(): string | null {
   try {
@@ -101,8 +107,10 @@ function EntitlementShell({
 
 export function AppEntitlementGate({
   children,
+  authenticationStatus = "authenticated",
 }: {
   children: React.ReactNode;
+  authenticationStatus?: StartupAuthenticationStatus;
 }) {
   const { settings, updateSettings, loadUser, isSettingsLoaded } =
     useSettings();
@@ -142,6 +150,7 @@ export function AppEntitlementGate({
   const [, setPaidPolicyExpiryTick] = useState(0);
   const user = settings.user as AppUser | null | undefined;
   const devBypass = isDevBillingBypassEnabled();
+  const devLoginSkip = isDevLoginSkipEnabled();
   // Compute the wake-up first. If the boundary passes during this render, the
   // later classifiers either gate immediately or this deadline still rerenders
   // them; computing it last could observe "expired" after they observed paid.
@@ -237,20 +246,29 @@ export function AppEntitlementGate({
   const shouldGateForEnterpriseLogin =
     isManagedDeployment && authenticationState === "account";
   const shouldGateForConsumerLogin =
-    !devBypass && !isManagedDeployment && !user?.token && !tokenPending;
+    !devBypass &&
+    !devLoginSkip &&
+    !isManagedDeployment &&
+    !user?.token &&
+    !tokenPending;
   const shouldGateForUnknownConsumerPolicy =
     !devBypass &&
+    !devLoginSkip &&
     !isManagedDeployment &&
     Boolean(user) &&
     localPlanPolicy === "unknown";
   const shouldGateForEnterpriseApp =
     !devBypass &&
+    !devLoginSkip &&
     !isManagedDeployment &&
     Boolean(user?.token) &&
-    !hasConsumerSubscription &&
-    enterpriseAccount?.requires_enterprise_app === true;
+    enterpriseAccount?.requires_enterprise_app === true &&
+    (!hasConsumerSubscription ||
+      enterpriseAccount.restrict_consumer_build_access === true);
   const shouldGateForEntitlement = shouldGateForUnknownConsumerPolicy;
-  const shouldGate = isOnboardingRoute
+  const shouldGate = authenticationStatus === "not_required"
+    ? false
+    : isOnboardingRoute
     ? false
     : !isManagedDeploymentResolved
       ? true
@@ -307,8 +325,7 @@ export function AppEntitlementGate({
       // Must follow the same precedence as the render branches below (and as
       // `gate_path`). Checking unknown-policy before enterprise-app reported
       // "plan_verification_required" for users who were actually looking at the
-      // "enterprise app required" screen — both flags are true at once, since an
-      // unknown plan is what clears hasConsumerAppSubscription in the first place.
+      // "enterprise app required" screen — both flags can be true at once.
       reason: shouldGateForEnterpriseLogin
         ? "enterprise_login_required"
         : shouldGateForEnterpriseApp
@@ -335,6 +352,7 @@ export function AppEntitlementGate({
     shouldGateForUnknownConsumerPolicy,
     shouldGateForEnterpriseApp,
     isManagedDeployment,
+    authenticationStatus,
     enterpriseAuthenticationPending,
     tokenPending,
     user?.app_entitled,

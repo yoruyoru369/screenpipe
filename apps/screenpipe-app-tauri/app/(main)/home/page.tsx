@@ -48,10 +48,14 @@ import {
   isSidebarNavLayoutDefault,
   type SidebarNavId,
 } from "@/lib/utils/sidebar-nav-layout";
-import { SidebarNavList } from "@/components/sidebar-nav-list";
+import {
+  SidebarCustomizationMenu,
+  SidebarNavList,
+} from "@/components/sidebar-nav-list";
 import { CommandPalette } from "@/components/command-palette";
 import { useToast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
+import { Button } from "@/components/ui/button";
 import { AppSidebar, useSidebarContext } from "@/components/app-sidebar";
 import { UpdateBanner } from "@/components/update-banner";
 import { usePlatform } from "@/lib/hooks/use-platform";
@@ -120,8 +124,19 @@ import {
   inAppShortcutLabel,
   matchesInAppShortcut,
 } from "@/lib/shortcuts";
+import { useFirstRunLearningWindow } from "@/components/first-run/learning-window-provider";
+import {
+  TrialActivationSummaryExperience,
+  TrialActivationUnlockPrompt,
+} from "@/components/first-run/learning-banner";
+import { blocksTrialActivationApp } from "@/lib/first-run/trial-activation";
 
 type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
+const TRIAL_ACTIVATION_ALLOWED_SECTIONS = new Set<MainSection>([
+  "home",
+  "timeline",
+  "connections",
+]);
 type ConnectionFocusRequest = {
   id: string | null;
   category: string | null;
@@ -146,6 +161,13 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 
 function HomeContent() {
   const router = useRouter();
+  const {
+    learning: firstRunLearning,
+    openTrialActivationPaywall,
+  } = useFirstRunLearningWindow();
+  const trialActivationLocked = blocksTrialActivationApp(
+    firstRunLearning.activationState,
+  );
   const { isMac } = usePlatform();
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const [shortcutGuideOpen, setShortcutGuideOpen] = useState(false);
@@ -188,6 +210,20 @@ function HomeContent() {
     }
   }, [activeSection, activityReturnVisible]);
   const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
+
+  useEffect(() => {
+    if (!trialActivationLocked) return;
+    if (!TRIAL_ACTIVATION_ALLOWED_SECTIONS.has(activeSection as MainSection)) {
+      setActiveSection("home", { history: "replace" });
+    }
+    const blockShortcut = (event: KeyboardEvent) => {
+      if (!event.metaKey && !event.ctrlKey && !event.altKey) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    window.addEventListener("keydown", blockShortcut, true);
+    return () => window.removeEventListener("keydown", blockShortcut, true);
+  }, [activeSection, setActiveSection, trialActivationLocked]);
 
   const { settings, updateSettings, isSettingsLoaded } = useSettings();
   const { toast } = useToast();
@@ -725,6 +761,10 @@ function HomeContent() {
     void refreshRecordingDevices();
   });
 
+  useTauriEvent("tray-recording-state-changed", () => {
+    void refreshRecordingDevices();
+  });
+
   const pauseRecording = useCallback(async () => {
     await emit("shortcut-stop-recording", {});
     window.setTimeout(() => {
@@ -1004,10 +1044,21 @@ function HomeContent() {
         // The native window replaces the React timeline where it can run; the
         // webview one stays as the fallback for hosts without it.
         return (
-          <NativeTimeline
-            fallback={<Timeline embedded />}
-            showActivityReturn={activityReturnVisible}
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="min-h-0 flex-1">
+              <NativeTimeline
+                fallback={<Timeline embedded />}
+                showActivityReturn={activityReturnVisible}
+              />
+            </div>
+            {trialActivationLocked &&
+              firstRunLearning.activationState === "paywall" && (
+                <TrialActivationUnlockPrompt
+                  onStartTrial={openTrialActivationPaywall}
+                  inline
+                />
+              )}
+          </div>
         );
       case "activity":
         return (
@@ -1095,7 +1146,6 @@ function HomeContent() {
   const meetingsInToolbar =
     !meetingsInSidebar && availableSidebarIds.includes("meetings");
 
-  const sidebarCustomizable = Boolean(settings.enableSidebarCustomization);
   const persistSidebarLayout = (next: ReturnType<typeof normalizeSidebarNavLayout>) => {
     void updateSettings({ sidebarNavLayout: next });
   };
@@ -1112,8 +1162,8 @@ function HomeContent() {
       title: `${label} hidden`,
       description:
         id === "meetings"
-          ? "still one click away from the icon next to search."
-          : "find it under Hidden at the bottom of the sidebar.",
+          ? "still one click away from the icon in the top bar."
+          : "use sidebar options in the top bar to bring it back.",
       action: (
         <ToastAction
           altText={`Show ${label} in the sidebar again`}
@@ -1129,6 +1179,9 @@ function HomeContent() {
     id,
     label: SIDEBAR_SECTION_DEFS[id].label,
     icon: SIDEBAR_SECTION_DEFS[id].icon,
+    disabled:
+      trialActivationLocked &&
+      !TRIAL_ACTIVATION_ALLOWED_SECTIONS.has(id as MainSection),
     trailing:
       id === "pipes" && runningPipeCount > 0 ? (
         <PipeActivityIndicator
@@ -1178,6 +1231,42 @@ function HomeContent() {
     activeSection === "history" ||
     activeSection === "brain";
 
+  const trialActivationContent = (() => {
+    if (!trialActivationLocked || activeSection !== "home") return null;
+    if (firstRunLearning.phase === "ready" && firstRunLearning.summaryOpenedAt) {
+      const summaryLocked = firstRunLearning.activationState === "paywall";
+      return (
+        <div
+          className="relative h-full min-h-0 flex-1 bg-background"
+          data-testid="trial-activation-summary-chat"
+        >
+          <div
+            className={cn(
+              "h-full",
+              summaryLocked && "pointer-events-none select-none",
+            )}
+            aria-hidden={summaryLocked || undefined}
+            inert={summaryLocked || undefined}
+          >
+            <StandaloneChat
+              className="h-full"
+              hideInlineHistory
+              chatShortcutsEnabled={false}
+              sidebarCollapsed
+              firstRunLearningEnabled
+            />
+          </div>
+          {summaryLocked && (
+            <TrialActivationUnlockPrompt
+              onStartTrial={openTrialActivationPaywall}
+            />
+          )}
+        </div>
+      );
+    }
+    return <TrialActivationSummaryExperience />;
+  })();
+
   // The outer flex row (sidebar shell + content column) lives in the shared
   // (main)/layout.tsx so the sidebar width survives navigation to /settings.
   // This page contributes overlays, the floating top-left strip, the sidebar
@@ -1188,9 +1277,6 @@ function HomeContent() {
         open={shortcutGuideOpen}
         onOpenChange={setShortcutGuideOpen}
       />
-      {/* Drag region — always absolute so it works with full-bleed translucent layout */}
-      <div className="absolute top-0 left-0 right-0 h-8 z-10" data-tauri-drag-region />
-
       {/* ⌘K command palette — a second door to actions the sidebar, toolbar,
           and global shortcuts already own. Each row prints its shortcut, so
           palette use teaches the direct key. Home window only: the settings
@@ -1257,8 +1343,8 @@ function HomeContent() {
               No wordmark, no header row (Claude / Codex style). When
               the sidebar is collapsed it is hidden entirely and the
               strip floats over the content, reduced to toggle + status
-              dot. The h-8 drag region already keeps the top band free
-              of interactive content, so nothing collides. Fixed
+              dot. The persistent main shell owns dragging in blank parts of
+              this top band and excludes these controls. Fixed
               positioning anchors the strip to the viewport so it isn't
               clipped by AppSidebar's overflow. The notification bell
               lives in the Pipes view header (pipe-store.tsx) since
@@ -1300,7 +1386,7 @@ function HomeContent() {
               </TooltipContent>
             </Tooltip>
 
-            {!sidebarCollapsed && experimentalFeaturesEnabled && (
+            {!trialActivationLocked && !sidebarCollapsed && experimentalFeaturesEnabled && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -1331,6 +1417,28 @@ function HomeContent() {
               </Tooltip>
             )}
 
+            {!trialActivationLocked && !sidebarCollapsed && (
+              <SidebarCustomizationMenu
+                hiddenItems={hiddenSidebarIds.map((id) => ({
+                  id,
+                  label: SIDEBAR_SECTION_DEFS[id].label,
+                }))}
+                isTranslucent={isTranslucent}
+                canReset={!isSidebarNavLayoutDefault(sidebarLayout)}
+                onSetHidden={(id, hidden) => {
+                  persistSidebarLayout(
+                    setSidebarNavItemHidden(
+                      sidebarLayout,
+                      availableSidebarIds,
+                      id,
+                      hidden,
+                    ),
+                  );
+                }}
+                onReset={() => persistSidebarLayout(DEFAULT_SIDEBAR_NAV_LAYOUT)}
+              />
+            )}
+
             {!sidebarCollapsed && meetingsInToolbar && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1338,10 +1446,12 @@ function HomeContent() {
                     onClick={() => setActiveSection("meetings")}
                     aria-label={meetingState.active ? "meetings — recording" : "meetings"}
                     aria-current={activeSection === "meetings" ? "page" : undefined}
+                    disabled={trialActivationLocked}
                     data-testid="nav-meetings"
                     data-announcement-anchor="top-meetings"
                     className={cn(
                       "relative p-1 rounded-md transition-colors",
+                      trialActivationLocked && "cursor-not-allowed",
                       activeSection === "meetings"
                         ? isTranslucent
                           ? "vibrant-nav-active"
@@ -1395,23 +1505,24 @@ function HomeContent() {
                 conversation lists. */}
             <div className="pt-2 pr-2 pb-2 flex-1 flex flex-col min-h-0">
               {/* Main sections. Order and visibility are the user's — drag a
-                  row or right-click it (behind the sidebar-customization
-                  rollout gate); enterprise policy still decides eligibility. */}
+                  row or right-click it; enterprise policy still decides
+                  eligibility. */}
               <SidebarNavList
                 items={mainSections}
-                hiddenItems={hiddenSidebarIds.map((id) => ({
-                  id,
-                  label: SIDEBAR_SECTION_DEFS[id].label,
-                }))}
                 activeId={activeSection}
                 isTranslucent={isTranslucent}
-                customizable={sidebarCustomizable}
                 canReset={!isSidebarNavLayoutDefault(sidebarLayout)}
                 onSelect={(id) => {
+                  if (
+                    trialActivationLocked &&
+                    !TRIAL_ACTIVATION_ALLOWED_SECTIONS.has(id as MainSection)
+                  ) {
+                    return;
+                  }
                   setActiveSection(id);
                   // The "home" slot is the New Chat affordance — clicking it
                   // (from any view) always spawns a new chat session.
-                  if (id === "home") startNewChat();
+                  if (id === "home" && !trialActivationLocked) startNewChat();
                 }}
                 onMove={(id, toIndex) =>
                   persistSidebarLayout(
@@ -1449,19 +1560,34 @@ function HomeContent() {
                   isTranslucent ? "vibrant-sidebar-border" : "border-border/50"
                 )}
               >
-                <ChatSidebar onViewAll={() => setActiveSection("history")} />
+                <ChatSidebar
+                  allowedConversationId={
+                    trialActivationLocked ? firstRunLearning.chatId : undefined
+                  }
+                  onViewAll={
+                    trialActivationLocked
+                      ? undefined
+                      : () => setActiveSection("history")
+                  }
+                />
               </div>
 
-              <PlanExpirationNotice
-                user={settings.user as AppUser | null}
-                onClick={() => openSettings("account")}
-              />
+              <div
+                className={cn(trialActivationLocked && "pointer-events-none")}
+                aria-disabled={trialActivationLocked || undefined}
+                inert={trialActivationLocked || undefined}
+              >
+                <PlanExpirationNotice
+                  user={settings.user as AppUser | null}
+                  onClick={() => openSettings("account")}
+                />
 
-              <UpdateBanner variant="sidebar" className="mb-2" />
+                <UpdateBanner variant="sidebar" className="mb-2" />
 
-              {/* Remote surveys use this quiet, non-blocking slot when their
-                  signed payload selects surface=sidebar. */}
-              <div id="announcement-sidebar-slot" />
+                {/* Remote surveys use this quiet, non-blocking slot when their
+                    signed payload selects surface=sidebar. */}
+                <div id="announcement-sidebar-slot" />
+              </div>
 
               {/* Bottom items */}
               <div className={cn("flex items-center gap-1 border-t pt-2", isTranslucent ? "vibrant-sidebar-border" : "border-border")}>
@@ -1497,11 +1623,13 @@ function HomeContent() {
                           data-testid="nav-help"
                           data-announcement-anchor="sidebar-help"
                           aria-label="Help"
+                          disabled={trialActivationLocked}
                           onClick={() => {
                             setActiveSection("help");
                           }}
                           className={cn(
                             "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-all duration-150",
+                            trialActivationLocked && "cursor-not-allowed",
                             isActive
                               ? isTranslucent
                                 ? "vibrant-nav-active"
@@ -1547,20 +1675,22 @@ function HomeContent() {
                 of the chat panel, so background sessions keep pulsing in the
                 sidebar even on non-chat views — though the sidebar itself is
                 only visible when the user navigates back to the chat. */}
-            <div
-              className={cn(
-                "flex-1 min-h-0 overflow-hidden",
-                activeSection !== "home" && "hidden"
-              )}
-            >
-              <StandaloneChat
-                className="h-full"
-                hideInlineHistory
-                chatShortcutsEnabled={activeSection === "home"}
-                sidebarCollapsed={sidebarCollapsed}
-                firstRunLearningEnabled
-              />
-            </div>
+            {trialActivationContent ?? (
+              <div
+                className={cn(
+                  "flex-1 min-h-0 overflow-hidden",
+                  activeSection !== "home" && "hidden"
+                )}
+              >
+                <StandaloneChat
+                  className="h-full"
+                  hideInlineHistory
+                  chatShortcutsEnabled={activeSection === "home"}
+                  sidebarCollapsed={sidebarCollapsed}
+                  firstRunLearningEnabled
+                />
+              </div>
+            )}
 
             {/* Non-chat sections render on top when active. */}
             {activeSection !== "home" && (

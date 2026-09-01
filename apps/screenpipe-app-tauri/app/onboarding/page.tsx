@@ -5,6 +5,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/use-toast";
 import OnboardingLogin from "@/components/onboarding/login-gate";
 import AcquisitionStep from "@/components/onboarding/acquisition-step";
@@ -12,6 +13,8 @@ import PermissionsStep from "@/components/onboarding/permissions-step";
 import TimelineChoice from "@/components/onboarding/timeline-choice";
 import EngineStartup from "@/components/onboarding/engine-startup";
 import PlanSelectionStep from "@/components/onboarding/plan-selection-step";
+import { useFeatureFlagVariantKey } from "posthog-js/react";
+import FinalSetupStep from "@/components/onboarding/final-setup-step";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -20,11 +23,25 @@ import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
 import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import type { AppUser } from "@/lib/app-entitlement";
+import {
+  isTrialActivationEligible,
+  TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+  TRIAL_ACTIVATION_DEV_FORCE,
+  TRIAL_ACTIVATION_PAYWALL_STEP,
+  TRIAL_ACTIVATION_SUMMARY_STEP,
+  TRIAL_ACTIVATION_TREATMENT,
+  TRIAL_ACTIVATION_UNLOCKED_STEP,
+} from "@/lib/first-run/trial-activation";
 import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigation";
-import { requiresOnboardingCheckout } from "@/lib/onboarding-checkout";
 
 type SlideKey =
-  "login" | "acquisition" | "permissions" | "timeline" | "engine" | "plan";
+  | "login"
+  | "acquisition"
+  | "permissions"
+  | "timeline"
+  | "engine"
+  | "plan"
+  | "recommended-setup";
 
 // One size for the whole flow. Per-slide sizes made the window jump on every
 // step, worst on "plan", which widened to 760 even though the content column is
@@ -38,6 +55,36 @@ type SlideKey =
 // Must match the inner_size the Rust side creates the window at, in
 // window/show.rs, so opening onboarding doesn't resize on first paint.
 const ONBOARDING_WINDOW_SIZE = { width: 500, height: 680 };
+const FINAL_STEP_RETRY_DELAY_MS = 300;
+
+const persistOnboardingStepWithRetry = async (step: string) => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await commands.setOnboardingStep(step);
+      if (result?.status === "error") throw new Error(result.error);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, FINAL_STEP_RETRY_DELAY_MS),
+        );
+      }
+    }
+  }
+  throw lastError;
+};
+
+function TrialActivationFlagAssignment({
+  onVariant,
+}: {
+  onVariant: (variant: string | boolean | undefined) => void;
+}) {
+  const variant = useFeatureFlagVariantKey(TRIAL_ACTIVATION_EXPERIMENT_FLAG);
+  useEffect(() => onVariant(variant), [onVariant, variant]);
+  return null;
+}
 
 // When shown, the timeline choice sits before "engine" so disableTimeline is
 // persisted before the engine spawns and reads it — no restart needed.
@@ -48,6 +95,7 @@ const SLIDE_ORDER: SlideKey[] = [
   "timeline",
   "engine",
   "plan",
+  "recommended-setup",
 ];
 
 // endowed progress: the bar first renders on permissions with login already
@@ -117,6 +165,7 @@ const applyOnboardingWindowSize = async () => {
 };
 
 export default function OnboardingPage() {
+  const router = useRouter();
   const { toast } = useToast();
   const [checkoutReturnStatus] = useState(() =>
     typeof window === "undefined"
@@ -173,10 +222,23 @@ export default function OnboardingPage() {
     settings.deviceTier === "high"
       ? settings.deviceTier
       : "unknown";
-  const needsOnboardingCheckout = requiresOnboardingCheckout(user);
+  const needsOnboardingCheckout = isTrialActivationEligible(
+    onboardingData.trialActivationFreshInstall === true,
+    user,
+  );
+  const [trialActivationVariant, setTrialActivationVariant] = useState<
+    string | boolean | undefined
+  >(undefined);
+  const usesSummaryFirstTrial =
+    needsOnboardingCheckout &&
+    (TRIAL_ACTIVATION_DEV_FORCE ||
+      trialActivationVariant === TRIAL_ACTIVATION_TREATMENT);
+  const wasTrialActivationEligible =
+    needsOnboardingCheckout || checkoutReturnStatus !== null;
   const shouldShowPlanSelection =
     !isManagedDeployment &&
-    (checkoutReturnStatus !== null || needsOnboardingCheckout);
+    (checkoutReturnStatus !== null ||
+      (needsOnboardingCheckout && !usesSummaryFirstTrial));
   // Only a fully resolved new consumer account enters mandatory checkout.
   // Manual grants, lifetime ownership, Enterprise membership, subscriptions,
   // and partially hydrated account responses all stay out. A later contextual
@@ -204,7 +266,10 @@ export default function OnboardingPage() {
           // worse for having been asked.
           (s !== "acquisition" || !isManagedDeployment) &&
           (s !== "timeline" || timelineChoiceVisible) &&
-          (s !== "plan" || shouldShowPlanSelection),
+          (s !== "plan" || shouldShowPlanSelection) &&
+          // Managed deployments may authenticate with only a license key, so
+          // consumer Gmail/Calendar authorization is not available there.
+          (s !== "recommended-setup" || !isManagedDeployment),
       ),
     [isManagedDeployment, shouldShowPlanSelection, timelineChoiceVisible],
   );
@@ -223,13 +288,24 @@ export default function OnboardingPage() {
       const { loadOnboardingStatus } = useOnboarding.getState();
       await loadOnboardingStatus();
       const { onboardingData } = useOnboarding.getState();
+      const returnsToTrialActivation =
+        onboardingData.currentStep === TRIAL_ACTIVATION_PAYWALL_STEP;
 
       // Hosted checkout temporarily replaces this webview's local document.
       // Its explicit complete/cancel return always resumes the plan controller,
       // even if a stale persisted step predates the outbound navigation.
       if (checkoutReturnStatus && !isManagedDeployment) {
+        if (
+          returnsToTrialActivation &&
+          checkoutReturnStatus === "cancelled"
+        ) {
+          router.replace("/home");
+          return;
+        }
         try {
-          await commands.setOnboardingStep("plan");
+          if (!returnsToTrialActivation) {
+            await commands.setOnboardingStep("plan");
+          }
         } catch {
           // non-critical: the in-memory restore below is enough for this run
         }
@@ -247,6 +323,7 @@ export default function OnboardingPage() {
           timeline: "timeline",
           engine: "engine",
           plan: "plan",
+          "recommended-setup": "recommended-setup",
           // Native Rust now connects detected AI tools in the background, and
           // the goal/dashboard slide is gone: setup no longer asks the user to
           // declare intent before anything has been observed. Saved installs
@@ -290,6 +367,7 @@ export default function OnboardingPage() {
     isManagedDeployment,
     isManagedDeploymentResolved,
     isSettingsLoaded,
+    router,
     shouldShowPlanSelection,
   ]);
 
@@ -368,6 +446,23 @@ export default function OnboardingPage() {
       card_ask_placement_active: true,
     });
 
+    if (
+      currentSlide === "plan" &&
+      checkoutReturnStatus === "complete" &&
+      onboardingData.currentStep === TRIAL_ACTIVATION_PAYWALL_STEP
+    ) {
+      posthog.capture("trial_activation_card_trial_completed", {
+        experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+        variant: TRIAL_ACTIVATION_TREATMENT,
+        origin: "desktop_summary_activation",
+      });
+      await commands.setOnboardingStep(TRIAL_ACTIVATION_UNLOCKED_STEP);
+      router.replace("/home");
+      transitioningRef.current = false;
+      setIsTransitioning(false);
+      return;
+    }
+
     // Hidden enterprise deployments only need authentication + permissions.
     // Their engine and integration screens depend on app UI that headless mode
     // has already disabled, so finish onboarding at this boundary instead.
@@ -412,17 +507,43 @@ export default function OnboardingPage() {
 
     // Walk SLIDE_ORDER (never the filtered list) so the index stays valid even
     // for a slide that policy hides, then land on the next visible slide.
-    // Consumer onboarding ends on plan selection after the engine is ready.
-    // Managed deployments skip that consumer purchase surface.
+    // Consumer onboarding ends on recommended setup after the engine is ready
+    // and, when required, checkout has completed. This step must not depend on
+    // the post-onboarding learning window: Gmail and Calendar belong in setup.
     const nextSlide = SLIDE_ORDER.slice(currentIdx + 1).find(
       (s) =>
         visibleOrder.includes(s) &&
         (s !== "plan" || canAdvanceIntoPlanSelection),
     );
     if (!nextSlide) {
-      await completeOnboarding({ method: "setup_finished" });
-      transitioningRef.current = false;
-      setIsTransitioning(false);
+      try {
+        if (wasTrialActivationEligible) {
+          posthog.capture("trial_activation_experiment_enrolled", {
+            experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+            variant:
+              typeof trialActivationVariant === "string"
+                ? trialActivationVariant
+                : "control",
+            eligible_new_install: true,
+            email: user?.email ?? null,
+            decision_metric: "mrr_per_eligible_new_install_day_12",
+          });
+        }
+        if (usesSummaryFirstTrial) {
+          await persistOnboardingStepWithRetry(
+            TRIAL_ACTIVATION_SUMMARY_STEP,
+          );
+        }
+        await completeOnboarding({ method: "setup_finished" });
+      } catch (error) {
+        console.error("failed to finish onboarding:", error);
+      } finally {
+        // A transient store/IPC failure must not permanently consume the
+        // user's click. The automatic retry above handles the common case;
+        // releasing this guard keeps a later manual click retryable too.
+        transitioningRef.current = false;
+        setIsTransitioning(false);
+      }
       return;
     }
     try {
@@ -444,9 +565,15 @@ export default function OnboardingPage() {
     currentSlide,
     deviceTierForAnalytics,
     isManagedDeployment,
+    onboardingData.currentStep,
+    router,
     timelineChoiceLocked,
     timelineChoiceVisible,
+    trialActivationVariant,
+    usesSummaryFirstTrial,
+    user?.email,
     visibleOrder,
+    wasTrialActivationEligible,
   ]);
 
   // Enterprise authentication owns the onboarding login step. Existing saved
@@ -480,6 +607,9 @@ export default function OnboardingPage() {
 
   return (
     <div className="flex flex-col w-full h-screen overflow-hidden bg-background">
+      {wasTrialActivationEligible && (
+        <TrialActivationFlagAssignment onVariant={setTrialActivationVariant} />
+      )}
       {/* Drag region */}
       <div className="w-full bg-background p-3" data-tauri-drag-region />
 
@@ -564,6 +694,12 @@ export default function OnboardingPage() {
           )}
           {currentSlide === "plan" && (
             <PlanSelectionStep handleNextSlide={handleNextSlide} />
+          )}
+          {currentSlide === "recommended-setup" && (
+            <FinalSetupStep
+              userToken={user?.token}
+              handleNextSlide={handleNextSlide}
+            />
           )}
         </div>
       </div>
