@@ -305,10 +305,20 @@ async function callActivitySummaryThroughMcp(
     });
 
     it("resumes a saved connection slide at the engine step and finishes setup", async () => {
-      // Retries must start from an incomplete store. The engine slide finishes
-      // setup on its own, and once `isCompleted` is true `show_window` correctly
-      // routes Onboarding to Home — so without this reset, attempt 2 would fail
-      // waiting for an `onboarding` handle that must never appear again.
+      // The recording gate refuses `start capture` with `account_required` for
+      // a logged-out session, and this test enters the flow AT the engine
+      // slide — past the login that a real resumed install already completed.
+      // Seed the fake cloud session the entitlement specs use (the
+      // `e2e-fake-token-` shape is only accepted by e2e builds) so the engine
+      // slide can finish setup instead of retrying the refusal forever.
+      await invokeOrThrow("set_cloud_token", {
+        token: "e2e-fake-token-onboarding-engine-resume",
+      });
+
+      // Retries must start from an incomplete store. Once `isCompleted` is
+      // true `show_window` correctly routes Onboarding to Home — so without
+      // this reset, attempt 2 would fail waiting for an `onboarding` handle
+      // that must never appear again.
       await invokeOrThrow("reset_onboarding");
       await invokeOrThrow("set_onboarding_step", { step: "connect-apps" });
 
@@ -323,55 +333,76 @@ async function callActivitySummaryThroughMcp(
       await browser.switchToWindow("onboarding");
       await waitForWindowUrl("/onboarding", undefined, t(15_000));
 
-      // Best effort: the engine slide completes setup on its own, so the window
-      // can go away while this runs. The contract below is what actually gates.
+      // Best effort: the engine slide advances on its own, so the exact slide
+      // captured here varies. The contract below is what actually gates.
       try {
         await saveScreenshot("onboarding-legacy-connect-apps-resume");
       } catch {
-        // window already closed by completion; not a failure
+        // window already closed; not a failure
       }
 
       // The contract: a saved `connect-apps` install must not get stuck on the
-      // removed slide — it resumes at the engine and finishes. Sample the body
-      // while the window is alive so we can prove the removed slides never
-      // rendered, and stop as soon as the store says setup completed.
-      //
-      // Which window each half runs in is load-bearing. `invoke` executes in
-      // whichever window is currently switched to, and the engine slide closes
-      // Onboarding the moment it finishes setup. Polling the store from the
-      // onboarding handle therefore races its own success condition: completion
-      // destroys the context the completion check runs in, and the driver fails
-      // the whole `waitUntil` with "No window could be found" instead of
-      // reporting `isCompleted: true`. So the store is read from Home, which is
-      // opened above and outlives Onboarding, and only the body sample runs
-      // against Onboarding while that handle still exists.
+      // removed slide — it resumes at the engine, and once the engine is ready
+      // the flow walks into the final-setup slide (consumer onboarding ends on
+      // recommended setup since #6735; the engine no longer completes setup by
+      // itself). Sample the body while waiting so we can prove the removed
+      // slides never rendered.
       const seen: string[] = [];
+      const sampleOnboardingBody = async (): Promise<string> => {
+        const text = (
+          (await browser.execute(
+            () => document.body?.innerText || "",
+          )) as string
+        ).toLowerCase();
+        seen.push(text);
+        return text;
+      };
+
       await browser.waitUntil(
         async () => {
-          // Driver-level, so it stays valid even with no live current window.
+          const handles = await browser.getWindowHandles();
+          if (!handles.includes("onboarding")) {
+            throw new Error(
+              "onboarding window disappeared before the final-setup slide rendered",
+            );
+          }
+          await browser.switchToWindow("onboarding");
+          await sampleOnboardingBody();
+          return await browser
+            .$('[data-testid="onboarding-final-setup"]')
+            .isExisting();
+        },
+        {
+          timeout: t(60_000),
+          interval: 250,
+          timeoutMsg:
+            "legacy connect-apps step never resumed at the engine slide and reached final setup",
+        },
+      );
+
+      // Finish setup the way a user does: the final-setup slide's continue
+      // button is the completion path now.
+      await browser
+        .$('[data-testid="onboarding-final-setup"]')
+        .$("button=continue")
+        .click();
+
+      // Which window this poll runs in is load-bearing. `invoke` executes in
+      // whichever window is currently switched to, and completing setup closes
+      // Onboarding. Polling the store from the onboarding handle therefore
+      // races its own success condition: completion destroys the context the
+      // completion check runs in, and the driver fails the whole `waitUntil`
+      // with "No window could be found" instead of reporting
+      // `isCompleted: true`. So the store is read from Home, which is opened
+      // above and outlives Onboarding.
+      await browser.waitUntil(
+        async () => {
           const handles = await browser.getWindowHandles();
           if (!handles.includes("home")) {
             throw new Error(
               "home window disappeared; it is the surviving context this poll reads the onboarding store from",
             );
           }
-
-          if (handles.includes("onboarding")) {
-            try {
-              await browser.switchToWindow("onboarding");
-              seen.push(
-                (
-                  (await browser.execute(
-                    () => document.body?.innerText || "",
-                  )) as string
-                ).toLowerCase(),
-              );
-            } catch {
-              // Window closed underneath the sample. Expected once setup
-              // completes; the status check below settles it.
-            }
-          }
-
           await browser.switchToWindow("home");
           const status = await invokeOrThrow<{ isCompleted: boolean }>(
             "get_onboarding_status",
@@ -382,9 +413,14 @@ async function callActivitySummaryThroughMcp(
           timeout: t(30_000),
           interval: 250,
           timeoutMsg:
-            "legacy connect-apps step never resumed at the engine slide and finished setup",
+            "continue on the final-setup slide never marked onboarding completed",
         },
       );
+
+      // Sign the fake session back out so trailing specs in a shared session
+      // observe the same logged-out state this spec started from. The poll
+      // above ends switched to Home, which outlives Onboarding.
+      await invokeOrThrow("set_cloud_token", { token: null });
 
       // The goal picker and the connection slide are both gone from the flow.
       expect(seen.some((text) => text.includes("what do you want first"))).toBe(
