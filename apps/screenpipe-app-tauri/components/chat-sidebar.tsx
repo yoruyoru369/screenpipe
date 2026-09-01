@@ -13,7 +13,7 @@
  *   ┌────────────────────────┐  emit chat-load-conversation  ┌───────────┐
  *   │ ChatSidebar (this file)├──────────────────────────────▶│ Standalone│
  *   │                        │                                │ Chat      │
- *   │  reads chat-store      │  emit chat-current-session     │           │
+ *   │  reads chat-store      │  sync matching panel session   │           │
  *   │  emits user actions    │◀──────────────────────────────┤ (mounts   │
  *   │                        │                                │  Pi via   │
  *   │                        │                                │  piStart) │
@@ -49,6 +49,8 @@ import {
   Timer,
   Terminal,
   MoreHorizontal,
+  GitBranch,
+  LockKeyhole,
 } from "lucide-react";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -61,9 +63,11 @@ import {
   isEmptyChatShell,
   selectDisplayedChatId,
   sessionRecordFromMeta,
+  fallbackOpenChatId,
   type SessionRecord,
 } from "@/lib/stores/chat-store";
 import {
+  CHAT_HISTORY_INITIAL_LIMIT,
   conversationMetaFromJson,
   deleteConversationFile,
   listConversations,
@@ -73,6 +77,8 @@ import {
 } from "@/lib/chat-storage";
 import { commands } from "@/lib/utils/tauri";
 import { isInjectedTitle } from "@/lib/chat-utils";
+import { createConversationBranch } from "@/lib/chat/branch-conversation";
+import { showChatArchiveUndoToast } from "@/components/chat/archive-undo-toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -138,10 +144,13 @@ import {
 import { parsePipeSessionId } from "@/lib/events/types";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import {
-  importExternalChatHistory,
-  scanExternalChatHistory,
-} from "@/lib/chat/external-chat-import";
-import type { ExternalChatSource } from "@/lib/chat/external-chat-parser";
+  startExternalChatSync,
+  type ExternalChatSyncController,
+} from "@/lib/chat/external-chat-sync";
+import type {
+  ExternalChatSource,
+  ExternalChatTurnState,
+} from "@/lib/chat/external-chat-parser";
 import {
   PIPES_SIDEBAR_COLLAPSED_EVENT,
   PIPES_SIDEBAR_COLLAPSED_KEY,
@@ -151,10 +160,13 @@ import {
   buildGroupedRecents,
   latestSidebarPipeRunTimes,
   listMoveTargetGroups,
+  mergeSidebarPipeInventory,
   recurringPipeGroupKeys,
+  SIDEBAR_AUTOMATION_PAGE_SIZE,
   sortSidebarPipeRuns,
   visibleSidebarPipeNames,
   sessionGroupKey,
+  type SidebarPipeInventoryItem,
   type SidebarItem,
   type SidebarRecentsSection,
   validateSidebarGroupName,
@@ -162,13 +174,15 @@ import {
 
 /** Max top-level rows shown in recents. Pipes use the authoritative inventory. */
 const SIDEBAR_CAP = 8;
+export const CHAT_SIDEBAR_HYDRATION_OPTIONS = {
+  limit: CHAT_HISTORY_INITIAL_LIMIT,
+  includeHidden: true,
+} as const;
 const PIPE_RUNS_PER_GROUP = 10;
-const PIPE_INVENTORY_PAGE_SIZE = 20;
 const DELETED_PIPE_EXECUTIONS_KEY = "screenpipe:deleted-pipe-executions";
 const RECENTS_SOURCE_FILTER_KEY = "screenpipe:recents-hidden-sources";
 const RECENTS_LAYOUT_KEY = "screenpipe:recents-layout";
 const RECENTS_SORT_KEY = "screenpipe:recents-sort";
-const EXTERNAL_CHAT_SYNC_INTERVAL_MS = 60_000;
 
 type RecentSource = "screenpipe" | ExternalChatSource;
 type RecentLayout = "source" | "list";
@@ -178,12 +192,56 @@ const RECENT_SOURCE_OPTIONS: Array<{ source: RecentSource; label: string }> = [
   { source: "codex", label: "Codex" },
   { source: "claude-code", label: "Claude" },
 ];
-
-let externalChatSyncPromise: Promise<void> | null = null;
-let lastExternalChatSyncAt = 0;
+const RECENT_SOURCE_ICONS: Record<RecentSource, string> = {
+  screenpipe: "/images/screenpipe.png",
+  codex: "/images/codex.svg",
+  "claude-code": "/images/claude-ai.svg",
+};
+const RECENT_SOURCE_SHORTCUTS = {
+  screenpipe: "s",
+  codex: "c",
+  "claude-code": "l",
+} as const satisfies Record<RecentSource, string>;
+const RECENTS_MENU_SHORTCUT_KEYS = ["s", "c", "l", "b", "i", "p", "u"] as const;
 
 function recentSource(session: SessionRecord): RecentSource {
   return session.importedFrom?.source ?? "screenpipe";
+}
+
+export function visibleRecentSourceOptions(): typeof RECENT_SOURCE_OPTIONS {
+  return RECENT_SOURCE_OPTIONS;
+}
+
+export function RecentsSourceFilterLabel({
+  source,
+  label,
+}: {
+  source: RecentSource;
+  label: string;
+}) {
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2">
+      <Image
+        src={RECENT_SOURCE_ICONS[source]}
+        alt=""
+        width={16}
+        height={16}
+        className="h-4 w-4 shrink-0 rounded-sm object-contain"
+        unoptimized
+      />
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+export function isMachineOnlyImportedConversation(
+  session: Pick<SessionRecord, "importedFrom" | "title" | "titleSource">,
+): boolean {
+  return Boolean(
+    session.importedFrom
+    && session.titleSource !== "user"
+    && isInjectedTitle(session.title),
+  );
 }
 
 export function filterRecentsBySource(
@@ -198,9 +256,19 @@ export function sortRecents(
   sort: RecentSort,
 ): SessionRecord[] {
   if (sort === "priority") return sessions;
+
+  // Loading a chat can update persistence metadata such as `updatedAt` and
+  // `lastViewedAt`. Sort by message activity so selecting a row never promotes
+  // it above chats that actually received newer content.
+  const contentActivityAt = (session: SessionRecord) =>
+    session.lastContentAt
+    ?? session.lastUserMessageAt
+    ?? session.updatedAt
+    ?? session.createdAt;
+
   return [...sessions].sort(
     (left, right) =>
-      right.updatedAt - left.updatedAt ||
+      contentActivityAt(right) - contentActivityAt(left) ||
       right.createdAt - left.createdAt ||
       left.id.localeCompare(right.id),
   );
@@ -222,9 +290,13 @@ function readRecentSort(): RecentSort {
   }
 }
 
-function readHiddenRecentSources(): Set<RecentSource> {
+export function hiddenRecentSourcesFromStoredValue(
+  stored: string | null,
+): Set<RecentSource> {
+  if (stored === null) return new Set();
+
   try {
-    const parsed = JSON.parse(localStorage.getItem(RECENTS_SOURCE_FILTER_KEY) ?? "[]");
+    const parsed = JSON.parse(stored);
     return new Set(
       Array.isArray(parsed)
         ? parsed.filter((source): source is RecentSource =>
@@ -237,30 +309,14 @@ function readHiddenRecentSources(): Set<RecentSource> {
   }
 }
 
-function syncExternalChatsIfNeeded(force = false): Promise<void> {
-  const now = Date.now();
-  if (!force && now - lastExternalChatSyncAt < EXTERNAL_CHAT_SYNC_INTERVAL_MS) {
-    return Promise.resolve();
+function readHiddenRecentSources(): Set<RecentSource> {
+  try {
+    return hiddenRecentSourcesFromStoredValue(
+      localStorage.getItem(RECENTS_SOURCE_FILTER_KEY),
+    );
+  } catch {
+    return hiddenRecentSourcesFromStoredValue(null);
   }
-  if (externalChatSyncPromise) return externalChatSyncPromise;
-  lastExternalChatSyncAt = now;
-  externalChatSyncPromise = scanExternalChatHistory()
-    .then((scan) => importExternalChatHistory(
-      scan.sources.flatMap((source) => source.candidates),
-      { skipUnchanged: true },
-    ))
-    .then(() => undefined)
-    .finally(() => {
-      externalChatSyncPromise = null;
-    });
-  return externalChatSyncPromise;
-}
-
-interface SidebarPipeInventoryItem {
-  name: string;
-  executionCount: number;
-  latestExecutionId: number;
-  lastRun: string | null;
 }
 
 interface SidebarPipeExecution {
@@ -308,7 +364,12 @@ function persistDeletedPipeExecutionIds(ids: Set<string>): void {
 interface ChatSidebarProps {
   className?: string;
   onViewAll?: () => void;
+  /** When set, every chat except this conversation remains visible but inert. */
+  allowedConversationId?: string | null;
 }
+
+const ChatSidebarAllowedConversationContext =
+  React.createContext<string | null | undefined>(undefined);
 
 function readCollapsedPref(key: string, defaultValue = false): boolean {
   try {
@@ -352,7 +413,7 @@ function useVisibleChatSections(): {
       // `isEmptyChatShell` is the derived backstop for rows whose creator
       // never set the flag (prewarmed / auto-restarted Pi sessions used to
       // land here as empty "untitled" rows).
-      if (s.draft || isEmptyChatShell(s)) continue;
+      if (s.draft || isEmptyChatShell(s) || isMachineOnlyImportedConversation(s)) continue;
       if (s.hidden) {
         archived.push(s);
         continue;
@@ -406,7 +467,12 @@ function useQueueDepths(): Map<string, number> {
  * vertical scroll for the conversation list. Does NOT add a width / border /
  * background — those belong to the parent.
  */
-export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
+export function ChatSidebar({
+  className,
+  onViewAll,
+  allowedConversationId,
+}: ChatSidebarProps) {
+  const conversationRestrictionActive = allowedConversationId !== undefined;
   const currentId = useChatStore(selectDisplayedChatId);
   // Reactive group key for the current session — re-evaluates when the
   // session appears in the store (handles the race where currentId is set
@@ -433,12 +499,13 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   // mirroring the html/body `scrollbar-hide` convention in globals.css.
   const { isMac } = usePlatform();
 
-  // Sync currentId from standalone-chat. Whenever the chat panel switches
-  // its piSessionIdRef (new chat, prefill auto-send, history click in the
-  // panel itself), it emits this event so the sidebar can highlight the
-  // matching row. Without this the sidebar would silently disagree with
-  // the chat about "which session is current".
+  // Tauri events are app-global, while each WebView owns a separate chat
+  // store. Only let this WebView's panel select a working tab. A floating
+  // Chat session still reaches Home's Recents through chat-conversation-saved,
+  // but must not become a second Home tab merely because it became current in
+  // the floating window.
   useTauriEvent<{ id: string }>("chat-current-session", (e) => {
+    if (useChatStore.getState().panelSessionId !== e.payload.id) return;
     actions.setCurrent(e.payload.id);
   });
 
@@ -449,7 +516,10 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     let cancelled = false;
     const unlistenFns: Array<() => void> = [];
 
-    const syncConversationFromDisk = async (id: string) => {
+    const syncConversationFromDisk = async (
+      id: string,
+      externalTurnState?: ExternalChatTurnState,
+    ) => {
       try {
         const conv = await loadConversationFile(id);
         if (cancelled || !conv) return;
@@ -501,22 +571,50 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
             importedFrom: meta.importedFrom,
             draft: false,
           });
-          return;
+        } else {
+          store.actions.upsert(sessionRecordFromMeta(meta));
         }
 
-        store.actions.upsert(sessionRecordFromMeta(meta));
+        if (externalTurnState) {
+          const active = externalTurnState.isLoading || externalTurnState.isStreaming;
+          const assistant = [...conv.messages]
+            .reverse()
+            .find((message) => message.role === "assistant");
+          store.actions.setMessages(id, conv.messages as any);
+          store.actions.setStreaming(id, {
+            isLoading: externalTurnState.isLoading,
+            isStreaming: externalTurnState.isStreaming,
+            streamingMessageId: active ? assistant?.id ?? null : null,
+            streamingText:
+              active && assistant?.content !== "Processing..."
+                ? assistant?.content ?? ""
+                : "",
+            contentBlocks: active ? assistant?.contentBlocks ?? [] : [],
+          });
+          store.actions.patch(id, {
+            status: active ? "streaming" : "idle",
+            lastError: undefined,
+          });
+        }
       } catch {
         // ignore: a later save / hydrate can repair the row
       }
     };
 
     (async () => {
-      const unlistenSaved = await listen<{ id: string }>(
+      const unlistenSaved = await listen<{
+        id: string;
+        importedFrom?: ExternalChatSource;
+        turnState?: ExternalChatTurnState;
+      }>(
         "chat-conversation-saved",
         (event) => {
-          const id = event.payload?.id;
+          const { id, importedFrom, turnState } = event.payload ?? {};
           if (!id) return;
-          void syncConversationFromDisk(id);
+          void syncConversationFromDisk(
+            id,
+            importedFrom ? turnState : undefined,
+          );
         }
       );
       unlistenFns.push(unlistenSaved);
@@ -542,7 +640,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
             useChatStore.getState().actions.patch(id, {
               hidden,
               unread: false,
-              ...(hidden ? { draft: false } : {}),
+              ...(hidden ? { draft: false, pinned: false } : {}),
             });
             return;
           }
@@ -592,27 +690,43 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   }, [actions]);
 
   // Local Codex and Claude histories are part of the chat index, not a
-  // separate import workflow. Sync once when the sidebar mounts and again
-  // when the app regains focus after the user worked in another agent.
+  // separate import workflow. Watch their native transcripts while the app is
+  // open; a bounded focus reconciliation recovers any events the OS dropped.
   useEffect(() => {
-    // Native E2E uses isolated, deterministic chat fixtures. Never scan the
-    // developer machine's real agent history from a test build.
-    if (process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true") return;
     let cancelled = false;
-    const sync = async () => {
+    let controller: ExternalChatSyncController | null = null;
+    const hydrate = async () => {
+      // Each item crosses the Tauri filesystem boundary. Keep this bounded:
+      // large imported histories can contain tens of thousands of chat files.
+      const metas = await listConversations(CHAT_SIDEBAR_HYDRATION_OPTIONS);
+      if (!cancelled) actions.hydrateFromDisk(metas.map(sessionRecordFromMeta));
+    };
+    const start = async () => {
       try {
-        await syncExternalChatsIfNeeded();
-        const metas = await listConversations({ includeHidden: true });
-        if (!cancelled) actions.hydrateFromDisk(metas.map(sessionRecordFromMeta));
+        const nextController = await startExternalChatSync();
+        if (cancelled) {
+          nextController.stop();
+          return;
+        }
+        controller = nextController;
+        await hydrate();
       } catch (error) {
         console.warn("[chat-sidebar] external chat sync failed", error);
       }
     };
-    void sync();
-    const onFocus = () => void sync();
+    void start();
+    const onFocus = () => {
+      if (!controller) return;
+      void controller.syncNow()
+        .then((reconciled) => reconciled ? hydrate() : undefined)
+        .catch((error) => {
+          console.warn("[chat-sidebar] external chat reconciliation failed", error);
+        });
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
+      controller?.stop();
       window.removeEventListener("focus", onFocus);
     };
   }, [actions]);
@@ -623,10 +737,6 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   );
   const [recentLayout, setRecentLayout] = useState<RecentLayout>(readRecentLayout);
   const [recentSort, setRecentSort] = useState<RecentSort>(readRecentSort);
-  const availableRecentSources = useMemo(
-    () => new Set(recents.map(recentSource)),
-    [recents],
-  );
   const visibleRecents = useMemo(
     () => sortRecents(filterRecentsBySource(recents, hiddenRecentSources), recentSort),
     [recents, hiddenRecentSources, recentSort],
@@ -697,6 +807,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   const [pipeInventory, setPipeInventory] = useState<SidebarPipeInventoryItem[]>([]);
   const [pipeInventoryLoaded, setPipeInventoryLoaded] = useState(false);
   const [pipeInventoryAuthoritative, setPipeInventoryAuthoritative] = useState(false);
+  const pipeInventoryAuthoritativeRef = useRef(false);
   const [pipeInventoryLoadingMore, setPipeInventoryLoadingMore] = useState(false);
   const [pipeInventoryHasMore, setPipeInventoryHasMore] = useState(false);
   const pipeInventoryCursorRef = useRef<number | null>(null);
@@ -731,6 +842,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     setPipeInventory([]);
     setPipeInventoryLoaded(false);
     setPipeInventoryAuthoritative(false);
+    pipeInventoryAuthoritativeRef.current = false;
     setPipeInventoryHasMore(false);
     pipeInventoryCursorRef.current = null;
   }, []);
@@ -750,10 +862,12 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     preserveExisting = false,
   ) => {
     const generation = pipeDataGenerationRef.current;
+    const recoveringInitialPage =
+      preserveExisting && !pipeInventoryAuthoritativeRef.current;
     if (append) setPipeInventoryLoadingMore(true);
     try {
       const params = new URLSearchParams({
-        limit: String(PIPE_INVENTORY_PAGE_SIZE),
+        limit: String(SIDEBAR_AUTOMATION_PAGE_SIZE),
       });
       if (append && pipeInventoryCursorRef.current != null) {
         params.set("before_id", String(pipeInventoryCursorRef.current));
@@ -776,21 +890,25 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
           lastRun: typeof pipe.last_run_at === "string" ? pipe.last_run_at : null,
         });
       }
-      setPipeInventory((previous) => {
-        if (!append && !preserveExisting) return page;
-        const merged = new Map(previous.map((pipe) => [pipe.name, pipe]));
-        for (const pipe of page) merged.set(pipe.name, pipe);
-        return Array.from(merged.values()).sort(
-          (a, b) => b.latestExecutionId - a.latestExecutionId,
-        );
-      });
+      setPipeInventory((previous) =>
+        mergeSidebarPipeInventory(
+          previous,
+          page,
+          append
+            ? "append"
+            : preserveExisting && !recoveringInitialPage
+              ? "refresh"
+              : "replace",
+        ),
+      );
       // A heartbeat refreshes only the newest page. Preserve the pagination
       // cursor and older inventory rows the user explicitly loaded.
-      if (!preserveExisting) {
+      if (!preserveExisting || recoveringInitialPage) {
         setPipeInventoryHasMore(payload.has_more === true);
         pipeInventoryCursorRef.current =
           typeof payload.next_before_id === "number" ? payload.next_before_id : null;
       }
+      pipeInventoryAuthoritativeRef.current = true;
       setPipeInventoryAuthoritative(true);
     } catch {
       // Keep recent in-memory pipe groups available if the engine is still
@@ -946,7 +1064,11 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       else sessionsByPipe.set(name, [session]);
     }
 
-    const orderedNames = visibleSidebarPipeNames(pipeInventory, pipes);
+    const orderedNames = visibleSidebarPipeNames(
+      pipeInventory,
+      pipes,
+      pipeInventoryAuthoritative,
+    );
 
     return orderedNames.map((name) => {
       const inventoryItem = pipeInventory.find((pipe) => pipe.name === name);
@@ -983,7 +1105,13 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         sessions,
       };
     });
-  }, [pipeInventory, pipes, loadedPipeRuns, storeSessionIds]);
+  }, [
+    pipeInventory,
+    pipeInventoryAuthoritative,
+    pipes,
+    loadedPipeRuns,
+    storeSessionIds,
+  ]);
 
   const pipeLastRuns = useMemo(
     () => latestSidebarPipeRunTimes(pipeInventory, pipes),
@@ -1263,33 +1391,43 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     }
     // Stop any active session first to avoid immediate row resurrection
     // from trailing stream events.
+    const wasPinned = useChatStore.getState().sessions[id]?.pinned ?? false;
+    const wasCurrent = id === currentId;
     commands.piAbort(id).catch(() => {});
-    actions.patch(id, { hidden: true, unread: false });
+    actions.patch(id, { hidden: true, pinned: false, unread: false });
     // Archiving should tuck chats away immediately; users can reopen
     // the bucket manually when they want to review archived items.
     setArchivedCollapsed(true);
-    // Move the panel off a chat that just left the visible list.
+    const fallbackId = fallbackOpenChatId(useChatStore.getState(), id);
+    actions.closeChat(id);
+    // Move the panel off a chat that just left the visible list. Prefer
+    // the next open tab; mint untitled only when this was the last one.
     if (id === currentId) {
-      const fresh = crypto.randomUUID();
-      actions.upsert({
-        id: fresh,
-        title: "untitled",
-        preview: "",
-        status: "idle",
-        messageCount: 0,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        pinned: false,
-        unread: false,
-        draft: true,
-        messages: [],
-      });
-      actions.setCurrent(fresh);
-      emit("chat-load-conversation", { conversationId: fresh });
+      if (fallbackId) {
+        actions.setCurrent(fallbackId);
+        emit("chat-load-conversation", { conversationId: fallbackId });
+      } else {
+        const fresh = crypto.randomUUID();
+        actions.upsert({
+          id: fresh,
+          title: "untitled",
+          preview: "",
+          status: "idle",
+          messageCount: 0,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pinned: false,
+          unread: false,
+          draft: true,
+          messages: [],
+        });
+        actions.setCurrent(fresh);
+        emit("chat-load-conversation", { conversationId: fresh });
+      }
     }
     // Best-effort persistence for restart durability.
     try {
-      await updateConversationFlags(id, { hidden: true });
+      await updateConversationFlags(id, { hidden: true, pinned: false });
     } catch {
       // ignore
     }
@@ -1297,6 +1435,183 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       await emit("chat-visibility-changed", { id, hidden: true });
     } catch {
       // ignore
+    }
+    showChatArchiveUndoToast({
+      onUndo: async () => {
+        actions.patch(id, {
+          hidden: false,
+          pinned: wasPinned,
+          unread: false,
+        });
+        actions.openChat(id);
+        try {
+          await updateConversationFlags(id, {
+            hidden: false,
+            pinned: wasPinned,
+          });
+        } catch {
+          // The in-memory restore still gives the user an immediate path back.
+        }
+        try {
+          await emit("chat-visibility-changed", { id, hidden: false });
+        } catch {
+          // ignore
+        }
+        if (wasCurrent) await handleSelect(id);
+      },
+    });
+  };
+
+  const handleArchiveAllRecents = async () => {
+    const store = useChatStore.getState();
+    const snapshots = recents.flatMap((recent) => {
+      const session = store.sessions[recent.id];
+      if (
+        !session ||
+        session.hidden ||
+        session.pinned ||
+        session.draft ||
+        isEmptyChatShell(session) ||
+        isMachineOnlyImportedConversation(session) ||
+        session.kind === "pipe-watch" ||
+        session.kind === "pipe-run"
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: session.id,
+          wasCurrent: session.id === currentId,
+          wasOpen: store.openChatIds.includes(session.id),
+        },
+      ];
+    });
+    if (snapshots.length === 0) return;
+
+    // Apply the full visible-state transition before choosing a fallback so
+    // another recent chat cannot briefly become current while it is archived.
+    for (const { id } of snapshots) {
+      commands.piAbort(id).catch(() => {});
+      actions.patch(id, { hidden: true, pinned: false, unread: false });
+    }
+    setArchivedCollapsed(true);
+
+    const previousCurrent = snapshots.find(({ wasCurrent }) => wasCurrent);
+    const fallbackId =
+      previousCurrent && currentId
+        ? fallbackOpenChatId(useChatStore.getState(), currentId)
+        : null;
+    for (const { id } of snapshots) actions.closeChat(id);
+
+    if (previousCurrent) {
+      if (fallbackId) {
+        actions.setCurrent(fallbackId);
+        emit("chat-load-conversation", { conversationId: fallbackId });
+      } else {
+        const fresh = crypto.randomUUID();
+        actions.upsert({
+          id: fresh,
+          title: "untitled",
+          preview: "",
+          status: "idle",
+          messageCount: 0,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pinned: false,
+          unread: false,
+          draft: true,
+          messages: [],
+        });
+        actions.setCurrent(fresh);
+        emit("chat-load-conversation", { conversationId: fresh });
+      }
+    }
+
+    await Promise.all(
+      snapshots.map(async ({ id }) => {
+        try {
+          await updateConversationFlags(id, { hidden: true, pinned: false });
+        } catch {
+          // The in-memory archive remains immediately useful.
+        }
+        try {
+          await emit("chat-visibility-changed", { id, hidden: true });
+        } catch {
+          // A later hydration pass can reconcile another window.
+        }
+      }),
+    );
+
+    showChatArchiveUndoToast({
+      count: snapshots.length,
+      onUndo: async () => {
+        for (const { id, wasOpen } of snapshots) {
+          actions.patch(id, { hidden: false, pinned: false, unread: false });
+          if (wasOpen) actions.openChat(id);
+        }
+        await Promise.all(
+          snapshots.map(async ({ id }) => {
+            try {
+              await updateConversationFlags(id, {
+                hidden: false,
+                pinned: false,
+              });
+            } catch {
+              // The in-memory restore still gives the user an immediate path back.
+            }
+            try {
+              await emit("chat-visibility-changed", { id, hidden: false });
+            } catch {
+              // ignore
+            }
+          }),
+        );
+        if (previousCurrent) await handleSelect(previousCurrent.id);
+      },
+    });
+  };
+
+  const handleBranch = async (id: string) => {
+    setOpenConversationMenuId(null);
+    const executionMetadata = executionMetadataRef.current.get(id);
+    if (
+      executionMetadata &&
+      !(await materializePipeExecution(id, executionMetadata))
+    ) {
+      return;
+    }
+
+    try {
+      const source = await loadConversationFile(id);
+      if (!source) throw new Error("conversation is not available on disk");
+      const branch = createConversationBranch({
+        sourceId: id,
+        title: source.title,
+        messages: source.messages,
+      });
+      if (!branch) throw new Error("conversation has no messages to branch");
+
+      await saveConversationFile(branch);
+      const meta = conversationMetaFromJson(branch);
+      if (!meta) throw new Error("branched conversation is invalid");
+      actions.upsert(sessionRecordFromMeta(meta));
+      actions.setMessages(branch.id, branch.messages as any);
+      try {
+        await emit("chat-conversation-saved", {
+          id: branch.id,
+          title: branch.title,
+        });
+      } catch {
+        // The branch is already durable and available in this window.
+      }
+      await handleSelect(branch.id);
+    } catch (error) {
+      console.warn("[chat-sidebar] failed to branch conversation:", error);
+      toast({
+        title: "couldn't branch chat",
+        description: "the conversation could not be copied. try again.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -1457,6 +1772,9 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         if (openConversationMenuId) setOpenConversationMenuId(null);
       }}
     >
+      <ChatSidebarAllowedConversationContext.Provider
+        value={allowedConversationId}
+      >
       <div className="flex flex-col gap-1">
         <div className="min-h-0 flex flex-col">
           {pinned.length > 0 && (
@@ -1481,6 +1799,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     onDeleteRequest={setDeletingSessionId}
                     onTogglePin={handleTogglePin}
                     onRenameRequest={handleRenameRequest}
+                    onBranch={handleBranch}
                     openConversationMenuId={openConversationMenuId}
                     setOpenConversationMenuId={setOpenConversationMenuId}
                   />
@@ -1500,6 +1819,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     <DropdownMenuTrigger asChild>
                       <button
                         type="button"
+                        disabled={conversationRestrictionActive}
                         className="inline-flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-muted/40 focus-visible:opacity-100 group-hover:opacity-100"
                         aria-label="organize recents"
                         title="organize recents"
@@ -1507,32 +1827,71 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
                       </button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent className="w-48" align="end">
+                    <DropdownMenuContent
+                      className="w-52"
+                      align="end"
+                      onKeyDown={handleRecentsMenuShortcut}
+                    >
                       <DropdownMenuLabel>show in recents</DropdownMenuLabel>
-                      {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
-                        availableRecentSources.has(source),
-                      ).map(({ source, label }) => (
+                      {visibleRecentSourceOptions().map(({ source, label }) => (
                         <DropdownMenuCheckboxItem
                           key={source}
+                          data-shortcut={RECENT_SOURCE_SHORTCUTS[source]}
+                          aria-keyshortcuts={RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           checked={!hiddenRecentSources.has(source)}
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
-                          {label}
+                          <RecentsSourceFilterLabel source={source} label={label} />
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
+                          </DropdownMenuShortcut>
                         </DropdownMenuCheckboxItem>
                       ))}
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>organize sidebar</DropdownMenuLabel>
                       <DropdownMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
-                        <DropdownMenuRadioItem value="source">By source</DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="list">In one list</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="b" aria-keyshortcuts="B" value="source">
+                          By source
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            B
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="i" aria-keyshortcuts="I" value="list">
+                          In one list
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            I
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>sort chats by</DropdownMenuLabel>
                       <DropdownMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
-                        <DropdownMenuRadioItem value="priority">Priority</DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="updated">Last updated</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="p" aria-keyshortcuts="P" value="priority">
+                          Priority
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            P
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="u" aria-keyshortcuts="U" value="updated">
+                          Last updated
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            U
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        data-testid="archive-all-recent-chats"
+                        disabled={recents.length === 0}
+                        onSelect={() => void handleArchiveAllRecents()}
+                      >
+                        <Archive
+                          className="mr-2 h-3.5 w-3.5 text-muted-foreground"
+                          aria-hidden
+                        />
+                        Archive all recent chats
+                      </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                   <ContextMenu>
@@ -1556,33 +1915,68 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         View all <ChevronRight className="h-3 w-3" aria-hidden />
                       </button>
                     </ContextMenuTrigger>
-                    <ContextMenuContent className="w-44">
+                    <ContextMenuContent className="w-52" onKeyDown={handleRecentsMenuShortcut}>
                       <ContextMenuLabel>show in recents</ContextMenuLabel>
-                      {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
-                        availableRecentSources.has(source),
-                      ).map(({ source, label }) => (
+                      {visibleRecentSourceOptions().map(({ source, label }) => (
                         <ContextMenuCheckboxItem
                           key={source}
                           data-testid={`recents-filter-${source}`}
+                          data-shortcut={RECENT_SOURCE_SHORTCUTS[source]}
+                          aria-keyshortcuts={RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           checked={!hiddenRecentSources.has(source)}
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
-                          {label}
+                          <RecentsSourceFilterLabel source={source} label={label} />
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
+                          </ContextMenuShortcut>
                         </ContextMenuCheckboxItem>
                       ))}
                       <ContextMenuSeparator />
                       <ContextMenuLabel>organize sidebar</ContextMenuLabel>
                       <ContextMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
-                        <ContextMenuRadioItem value="source">By source</ContextMenuRadioItem>
-                        <ContextMenuRadioItem value="list">In one list</ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="b" aria-keyshortcuts="B" value="source">
+                          By source
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            B
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="i" aria-keyshortcuts="I" value="list">
+                          In one list
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            I
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
                       </ContextMenuRadioGroup>
                       <ContextMenuSeparator />
                       <ContextMenuLabel>sort chats by</ContextMenuLabel>
                       <ContextMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
-                        <ContextMenuRadioItem value="priority">Priority</ContextMenuRadioItem>
-                        <ContextMenuRadioItem value="updated">Last updated</ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="p" aria-keyshortcuts="P" value="priority">
+                          Priority
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            P
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="u" aria-keyshortcuts="U" value="updated">
+                          Last updated
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            U
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
                       </ContextMenuRadioGroup>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        data-testid="archive-all-recent-chats-context"
+                        disabled={recents.length === 0}
+                        onSelect={() => void handleArchiveAllRecents()}
+                      >
+                        <Archive
+                          className="mr-2 h-3.5 w-3.5 text-muted-foreground"
+                          aria-hidden
+                        />
+                        Archive all recent chats
+                      </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
                 </div>
@@ -1618,6 +2012,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                   onDeleteRequest={setDeletingSessionId}
                   onTogglePin={handleTogglePin}
                   onRenameRequest={handleRenameRequest}
+                  onBranch={handleBranch}
                   onMoveToGroup={handleMoveToGroup}
                   onNewGroupRequest={setNewGroupSessionId}
                   existingGroups={existingGroups}
@@ -1667,6 +2062,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                       onDeleteRequest={setDeletingSessionId}
                       onTogglePin={handleTogglePin}
                       onRenameRequest={handleRenameRequest}
+                      onBranch={handleBranch}
                       onMoveToGroup={handleMoveToGroup}
                       onNewGroupRequest={setNewGroupSessionId}
                       existingGroups={existingGroups}
@@ -1825,6 +2221,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         </DialogContent>
       </Dialog>
 
+      </ChatSidebarAllowedConversationContext.Provider>
     </div>
   );
 }
@@ -2174,6 +2571,7 @@ function RecentsBody({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2193,6 +2591,7 @@ function RecentsBody({
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch: (id: string) => Promise<void> | void;
   onMoveToGroup: (id: string, group: string | undefined) => void;
   onNewGroupRequest: (id: string) => void;
   existingGroups: string[];
@@ -2212,6 +2611,7 @@ function RecentsBody({
         onDeleteRequest={onDeleteRequest}
         onTogglePin={onTogglePin}
         onRenameRequest={onRenameRequest}
+        onBranch={onBranch}
         onMoveToGroup={onMoveToGroup}
         onNewGroupRequest={onNewGroupRequest}
         existingGroups={existingGroups}
@@ -2232,6 +2632,7 @@ function RecentsBody({
         onDeleteRequest={onDeleteRequest}
         onTogglePin={onTogglePin}
         onRenameRequest={onRenameRequest}
+        onBranch={onBranch}
         onMoveToGroup={onMoveToGroup}
         onNewGroupRequest={onNewGroupRequest}
         existingGroups={existingGroups}
@@ -2300,6 +2701,7 @@ function PipeGroupRow({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2322,6 +2724,7 @@ function PipeGroupRow({
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch: (id: string) => Promise<void> | void;
   onMoveToGroup: (id: string, group: string | undefined) => void;
   onNewGroupRequest: (id: string) => void;
   existingGroups: string[];
@@ -2384,6 +2787,7 @@ function PipeGroupRow({
               onDeleteRequest={onDeleteRequest}
               onTogglePin={onTogglePin}
               onRenameRequest={onRenameRequest}
+              onBranch={onBranch}
               insideGroup
               openConversationMenuId={openConversationMenuId}
               setOpenConversationMenuId={setOpenConversationMenuId}
@@ -2417,6 +2821,7 @@ interface ChatRowProps {
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch?: (id: string) => Promise<void> | void;
   onMoveToGroup?: (id: string, group: string | undefined) => void;
   onNewGroupRequest?: (id: string) => void;
   existingGroups?: string[];
@@ -2431,20 +2836,20 @@ interface ChatRowProps {
  * Each maps to an item carrying `data-shortcut={key}`; pressing the key while a
  * row menu is open selects that item. Keep in sync with `RowMenuItems`.
  */
-const ROW_MENU_SHORTCUT_KEYS = ["p", "r", "a", "d"] as const;
+const ROW_MENU_SHORTCUT_KEYS = ["p", "r", "b", "a", "d"] as const;
 
 /**
- * Press a shortcut letter while a chat-row menu (right-click or kebab) is open
- * to fire the matching action. We forward an Enter keydown to the item so radix
- * runs its own onSelect + close — no second code path to keep in sync.
+ * Press a shortcut letter while a menu is open to fire the matching item. We
+ * forward Enter so radix runs its own onSelect + close — no second action path.
  */
-function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+export function handleMenuShortcut(
+  e: React.KeyboardEvent<HTMLElement>,
+  allowedKeys: readonly string[],
+) {
   if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
   if (e.key.length !== 1) return;
   const key = e.key.toLowerCase();
-  if (!ROW_MENU_SHORTCUT_KEYS.includes(key as (typeof ROW_MENU_SHORTCUT_KEYS)[number])) {
-    return;
-  }
+  if (!allowedKeys.includes(key)) return;
   const target = e.currentTarget.querySelector<HTMLElement>(`[data-shortcut="${key}"]`);
   if (!target) return;
   e.preventDefault();
@@ -2453,6 +2858,14 @@ function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
   target.dispatchEvent(
     new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
   );
+}
+
+function handleRecentsMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+  handleMenuShortcut(e, RECENTS_MENU_SHORTCUT_KEYS);
+}
+
+function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+  handleMenuShortcut(e, ROW_MENU_SHORTCUT_KEYS);
 }
 
 /**
@@ -2497,6 +2910,7 @@ function RowMenuItems({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2509,6 +2923,7 @@ function RowMenuItems({
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch?: (id: string) => Promise<void> | void;
   onMoveToGroup?: (id: string, group: string | undefined) => void;
   onNewGroupRequest?: (id: string) => void;
   existingGroups?: string[];
@@ -2544,6 +2959,22 @@ function RowMenuItems({
         Rename
         <P.Shortcut className={shortcutCls}>R</P.Shortcut>
       </P.Item>
+      {onBranch && (
+        <P.Item
+          data-shortcut="b"
+          aria-keyshortcuts="B"
+          className={itemCls}
+          disabled={session.messageCount === 0}
+          onSelect={(e: Event) => {
+            e.stopPropagation();
+            void onBranch(session.id);
+          }}
+        >
+          <GitBranch className="h-3 w-3 text-muted-foreground" />
+          Branch in new chat
+          <P.Shortcut className={shortcutCls}>B</P.Shortcut>
+        </P.Item>
+      )}
       {onMoveToGroup && existingGroups && (
         <P.Sub>
           <P.SubTrigger
@@ -2687,6 +3118,7 @@ export function SidebarChatRow({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2695,6 +3127,12 @@ export function SidebarChatRow({
   openConversationMenuId,
   setOpenConversationMenuId,
 }: ChatRowProps) {
+  const allowedConversationId = React.useContext(
+    ChatSidebarAllowedConversationContext,
+  );
+  const conversationRestrictionActive = allowedConversationId !== undefined;
+  const interactionDisabled =
+    conversationRestrictionActive && session.id !== allowedConversationId;
   const isLive =
     session.status === "streaming" ||
     session.status === "thinking" ||
@@ -2703,7 +3141,8 @@ export function SidebarChatRow({
   const isUnread = session.unread && !isCurrent;
   const showCurrentLabel =
     isCurrent && !isLive && !isError && queuedCount === 0;
-  const canShowActions = showActions && !disableHover;
+  const canShowActions =
+    showActions && !disableHover && !conversationRestrictionActive;
   const activityAt = session.lastUserMessageAt ?? session.updatedAt ?? session.createdAt;
   const now = useMinuteTick(!isLive && !isUnread && !isError && queuedCount === 0);
   const age = formatCompactAge(activityAt, now);
@@ -2723,6 +3162,7 @@ export function SidebarChatRow({
     onDeleteRequest,
     onTogglePin,
     onRenameRequest,
+    onBranch,
     onMoveToGroup,
     onNewGroupRequest,
     existingGroups,
@@ -2780,7 +3220,8 @@ export function SidebarChatRow({
               : "border-transparent sidebar-text-secondary"
             : tone === "subtle"
               ? "border-transparent sidebar-text-tertiary hover:bg-muted/12"
-              : "border-transparent sidebar-text-secondary hover:bg-muted/20"
+              : "border-transparent sidebar-text-secondary hover:bg-muted/20",
+        interactionDisabled && "cursor-not-allowed"
       )}
       data-testid={`chat-row-${session.id}`}
       data-current={isCurrent ? "true" : undefined}
@@ -2788,8 +3229,9 @@ export function SidebarChatRow({
     >
       <button
         type="button"
-        className="min-w-0 flex-1 flex items-center gap-2 text-left"
+        className="min-w-0 flex-1 flex items-center gap-2 text-left disabled:cursor-not-allowed"
         aria-current={isCurrent ? "page" : undefined}
+        disabled={interactionDisabled}
         onClick={() => {
           setOpenConversationMenuId?.(null);
           onSelect(session.id);
@@ -2806,7 +3248,7 @@ export function SidebarChatRow({
               alt=""
               width={17}
               height={17}
-              className="h-[17px] w-[17px] rounded-[4px] object-contain"
+              className="h-[17px] w-[17px] rounded-sm object-contain"
               unoptimized
             />
           ) : (
@@ -2840,7 +3282,12 @@ export function SidebarChatRow({
               menuOpen && "opacity-0"
             )}
           >
-            {showCurrentLabel ? (
+            {interactionDisabled ? (
+              <LockKeyhole
+                aria-label="locked during trial"
+                className="h-3 w-3 text-muted-foreground"
+              />
+            ) : showCurrentLabel ? (
               <span className="text-[9px] font-medium uppercase tracking-[0.08em] text-foreground/70">
                 current
               </span>

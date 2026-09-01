@@ -13,6 +13,9 @@ import {
   useChatStore,
   selectOrderedSessions,
   selectRecentSwitcherSessions,
+  selectVisibleOpenChatTabs,
+  nextOpenChatTabId,
+  fallbackOpenChatId,
   getOrCreateEmptyChatId,
   isReusableBlankChatSession,
   isEmptyChatShell,
@@ -21,18 +24,190 @@ import {
   selectDisplayedChatId,
   applyChatSessionActivity,
   ensureBlankChatSession,
+  isEphemeralSideConversationId,
   type SessionRecord,
   type ChatSessionActivityPayload,
 } from "../stores/chat-store";
 import { conversationDedupIdentity } from "../chat-dedup";
+import {
+  createEphemeralSideConversationId,
+  filterEphemeralSideConversationPresets,
+  isEphemeralSideConversationNamespaceId,
+} from "../chat/ephemeral-side-conversation";
 
 function reset() {
   useChatStore.setState({
     sessions: {},
+    ephemeralSideConversationIds: {},
+    openChatIds: [],
+    splitChatId: null,
     currentId: null,
     panelSessionId: null,
   });
 }
+
+describe("chat-store: tab and split working set", () => {
+  beforeEach(reset);
+
+  it("opens the focused chat once and keeps close non-destructive", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "A", status: "streaming" }));
+    actions.setCurrent("A");
+    actions.setCurrent("A");
+    expect(useChatStore.getState().openChatIds).toEqual(["A"]);
+
+    actions.closeChat("A");
+    expect(useChatStore.getState().openChatIds).toEqual([]);
+    expect(useChatStore.getState().sessions.A.status).toBe("streaming");
+  });
+
+  it("adds the secondary chat to the working set and clears it when dropped", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "A" }));
+    actions.upsert(baseRecord({ id: "B" }));
+    actions.openChat("A");
+    actions.setSplitChat("B");
+    expect(useChatStore.getState().openChatIds).toEqual(["A", "B"]);
+    expect(useChatStore.getState().splitChatId).toBe("B");
+
+    actions.drop("B");
+    expect(useChatStore.getState().splitChatId).toBeNull();
+    expect(useChatStore.getState().openChatIds).toEqual(["A"]);
+  });
+
+  it("lists open tabs in strip order, including empty worktree chats", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "closed", lastViewedAt: 90 }));
+    actions.upsert(baseRecord({ id: "A", lastViewedAt: 10 }));
+    actions.upsert(
+      baseRecord({
+        id: "worktree",
+        draft: true,
+        messageCount: 0,
+        lastViewedAt: undefined,
+        codingWorkspace: {
+          repoName: "screenpipe",
+          branch: "screenpipe/chat-worktree",
+          worktreePath: "/worktrees/worktree",
+        },
+      }),
+    );
+    actions.openChat("A");
+    actions.openChat("worktree");
+
+    expect(
+      selectVisibleOpenChatTabs(useChatStore.getState()).map((session) => session.id),
+    ).toEqual(["A", "worktree"]);
+    expect(nextOpenChatTabId(["A", "worktree"], "A", 1)).toBe("worktree");
+    expect(nextOpenChatTabId(["A", "worktree"], "worktree", 1)).toBe("A");
+    expect(nextOpenChatTabId(["A"], "A", 1)).toBeNull();
+  });
+
+  it("picks the next open tab after archive, then the previous", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "A" }));
+    actions.upsert(baseRecord({ id: "B" }));
+    actions.upsert(baseRecord({ id: "hidden", hidden: true }));
+    actions.upsert(baseRecord({ id: "C" }));
+    actions.openChat("A");
+    actions.openChat("B");
+    actions.openChat("hidden");
+    actions.openChat("C");
+
+    const state = useChatStore.getState();
+    expect(fallbackOpenChatId(state, "B")).toBe("C");
+    expect(fallbackOpenChatId(state, "C")).toBe("B");
+    expect(fallbackOpenChatId(state, "A")).toBe("B");
+    expect(fallbackOpenChatId({ sessions: state.sessions, openChatIds: ["A"] }, "A")).toBeNull();
+  });
+});
+
+describe("chat-store: temporary side conversations", () => {
+  beforeEach(reset);
+
+  it("creates a reserved id that remains recognizable without store state", () => {
+    const id = createEphemeralSideConversationId();
+
+    expect(isEphemeralSideConversationNamespaceId(id)).toBe(true);
+    expect(
+      isEphemeralSideConversationId(
+        { sessions: {}, ephemeralSideConversationIds: {} },
+        id,
+      ),
+    ).toBe(true);
+    expect(isEphemeralSideConversationNamespaceId("temporary-side-chat-not-a-uuid"))
+      .toBe(false);
+  });
+
+  it("removes ACP presets because their history cannot be guaranteed ephemeral", () => {
+    const nativePreset = { id: "native", provider: "screenpipe-cloud" };
+    const acpPreset = { id: "agent", provider: "acp" };
+
+    expect(
+      filterEphemeralSideConversationPresets([nativePreset, acpPreset]),
+    ).toEqual([nativePreset]);
+  });
+
+  it("never surfaces or reuses a side conversation, even after it has messages", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({
+      id: "source",
+      title: "source chat",
+      messageCount: 1,
+      messages: [{ id: "u1", role: "user", content: "source", timestamp: 1 }],
+      lastViewedAt: 10,
+    }));
+    actions.upsert(baseRecord({
+      id: "temporary-side",
+      title: "temporary side chat",
+      messageCount: 2,
+      messages: [
+        { id: "u2", role: "user", content: "question", timestamp: 2 },
+        { id: "a2", role: "assistant", content: "answer", timestamp: 3 },
+      ],
+      draft: false,
+      lastViewedAt: 20,
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    }));
+
+    expect(selectOrderedSessions(useChatStore.getState()).map((s) => s.id)).toEqual([
+      "source",
+    ]);
+    expect(
+      selectRecentSwitcherSessions(useChatStore.getState()).map((s) => s.id),
+    ).toEqual(["source"]);
+    expect(
+      isReusableBlankChatSession(useChatStore.getState().sessions["temporary-side"]),
+    ).toBe(false);
+  });
+
+  it("keeps an id tombstone after close so late saves cannot resurrect it", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({
+      id: "temporary-side",
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    }));
+    actions.drop("temporary-side");
+
+    const state = useChatStore.getState();
+    expect(state.sessions["temporary-side"]).toBeUndefined();
+    expect(isEphemeralSideConversationId(state, "temporary-side")).toBe(true);
+  });
+
+  it("rejects a leaked namespaced disk record after in-memory state resets", () => {
+    const id = "temporary-side-chat-11111111-1111-4111-8111-111111111111";
+
+    useChatStore.getState().actions.hydrateFromDisk([
+      baseRecord({ id, messageCount: 1, draft: false }),
+    ]);
+
+    expect(useChatStore.getState().sessions[id]).toBeUndefined();
+  });
+});
 
 function baseRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -429,6 +604,57 @@ describe("chat-store: getOrCreateEmptyChatId (no spam on +new)", () => {
 describe("chat-store: visible selection follows the rendered panel", () => {
   beforeEach(reset);
 
+  it("drops an unused mount placeholder after another chat reaches the panel", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      baseRecord({
+        id: "placeholder",
+        draft: true,
+        messageCount: 0,
+        messages: [],
+      }),
+    );
+    actions.setCurrent("placeholder");
+    actions.setPanelSession("placeholder");
+    actions.upsert(baseRecord({ id: "real", messageCount: 2 }));
+    actions.setCurrent("real");
+
+    actions.setPanelSession("real");
+
+    const state = useChatStore.getState();
+    expect(state.panelSessionId).toBe("real");
+    expect(state.openChatIds).toEqual(["real"]);
+    expect(state.sessions.placeholder).toBeUndefined();
+  });
+
+  it("preserves an inactive blank tab when it owns a composer draft", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      baseRecord({
+        id: "draft",
+        draft: true,
+        messageCount: 0,
+        messages: [],
+      }),
+    );
+    actions.setCurrent("draft");
+    actions.setPanelSession("draft");
+    actions.setComposerDraft("draft", {
+      input: "unsent work",
+      pastedImages: [],
+      attachedDocs: [],
+      pendingDocs: [],
+    });
+    actions.upsert(baseRecord({ id: "real", messageCount: 2 }));
+    actions.setCurrent("real");
+
+    actions.setPanelSession("real");
+
+    const state = useChatStore.getState();
+    expect(state.openChatIds).toEqual(["draft", "real"]);
+    expect(state.sessions.draft.composerDraft?.input).toBe("unsent work");
+  });
+
   it("clears unread immediately without claiming the panel switched", () => {
     useChatStore.getState().actions.upsert(baseRecord({ id: "A", lastContentAt: 100 }));
     useChatStore.getState().actions.setCurrent("A");
@@ -732,6 +958,31 @@ describe("chat-store: persisted empty chat cleanup", () => {
     });
 
     expect(record.draft).toBeUndefined();
+  });
+
+  it("keeps an archived pinned automation hidden during disk hydration", () => {
+    const record = sessionRecordFromMeta({
+      id: "pipe:photo-analyzer:7923",
+      title: "photo-analyzer #7923",
+      createdAt: 100,
+      updatedAt: 200,
+      messageCount: 2,
+      pinned: true,
+      hidden: true,
+      kind: "pipe-run",
+      pipeContext: {
+        pipeName: "photo-analyzer",
+        executionId: 7923,
+      },
+    });
+
+    useChatStore.getState().actions.hydrateFromDisk([record]);
+
+    expect(useChatStore.getState().sessions[record.id]).toMatchObject({
+      pinned: true,
+      hidden: true,
+      kind: "pipe-run",
+    });
   });
 });
 

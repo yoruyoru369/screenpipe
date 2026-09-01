@@ -739,7 +739,7 @@ export const INTEGRATION_ICON_KEYS = new Set<string>(Object.keys(INTEGRATION_ICO
 
 export function IntegrationIcon({
   icon,
-  className = "w-10 h-10 bg-muted rounded-xl flex items-center justify-center",
+  className = "w-10 h-10 bg-muted rounded-lg flex items-center justify-center",
   fallbackClassName = "h-5 w-5 text-muted-foreground",
 }: {
   icon: string;
@@ -826,7 +826,7 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
       }}
       className={`
-        group/row flex w-full items-center gap-3 px-3 py-3 rounded-xl border transition-all text-left cursor-pointer select-none
+        group/row flex w-full items-center gap-3 px-3 py-3 rounded-lg border transition-all text-left cursor-pointer select-none
         ${selected
           ? "border-foreground bg-accent"
           : "border-transparent hover:bg-accent/50 hover:border-border"
@@ -868,7 +868,7 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
             </TooltipProvider>
           </>
         ) : (
-          <div className="absolute inset-0 rounded-xl bg-muted flex items-center justify-center">
+          <div className="absolute inset-0 rounded-lg bg-muted flex items-center justify-center">
             <Plus className="h-4 w-4 text-foreground" />
           </div>
         )}
@@ -895,7 +895,7 @@ function McpSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-lg border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -944,7 +944,7 @@ function AiToolsSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-lg border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -993,7 +993,7 @@ function SkillsSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-lg border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -1630,8 +1630,8 @@ function MemorySyncSubsection({
       <div className="space-y-0.5">
         <p className="text-xs font-medium text-foreground">memory sync (beta)</p>
         <p className="text-xs text-muted-foreground">
-          writes your screenpipe memories into {targetFilename} so {assistantName} sees them
-          in every new session. updates automatically every 5 minutes.
+          writes safe recall instructions into {targetFilename} so {assistantName} can retrieve
+          relevant memories through screenpipe MCP. updates automatically every 5 minutes.
         </p>
       </div>
 
@@ -2227,6 +2227,20 @@ const OAUTH_SCOPE_VARIANTS: Record<
   ],
 };
 
+export function getOAuthPanelCopy(integrationId: string, integrationName: string) {
+  if (integrationId === "slack") {
+    return {
+      description: "Connect a Slack workspace. Add each workspace where Screenpipe should act on your behalf.",
+      addAnotherLabel: "add another workspace",
+    };
+  }
+
+  return {
+    description: `Connect your ${integrationName} account. AI can act on your behalf once connected.`,
+    addAnotherLabel: "add another account",
+  };
+}
+
 export function getOAuthFallbackMessage(
   integrationId: string,
   phase: "pending" | "failed",
@@ -2283,6 +2297,7 @@ function OAuthPanel({
     ? initialScopeVariant!
     : scopeVariants?.[0]?.id ?? null;
   const [scopeVariant, setScopeVariant] = useState(defaultScopeVariant);
+  const panelCopy = getOAuthPanelCopy(integrationId, integrationName);
 
   const clearFallbackTimer = useCallback(() => {
     if (fallbackTimerRef.current) {
@@ -2404,7 +2419,7 @@ function OAuthPanel({
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Connect your {integrationName} account. AI can act on your behalf once connected.
+        {panelCopy.description}
       </p>
       {connected && (
         <div className="space-y-2">
@@ -2478,7 +2493,7 @@ function OAuthPanel({
         ) : (
           <Button onClick={handleConnect} disabled={connectDisabled} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal whitespace-nowrap">
             {connected && supportsOAuthInstances
-              ? (<><Plus className="h-3 w-3" />add another account</>)
+              ? (<><Plus className="h-3 w-3" />{panelCopy.addAnotherLabel}</>)
               : connected
                 ? (<><LogIn className="h-3 w-3" />reconnect {integrationName}</>)
               : (<><LogIn className="h-3 w-3" />connect with {integrationName}</>)}

@@ -40,8 +40,10 @@ use updates::start_update_check;
 use window::ShowRewindWindow;
 
 mod activity_history;
+mod first_run_summary;
 mod analytics;
 mod auth_session;
+mod focus_handoff;
 #[allow(deprecated)]
 mod icons;
 use crate::analytics::start_analytics;
@@ -53,8 +55,10 @@ mod calendar;
 mod capture_session;
 mod chat_control;
 mod chatgpt_oauth;
+mod coding_workspace;
 #[allow(deprecated)]
 mod commands;
+mod data_sync;
 mod db_recovery_notifications;
 mod db_relaunch;
 mod db_self_heal;
@@ -126,10 +130,9 @@ mod suggestions;
 mod sync;
 mod tray;
 #[cfg(target_os = "macos")]
-mod tray_monitor_preview;
-#[cfg(target_os = "macos")]
 mod staged_update;
 mod stale_tier;
+mod startup_auth;
 mod updates;
 mod voice_training;
 mod window;
@@ -261,6 +264,26 @@ fn should_skip_onboarding() -> bool {
 
 fn should_prevent_window_close(label: &str) -> bool {
     label != "onboarding"
+}
+
+#[cfg(target_os = "macos")]
+fn emit_menu_close_window(app: &tauri::AppHandle) {
+    let focused = app
+        .webview_windows()
+        .into_values()
+        .find(|window| window.is_focused().unwrap_or(false));
+    if let Some(window) = focused {
+        let _ = window.emit("menu-close-window", ());
+        return;
+    }
+    for label in ["home", "chat"] {
+        if let Some(window) = app.get_webview_window(label) {
+            if window.is_visible().unwrap_or(false) {
+                let _ = window.emit("menu-close-window", ());
+                return;
+            }
+        }
+    }
 }
 
 /// Flag passed by tauri-plugin-autostart when the OS launches us at login.
@@ -582,6 +605,14 @@ async fn main() {
         let launch_exe = std::env::current_exe()
             .ok()
             .map(|path| path.to_string_lossy().to_string());
+        #[cfg(target_os = "macos")]
+        // A LaunchAgent receives its plist Label here. LaunchServices starts
+        // deliberate Dock/Finder opens under an `application.<bundle-id>...`
+        // service instead, so the receiver can distinguish the two without
+        // treating every macOS process whose parent is launchd as autostart.
+        let launchd_job_label = std::env::var("XPC_SERVICE_NAME").ok();
+        #[cfg(not(target_os = "macos"))]
+        let launchd_job_label: Option<String> = None;
 
         let focus_port: u16 = std::env::var("SCREENPIPE_FOCUS_PORT")
             .ok()
@@ -594,6 +625,7 @@ async fn main() {
                 "args": args,
                 "deep_link_url": deep_link_url,
                 "launch_exe": launch_exe,
+                "launchd_job_label": launchd_job_label,
             }))
             .send()
             .await
@@ -927,6 +959,7 @@ async fn main() {
         .on_window_event(|window, event| match event {
             #[cfg(target_os = "macos")]
             tauri::WindowEvent::Focused(true) => {
+                crate::window::watch_focused(window);
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let capture_intended = app
@@ -1130,6 +1163,7 @@ async fn main() {
 
     let app = app.manage(recording_state)
         .manage(activity_history::ActivityHistoryState::default())
+        .manage(first_run_summary::FirstRunSummaryState::default())
         .manage(disk_pressure_notifications::DiskPressureNotificationState::default())
         .manage(pi_state)
         .manage(suggestions_state)
@@ -1220,16 +1254,20 @@ async fn main() {
                     .item(&PredefinedMenuItem::select_all(app, None)?)
                     .build()?;
 
-                // Standard Window menu so macOS key equivalents (Cmd-W close,
-                // Cmd-M minimize) work — without a menu item carrying the
-                // accelerator, AppKit silently swallows the keystroke. Close
-                // goes through the CloseRequested handler above, so Cmd-W
-                // hides to tray exactly like the red traffic-light button.
+                // Custom Close (not PredefinedMenuItem::close_window) so Cmd-W
+                // can close a chat tab first. The frontend listens for
+                // menu-close-window and hides the window only when no tab
+                // consumed the chord. Traffic-light close is unchanged.
+                // Cmd-M still needs a menu key equivalent or AppKit swallows it.
                 let window_submenu = SubmenuBuilder::new(app, "Window")
                     .item(&PredefinedMenuItem::minimize(app, None)?)
                     .item(&PredefinedMenuItem::maximize(app, None)?)
                     .separator()
-                    .item(&PredefinedMenuItem::close_window(app, None)?)
+                    .item(
+                        &MenuItemBuilder::with_id("close_window", "Close")
+                            .accelerator("CmdOrCtrl+W")
+                            .build(app)?,
+                    )
                     .build()?;
 
                 let menu = MenuBuilder::new(app)
@@ -1259,6 +1297,12 @@ async fn main() {
                         }
                         "quit_app" => {
                             process_exit::confirm_and_request_app_quit(app_handle.clone());
+                        }
+                        "close_window" => {
+                            let app = app_handle.clone();
+                            let _ = app_handle.run_on_main_thread(move || {
+                                emit_menu_close_window(&app);
+                            });
                         }
                         _ => {}
                     }
@@ -1360,9 +1404,6 @@ async fn main() {
             // Autostart setup
             let autostart_manager = app.autolaunch();
 
-            // Install Pi coding agent in background (fire-and-forget, never crashes)
-            crate::pi::ensure_pi_installed_background();
-
             info!("App version: {}", env!("CARGO_PKG_VERSION"));
             info!("Local data directory: {}", base_dir.display());
 
@@ -1392,6 +1433,15 @@ async fn main() {
             e2e::seeds::apply_settings(app.handle(), &mut store);
 
             app.manage(store.clone());
+
+            // Resolve authentication at the first point its settings
+            // prerequisite is available, before beginning any application
+            // runtime. Consumer and Enterprise builds deliberately share these
+            // two sequential steps; only the credential check inside the
+            // resolver varies by build. `SCREENPIPE_SKIP_ONBOARDING` returns
+            // `NotRequired` without invoking either checker.
+            startup_auth::bootstrap(&app_handle, &store);
+
             crate::recording::refresh_history_access_policy(
                 &app.state::<RecordingState>().history_access,
                 &store,
@@ -1522,6 +1572,10 @@ async fn main() {
 
             #[cfg(feature = "e2e")]
             e2e::seeds::apply_onboarding(app.handle());
+
+            // Install Pi only after the shared authentication bootstrap has
+            // resolved and application initialization has begun.
+            crate::pi::ensure_pi_installed_background();
 
             // Escape hatch: SCREENPIPE_SKIP_ONBOARDING=1 marks onboarding complete
             // at startup so corp/VDI/headless environments (where the interactive
@@ -1826,7 +1880,7 @@ async fn main() {
                 }
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
-                if !crate::recording::recording_access_allowed(&store_clone) {
+                if !crate::recording::server_access_allowed(&store_clone) {
                     info!("Skipping server auto-start: screenpipe account access required");
                     crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
                     let _ = app_handle.emit("app-entitlement-required", ());
@@ -1837,7 +1891,12 @@ async fn main() {
                 // spawn_screenpipe command. DB-wedge recovery consults this
                 // shared flag so it can rebuild the server without silently
                 // leaving a normally auto-started recording paused.
-                recording_state.set_capture_intent(true);
+                let capture_allowed =
+                    crate::recording::recording_access_allowed(&app_handle, &store_clone);
+                recording_state.set_capture_intent(capture_allowed);
+                if !capture_allowed {
+                    info!("Starting local read server without capture for trial activation");
+                }
                 // Reserve the lifecycle slot before publishing is_starting or
                 // spawning the OS thread. Otherwise a frontend spawn can win
                 // the scheduling gap, hold this lock while waiting on
@@ -1946,12 +2005,20 @@ async fn main() {
                                             format!("Bearer {}", key),
                                         );
                                     }
-                                    request.send().await.is_ok()
+                                    let response = match request.send().await {
+                                        Ok(response) => response,
+                                        Err(_) => return false,
+                                    };
+                                    let status = response.status().as_u16();
+                                    match response.json::<serde_json::Value>().await {
+                                        Ok(payload) => screenpipe_engine::health_identity::is_screenpipe_health_response(status, &payload),
+                                        Err(_) => false,
+                                    }
                                 }
                             ).await.unwrap_or(false);
 
                             if server_running {
-                                info!("Server already running, skipping startup");
+                                info!("Healthy screenpipe server already running, skipping startup");
                                 is_starting_clone.store(false, std::sync::atomic::Ordering::SeqCst);
                                 return;
                             }
@@ -2243,11 +2310,10 @@ async fn main() {
             crate::db_recovery_notifications::start(app_handle.clone());
             if launch_db_quarantined {
                 // A new process must preserve the same fail-closed state as the
-                // process that observed the hard fault — unless the fault was
-                // the transient I/O family and this generation still verifies
-                // healthy, in which case the fresh WAL index already undid the
-                // damage and parking recording until a human intervenes costs
-                // hours of capture for nothing. Verification runs off the setup
+                // process that observed the hard fault — unless its exact
+                // prerequisite has cleared (fresh process for SHORT_READ,
+                // recovered volume headroom for FULL) and this unchanged
+                // generation verifies healthy. Verification runs off the setup
                 // thread: it reads the whole file, which is seconds on a large
                 // database, and the UI must not wait for it.
                 let self_heal_app = app_handle.clone();
@@ -2288,6 +2354,7 @@ async fn main() {
             }
             crate::disk_pressure_notifications::start(app_handle.clone());
             activity_history::start(app_handle.clone());
+            first_run_summary::start(app_handle.clone());
 
             // Background ChatGPT OAuth token refresh — keeps access tokens
             // fresh so the lazy path in get_valid_token() rarely needs to
@@ -2385,6 +2452,10 @@ async fn main() {
             // Runs forever in background; only takes effect on enterprise-
             // telemetry builds with SCREENPIPE_ENTERPRISE_LICENSE_KEY env set.
             let _enterprise_shutdown_tx = enterprise_sync::spawn(&app_handle);
+
+            // Account data sync. Runtime eligibility keeps customer-managed
+            // Enterprise accounts out while allowing Screenpipe's own org.
+            data_sync::spawn(&app_handle);
 
             // Standard builds: account-bound, explicit opt-in support logs.
             // Enterprise builds compile this as a no-op because their managed

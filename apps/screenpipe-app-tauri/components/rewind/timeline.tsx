@@ -18,7 +18,7 @@ import { endOfDay, isSameDay, startOfDay } from "date-fns";
 import { getStartDate } from "@/lib/actions/get-start-date";
 import { useTimelineData } from "@/lib/hooks/use-timeline-data";
 import { useCurrentFrame } from "@/lib/hooks/use-current-frame";
-import { isScreenRecordingOff } from "@/lib/hooks/timeline-empty-state";
+import { isScreenRecordingOff, screenshotsDisabledCta } from "@/lib/hooks/timeline-empty-state";
 import { TimelineSlider } from "@/components/rewind/timeline/timeline";
 import { SearchResultStrip } from "@/components/rewind/search-result-strip";
 import { useMeetings } from "@/lib/hooks/use-meetings";
@@ -1319,6 +1319,29 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 										Open settings
 									</button>
 								</div>
+							) : screenshotsDisabledCta(health) ? (
+								<div className="text-center p-8 max-w-md">
+									<div className="mx-auto mb-8 w-24 h-24 flex items-center justify-center">
+										<div className="w-16 h-16 rounded-full bg-muted/50 border border-border flex items-center justify-center">
+											<MonitorOff className="w-8 h-8 text-muted-foreground" />
+										</div>
+									</div>
+
+									<h3 className="text-xl font-semibold text-foreground mb-3">
+										{screenshotsDisabledCta(health)?.headline}
+									</h3>
+									<p className="text-muted-foreground mb-6 leading-relaxed">
+										{screenshotsDisabledCta(health)?.body}
+									</p>
+
+									<button
+										onClick={() => commands.showWindow({ Home: { page: "recording" } })}
+										className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-full text-sm font-medium hover:bg-primary/90 transition-colors"
+									>
+										<Settings className="w-4 h-4" />
+										Open settings
+									</button>
+								</div>
 							) : (
 								<div className="text-center p-8 max-w-md">
 									{/* Animated icon */}
@@ -1462,7 +1485,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 								<X className="w-4 h-4 text-muted-foreground" />
 							</button>
 						)}
-						<div className="bg-card text-foreground p-6 rounded-2xl text-center space-y-3 max-w-md mx-4">
+						<div className="bg-card text-foreground p-6 rounded-lg text-center space-y-3 max-w-md mx-4">
 							<h3 className="font-medium">Loading Timeline</h3>
 							<p className="text-sm text-foreground">
 								Fetching your recorded frames...
@@ -1493,7 +1516,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 								<X className="w-4 h-4 text-muted-foreground" />
 							</button>
 						)}
-						<div className="bg-destructive/20 border border-destructive/30 text-foreground p-6 rounded-2xl text-center space-y-4 max-w-md mx-4">
+						<div className="bg-destructive/20 border border-destructive/30 text-foreground p-6 rounded-lg text-center space-y-4 max-w-md mx-4">
 							<div className="flex flex-col items-center gap-2">
 								<AlertCircle className="h-6 w-6 text-destructive" />
 								<h3 className="font-medium text-destructive">Connection Error</h3>

@@ -41,9 +41,10 @@ import { saveConversationFile } from "@/lib/chat-storage";
 import {
   flushPendingSaves,
   handlePiEvent,
+  handleSessionEvicted,
   handleTerminated,
 } from "../stores/pi-event-router";
-import { useChatStore, type SessionRecord } from "../stores/chat-store";
+import { useChatStore, selectOrderedSessions, type SessionRecord } from "../stores/chat-store";
 import { useAcpSessionConfig } from "../stores/acp-session-config";
 import type { AgentEventEnvelope, AgentInnerEvent } from "../events/types";
 
@@ -57,7 +58,12 @@ function piEvt(sessionId: string, event: AgentInnerEvent): AgentEventEnvelope {
 function reset() {
   vi.clearAllMocks();
   deleteCachedBrowserState("A");
-  useChatStore.setState({ sessions: {}, currentId: null, panelSessionId: null });
+  useChatStore.setState({
+    sessions: {},
+    ephemeralSideConversationIds: {},
+    currentId: null,
+    panelSessionId: null,
+  });
   // The ACP config store is a module singleton; without resetting it (and the
   // localStorage it persists to) its sessions/byAgent leak across the acp
   // describe blocks and make the suite order-dependent.
@@ -171,6 +177,31 @@ describe("pi-event-router: envelope destructuring (the actual day-1 bug)", () =>
 describe("pi-event-router: status mirroring for backgrounded sessions", () => {
   beforeEach(reset);
 
+  it("does not resurrect a closed temporary side chat from a late event", async () => {
+    seed("temporary-side", {
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    });
+    useChatStore.getState().actions.drop("temporary-side");
+
+    await handlePiEvent(piEvt("temporary-side", { type: "agent_start" }));
+
+    expect(useChatStore.getState().sessions["temporary-side"]).toBeUndefined();
+  });
+
+  it("rejects temporary side-chat events after renderer state is lost", async () => {
+    const id = "temporary-side-chat-11111111-1111-4111-8111-111111111111";
+
+    await handlePiEvent(piEvt(id, { type: "agent_start" }));
+    await handlePiEvent(piEvt(id, {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "late token" },
+    }));
+
+    expect(useChatStore.getState().sessions[id]).toBeUndefined();
+  });
+
   it("flips status to streaming on agent_start", async () => {
     seed("A");
     useChatStore.setState({ currentId: "B" });
@@ -186,6 +217,27 @@ describe("pi-event-router: status mirroring for backgrounded sessions", () => {
     await vi.waitFor(() => {
       expect(routerCommandMocks.piStopIfIdle).toHaveBeenCalledWith("A");
     });
+  });
+
+  it("never persists a temporary side conversation from background or quit flushes", async () => {
+    seed("temporary-side", {
+      messages: [
+        { id: "u1", role: "user", content: "question", timestamp: 1 },
+        { id: "a1", role: "assistant", content: "answer", timestamp: 2 },
+      ],
+      messageCount: 2,
+      isLoading: true,
+      isStreaming: true,
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    });
+    useChatStore.setState({ currentId: "source", panelSessionId: "source" });
+
+    await handlePiEvent(piEvt("temporary-side", { type: "agent_end" }));
+    await flushPendingSaves();
+
+    expect(saveConversationFile).not.toHaveBeenCalled();
   });
 
   it("stays streaming while agent_end is followed by an automatic retry", async () => {
@@ -455,7 +507,14 @@ describe("pi-event-router: background content accumulation (the parallel-chat re
       "tool",
       "text",
     ]);
+    expect(assistant.contentBlocks[0].phase).toBe("commentary");
+    expect(assistant.contentBlocks[2].phase).toBeUndefined();
     expect(assistant.contentBlocks[1].toolCall.result).toBe("hi");
+
+    await handlePiEvent(piEvt("A", { type: "agent_end" }));
+    const settledAssistant = useChatStore.getState().sessions.A.messages![0] as any;
+    expect(settledAssistant.contentBlocks[0].phase).toBe("commentary");
+    expect(settledAssistant.contentBlocks[2].phase).toBe("final_answer");
   });
 
   it("keeps accumulating during the switch-back gap after currentId flips", async () => {
@@ -674,6 +733,61 @@ describe("pi-event-router: agent_terminated", () => {
         ],
       })
     );
+  });
+});
+
+describe("pi-event-router: agent_session_evicted", () => {
+  beforeEach(reset);
+
+  it("keeps the recents row and sort keys when the pool kills Pi", () => {
+    seed("older", { createdAt: 100, lastUserMessageAt: 100, status: "streaming" });
+    seed("newer", { createdAt: 200, lastUserMessageAt: 200, status: "streaming" });
+
+    handleSessionEvicted({ sessionId: "older" });
+
+    const older = useChatStore.getState().sessions.older;
+    expect(older).toBeDefined();
+    expect(older.status).toBe("idle");
+    expect(older.createdAt).toBe(100);
+    expect(older.lastUserMessageAt).toBe(100);
+    expect(older.isStreaming).toBe(false);
+    expect(selectOrderedSessions(useChatStore.getState()).map((s) => s.id)).toEqual([
+      "newer",
+      "older",
+    ]);
+  });
+
+  it("does not lazy-recreate the row after eviction, so later tokens cannot reshuffle it", async () => {
+    seed("A", {
+      createdAt: 100,
+      lastUserMessageAt: 100,
+      title: "real title",
+      status: "streaming",
+    });
+    seed("B", { createdAt: 200, lastUserMessageAt: 200 });
+
+    handleSessionEvicted({ sessionId: "A" });
+    await handlePiEvent(piEvt("A", { type: "agent_start" }));
+    await handlePiEvent(
+      piEvt("A", {
+        type: "message_start",
+        message: { role: "assistant" },
+      } as AgentInnerEvent),
+    );
+
+    const a = useChatStore.getState().sessions.A;
+    expect(a.createdAt).toBe(100);
+    expect(a.lastUserMessageAt).toBe(100);
+    expect(a.title).toBe("real title");
+    expect(selectOrderedSessions(useChatStore.getState()).map((s) => s.id)).toEqual([
+      "B",
+      "A",
+    ]);
+  });
+
+  it("ignores eviction for unknown sessions", () => {
+    handleSessionEvicted({ sessionId: "ghost" });
+    expect(useChatStore.getState().sessions.ghost).toBeUndefined();
   });
 });
 

@@ -127,6 +127,7 @@ describe("AppEntitlementGate", () => {
     // Production-like env so the dev billing bypass stays off and the gate runs.
     vi.stubEnv("TAURI_ENV_DEBUG", "false");
     vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_BILLING_BYPASS", "false");
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "false");
     mocks.state = { isSettingsLoaded: true, user: null };
     mocks.enterpriseResolutionError = false;
     mocks.windowLabel = "home";
@@ -139,10 +140,41 @@ describe("AppEntitlementGate", () => {
     };
   });
 
+  it("lets the explicit dev login-skip build reach the app without a user", () => {
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "true");
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+  });
+
+  it("lets the dev login-skip build through with partial tokenless user state", () => {
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "true");
+    mocks.state.user = { id: "dev-partial-user" };
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(screen.queryByText(/sign in required/i)).not.toBeInTheDocument();
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     cleanup();
     window.history.replaceState({}, "", "/");
     vi.unstubAllEnvs();
+  });
+
+  it("starts the application without an account when authentication is not required", () => {
+    render(
+      <AppEntitlementGate authenticationStatus="not_required">
+        {protectedApp}
+      </AppEntitlementGate>,
+    );
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
   });
 
   it("leaves enterprise authentication on the onboarding login step", () => {
@@ -831,6 +863,32 @@ describe("AppEntitlementGate", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByTestId("protected-app")).toBeInTheDocument();
     expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+  });
+
+  it("routes restricted enterprise members away even with a consumer subscription", () => {
+    mocks.state.user = baseUser({
+      app_entitled: true,
+      cloud_subscribed: true,
+      subscription_plan: "pro",
+      enterprise_account: {
+        org_name: "Bungalow",
+        role: "member",
+        requires_enterprise_app: true,
+        restrict_consumer_build_access: true,
+      },
+      entitlement: {
+        active: true,
+        plan: "pro",
+        source: "subscription",
+        checked_at: minsAgo(1),
+        features: { app: true, cloud: true },
+      },
+    });
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByText(/enterprise app required/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("protected-app")).not.toBeInTheDocument();
   });
 
   it.each(["pro_max", "pro_ultra"] as const)(

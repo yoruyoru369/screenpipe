@@ -48,9 +48,12 @@ export type AppEntitlement = {
 };
 
 export type AppEnterpriseAccount = {
+  team_id?: string | null;
   org_name?: string | null;
   role?: string | null;
   requires_enterprise_app?: boolean | null;
+  restrict_consumer_build_access?: boolean | null;
+  is_screenpipe_user?: boolean | null;
 };
 
 export type AppUser = User & {
@@ -125,6 +128,13 @@ export function isDevBillingBypassEnabled() {
     // features; the dedicated gate spec re-enables it via the key above.
     process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true"
   );
+}
+
+// Deliberately separate from the broader dev billing bypass. Most local and
+// preview builds should still exercise login unless this test-only affordance
+// was explicitly compiled into the frontend.
+export function isDevLoginSkipEnabled() {
+  return process.env.NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP === "true";
 }
 
 // Show the dev-only login helper (paste a token / screenpipe:// URL) when we are
@@ -334,6 +344,31 @@ function hasVerifiedPaidPlanAt(
 /** Explicit server-verified paid truth, without the debug billing bypass. */
 export function hasVerifiedPaidPlan(user: AppUser | null | undefined): boolean {
   return hasVerifiedPaidPlanAt(user, Date.now());
+}
+
+/** Data sync is available only to eligible individual paid accounts. */
+export function canUseDataSync(user: AppUser | null | undefined): boolean {
+  if (!hasVerifiedPaidPlan(user)) return false;
+
+  const plan = user?.subscription_plan?.trim().toLowerCase();
+  const entitlement = asEntitlement(user?.entitlement);
+  const enterpriseAccount = getEnterpriseAccount(user);
+  const isScreenpipeAccount =
+    enterpriseAccount?.is_screenpipe_user === true ||
+    enterpriseAccount?.team_id?.trim().toLowerCase() === "screenpipe" ||
+    enterpriseAccount?.org_name?.trim().toLowerCase() === "screenpipe";
+  const isEnterpriseAccount =
+    Boolean(enterpriseAccount) ||
+    user?.entitlement_source?.trim().toLowerCase() === "enterprise" ||
+    entitlement?.source?.trim().toLowerCase() === "enterprise";
+
+  return (
+    (!isEnterpriseAccount || isScreenpipeAccount) &&
+    plan !== "none" &&
+    plan !== "standard" &&
+    plan !== "basic" &&
+    (isScreenpipeAccount || (plan !== "team" && plan !== "enterprise"))
+  );
 }
 
 function hasFutureGraceAt(

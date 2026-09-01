@@ -528,8 +528,10 @@ const E2E_COMMANDS: &[&str] = &[
     "low_disk_guard_enabled",
     "set_tray_recording_status",
     "installed_tray_recording_status",
+    "trigger_tray_recording_toggle",
     "shortcut_reminder_visible",
     "open_auto_meeting",
+    "simulate_calendar_meeting_match",
     "active_meeting_id",
     "native_meeting_overlay_state",
     "native_timeline_search_state",
@@ -548,12 +550,16 @@ const E2E_COMMANDS: &[&str] = &[
     "recording_health_return_race",
     "owned_browser_visible",
     "owned_browser_detach",
+    "owned_browser_tab_control",
+    "owned_browser_tab_snapshot",
     "inject_db_hard_fault",
     "db_hard_fault_state",
     "seed_flags",
     "capture_pi_start_error",
     "set_onboarding_completed_ago",
     "e2e_set_activation_allowed",
+    "arm_renderer_stalls",
+    "renderer_recovery_state",
 ];
 
 fn validate_e2e_command_inventory() {

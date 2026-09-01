@@ -31,6 +31,7 @@ import type { ChatSendOptions, Message } from "@/lib/chat/types";
 import { normalizeComposerMentionsForModel } from "@/lib/chat-utils";
 import { chatSendTelemetryContext } from "@/lib/chat/response-feedback";
 import type { PiSendTransportOptions } from "@/components/chat/standalone/hooks/pi-types";
+import type { ResolvedPiProviderConfig } from "@/components/chat/standalone/hooks/use-pi-session-lifecycle";
 
 type LivePiSessionCheck =
   | { running: true; info: PiInfo }
@@ -50,6 +51,15 @@ export function hasAuthoritativeActivePiTurn({
   assistantMessageId: string | null;
 }): boolean {
   return isStreaming || assistantMessageId !== null;
+}
+
+export function shouldInterruptActivePiTurn({
+  startedFreshPiSession,
+  ...turnState
+}: Parameters<typeof hasAuthoritativeActivePiTurn>[0] & {
+  startedFreshPiSession: boolean;
+}): boolean {
+  return !startedFreshPiSession && hasAuthoritativeActivePiTurn(turnState);
 }
 
 export async function awaitPendingPiPresetSwitch(
@@ -108,6 +118,57 @@ export async function awaitPiStartInFlight(
   while (startInFlightRef.current) {
     await waitForNextTick();
   }
+}
+
+export async function prepareCodingWorkspaceForSend({
+  prompt,
+  prepare,
+  router,
+  sessionId,
+  startInFlightRef,
+  sessionSyncedRef,
+  stopPi = commands.piStop,
+  setPiInfo,
+}: {
+  prompt: string;
+  prepare?: (
+    prompt: string,
+    router?: {
+      providerConfig: ResolvedPiProviderConfig;
+      userToken: string | null;
+    },
+  ) => Promise<{ ok: boolean; created: boolean }>;
+  router?: {
+    providerConfig: ResolvedPiProviderConfig;
+    userToken: string | null;
+  };
+  sessionId: string | null;
+  startInFlightRef: { current: boolean };
+  sessionSyncedRef: { current: boolean };
+  stopPi?: typeof commands.piStop;
+  setPiInfo: (info: PiInfo | null) => void;
+}): Promise<{ proceed: boolean; error?: string }> {
+  if (!prepare) return { proceed: true };
+  let preparation: { ok: boolean; created: boolean };
+  try {
+    preparation = await prepare(prompt, router);
+  } catch (error) {
+    return {
+      proceed: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (!preparation.ok) return { proceed: false };
+  if (!preparation.created) return { proceed: true };
+
+  await awaitPiStartInFlight(startInFlightRef);
+  const stopped = await stopPi(sessionId);
+  if (stopped.status === "error") {
+    return { proceed: false, error: stopped.error };
+  }
+  setPiInfo(stopped.data);
+  sessionSyncedRef.current = false;
+  return { proceed: true };
 }
 
 /** Read the process manager instead of trusting the render-time `piInfo`. */
@@ -187,6 +248,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     prefillContext,
     prefillFrameId,
     prefillSource,
+    prepareCodingWorkspace,
     resolveComposerMentions,
     restartCurrentPiSession,
     saveConversation,
@@ -264,13 +326,17 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     }
   }
 
-  async function interruptActivePiTurn(sessionId = piSessionIdRef.current) {
-    const hasActiveTurn = hasAuthoritativeActivePiTurn({
+  async function interruptActivePiTurn(
+    sessionId = piSessionIdRef.current,
+    startedFreshPiSession = false,
+  ) {
+    const shouldInterrupt = shouldInterruptActivePiTurn({
+      startedFreshPiSession,
       isLoading,
       isStreaming,
       assistantMessageId: piMessageIdRef.current,
     });
-    if (!hasActiveTurn) return;
+    if (!shouldInterrupt) return;
 
     let aborted = false;
     try {
@@ -392,6 +458,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     // not immediately started a second time, and a failed one cannot reuse the
     // stale provider.
     let liveSession: Awaited<ReturnType<typeof checkLivePiSession>>;
+    let startedFreshPiSession = false;
     try {
       liveSession = await checkLivePiSession(attemptSessionId, setAttemptPiInfo);
     } catch (e) {
@@ -484,6 +551,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
                   });
                 }
                 started = true;
+                startedFreshPiSession = true;
                 break;
               } else {
                 lastError = result.status === "error"
@@ -586,7 +654,11 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
         return;
       }
 
-      await interruptActivePiTurn(attemptSessionId);
+      // A process started by this send cannot have an active model turn yet.
+      // Restored chats can briefly retain stale streaming refs while their new
+      // Pi process starts; aborting that idle process wedges the first reply
+      // before its prompt is ever dispatched.
+      await interruptActivePiTurn(attemptSessionId, startedFreshPiSession);
     } catch (e) {
       finishAttempt();
       throw e;
@@ -972,6 +1044,31 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
   ) {
     if ((!canChat && !autoSendBypassRef.current) || (!getActivePreset() && !autoSendBypassRef.current)) return;
     const originalTrimmed = userMessage.trim();
+    const routerProviderConfig = buildProviderConfig(getActivePreset());
+    const workspacePreparation = await prepareCodingWorkspaceForSend({
+      prompt: originalTrimmed,
+      prepare: prepareCodingWorkspace,
+      router: routerProviderConfig
+        ? {
+            providerConfig: routerProviderConfig,
+            userToken: settings.user?.token ?? null,
+          }
+        : undefined,
+      sessionId: piSessionIdRef.current,
+      startInFlightRef: piStartInFlightRef,
+      sessionSyncedRef: piSessionSyncedRef,
+      setPiInfo,
+    });
+    if (!workspacePreparation.proceed) {
+      if (workspacePreparation.error) {
+        toast({
+          title: "could not prepare coding workspace",
+          description: workspacePreparation.error,
+          variant: "destructive",
+        });
+      }
+      return;
+    }
     // Composer mentions (`@app`, `@audio`, `@"speaker"`, `#tag`, `~range`,
     // `$skill`) are resolved into an explicit context block here. Without this
     // the model receives the raw token and has to guess what the chips above

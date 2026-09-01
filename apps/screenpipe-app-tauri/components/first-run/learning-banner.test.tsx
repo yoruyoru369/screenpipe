@@ -6,14 +6,17 @@ import "@testing-library/jest-dom/vitest";
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FirstRunLearningBanner } from "./learning-banner";
-import { FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY } from "./search-shortcut-practice";
+import {
+  FirstRunLearningBanner,
+  TrialActivationSummaryExperience,
+  TrialActivationUnlockPrompt,
+} from "./learning-banner";
 import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 
 const mocks = vi.hoisted(() => ({
   view: {} as LearningWindowView,
   emit: vi.fn().mockResolvedValue(undefined),
-  sendNotification: vi.fn().mockResolvedValue(undefined),
+  completeOnboarding: vi.fn().mockResolvedValue(undefined),
   handoff: {
     targets: [],
     resolved: false,
@@ -23,33 +26,30 @@ const mocks = vi.hoisted(() => ({
   } as {
     targets: { id: string; label: string; deeplink?: string; hint: string }[];
     resolved: boolean;
-    preferredTarget: { id: string; label: string; deeplink?: string; hint: string } | null;
+    preferredTarget: {
+      id: string;
+      label: string;
+      deeplink?: string;
+      hint: string;
+    } | null;
     hint: string | null;
     askAgent: ReturnType<typeof vi.fn>;
   },
 }));
 
-vi.mock("@/lib/first-run/use-learning-window", () => ({
-  useLearningWindow: () => mocks.view,
+vi.mock("@/components/first-run/learning-window-provider", () => ({
+  useFirstRunLearningWindow: () => ({
+    learning: mocks.view,
+    handoff: mocks.handoff,
+  }),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: mocks.emit,
   listen: vi.fn(async () => () => {}),
 }));
-
-vi.mock("@/lib/first-run/use-agent-handoff", () => ({
-  useAgentHandoff: () => mocks.handoff,
-}));
-
-vi.mock("@/lib/first-run/summary-notification", () => ({
-  sendFirstRunSummaryNotification: mocks.sendNotification,
-}));
-
-vi.mock("@/components/first-run/next-steps", () => ({
-  FirstRunNextSteps: () => (
-    <div data-testid="first-run-next-steps">next steps</div>
-  ),
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: { completeOnboarding: mocks.completeOnboarding },
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -75,8 +75,11 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
     emptyReason: null,
     capturedApps: [],
     remainingMs: 5 * 60 * 1_000,
+    activationState: "inactive",
     markSummaryOpened: vi.fn(),
+    markSummaryRendered: vi.fn().mockResolvedValue(undefined),
     markNotificationSent: vi.fn(),
+    markReadyShown: vi.fn(),
     dismiss: vi.fn(),
     ...over,
   } as LearningWindowView;
@@ -84,6 +87,18 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  if (!window.localStorage) {
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        clear: () => values.clear(),
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+  }
   window.localStorage.clear();
   // Default: no connected agent. Every handoff assertion opts in explicitly so
   // the fallback path is what the other tests exercise.
@@ -96,56 +111,79 @@ beforeEach(() => {
   };
 });
 
+describe("trial activation summary experience", () => {
+  it("makes the timer primary and keeps the summary CTA disabled while learning", () => {
+    mocks.view = view({
+      activationState: "summary",
+      remainingMs: 120_000,
+    });
+    render(<TrialActivationSummaryExperience />);
+
+    expect(screen.getByTestId("trial-activation-countdown")).toHaveTextContent("2:00");
+    expect(screen.getByTestId("trial-activation-view-summary")).toBeDisabled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("opens only a ready valid summary", async () => {
+    const markSummaryOpened = vi.fn();
+    mocks.view = view({
+      activationState: "summary",
+      phase: "ready",
+      chatId: "first-run-ready",
+      markSummaryOpened,
+    });
+    render(<TrialActivationSummaryExperience />);
+
+    fireEvent.click(screen.getByTestId("trial-activation-view-summary"));
+    await waitFor(() =>
+      expect(mocks.emit).toHaveBeenCalledWith("chat-load-conversation", {
+        conversationId: "first-run-ready",
+        targetWindow: "home",
+      }),
+    );
+    expect(
+      window.localStorage.getItem("pending-chat-conversation"),
+    ).toBe("first-run-ready");
+    expect(markSummaryOpened).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers recovery instead of payment after an empty summary", async () => {
+    mocks.view = view({ activationState: "summary", phase: "empty" });
+    render(<TrialActivationSummaryExperience />);
+
+    fireEvent.click(screen.getByRole("button", { name: "retry summary" }));
+    await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());
+    expect(screen.queryByTestId("trial-activation-paywall")).not.toBeInTheDocument();
+  });
+
+  it("shows checkout only after the locked-summary trial CTA is clicked", () => {
+    const onStartTrial = vi.fn();
+    render(<TrialActivationUnlockPrompt onStartTrial={onStartTrial} />);
+
+    fireEvent.click(screen.getByTestId("trial-activation-start-trial"));
+
+    expect(onStartTrial).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("trial-activation-summary-lock")).toHaveClass(
+      "pointer-events-none",
+    );
+    expect(
+      screen.getByTestId("trial-activation-start-trial").parentElement,
+    ).toHaveClass("pointer-events-auto");
+  });
+
+  it("supports an inline CTA beside native product surfaces", () => {
+    render(
+      <TrialActivationUnlockPrompt onStartTrial={vi.fn()} inline />,
+    );
+
+    const prompt = screen.getByTestId("trial-activation-summary-lock");
+    expect(prompt).toHaveAttribute("data-layout", "inline");
+    expect(prompt).toHaveClass("shrink-0", "border-t");
+    expect(prompt).not.toHaveClass("absolute", "pointer-events-none");
+  });
+});
+
 describe("first-run learning banner", () => {
-  it("sends the ready notification once after agent detection settles", async () => {
-    const markNotificationSent = vi.fn();
-    mocks.view = view({
-      phase: "ready",
-      chatId: "private-chat-id",
-      markNotificationSent,
-    });
-    mocks.handoff.resolved = true;
-    render(<FirstRunLearningBanner />);
-
-    await waitFor(() => expect(mocks.sendNotification).toHaveBeenCalledWith(null));
-    expect(markNotificationSent).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not notify again after delivery or after the summary opened", () => {
-    mocks.handoff.resolved = true;
-    for (const state of [
-      view({
-        phase: "ready",
-        chatId: "private-chat-id",
-        notificationSentAt: "2026-08-23T00:00:00.000Z",
-      }),
-      view({
-        phase: "ready",
-        chatId: "private-chat-id",
-        summaryOpenedAt: "2026-08-23T00:00:00.000Z",
-      }),
-    ]) {
-      mocks.view = state;
-      const rendered = render(<FirstRunLearningBanner />);
-      rendered.unmount();
-    }
-    expect(mocks.sendNotification).not.toHaveBeenCalled();
-  });
-
-  it("retries later when /notify rejects instead of spending the latch", async () => {
-    const markNotificationSent = vi.fn();
-    mocks.sendNotification.mockRejectedValueOnce(new Error("offline"));
-    mocks.handoff.resolved = true;
-    mocks.view = view({
-      phase: "ready",
-      chatId: "private-chat-id",
-      markNotificationSent,
-    });
-    render(<FirstRunLearningBanner />);
-    await waitFor(() => expect(mocks.sendNotification).toHaveBeenCalledTimes(1));
-    expect(markNotificationSent).not.toHaveBeenCalled();
-  });
-
   it("renders nothing outside the window so it is safe to mount always", () => {
     mocks.view = view({ phase: "idle" });
     const { container } = render(<FirstRunLearningBanner />);
@@ -175,6 +213,15 @@ describe("first-run learning banner", () => {
     expect(
       screen.getByText("screenpipe learned enough to help"),
     ).toBeInTheDocument();
+    expect(mocks.view.markReadyShown).toHaveBeenCalledTimes(1);
+
+    mocks.view = view({ phase: "done" });
+    rerender(
+      <FirstRunLearningBanner
+        fallback={<div data-testid="normal-home">How can I help today?</div>}
+      />,
+    );
+    expect(screen.getByTestId("normal-home")).toBeInTheDocument();
   });
 
   it("shows the countdown while learning", () => {
@@ -213,14 +260,12 @@ describe("first-run learning banner", () => {
     expect(screen.queryByText("Reading from")).not.toBeInTheDocument();
   });
 
-  it("opens the seeded chat without retiring setup", async () => {
+  it("opens the seeded chat and retires the learning result", async () => {
     const dismiss = vi.fn();
-    const markSummaryOpened = vi.fn();
     mocks.view = view({
       phase: "ready",
       chatId: "first-run-1",
       dismiss,
-      markSummaryOpened,
     });
     render(<FirstRunLearningBanner />);
 
@@ -231,48 +276,10 @@ describe("first-run learning banner", () => {
         conversationId: "first-run-1",
       }),
     );
-    expect(markSummaryOpened).toHaveBeenCalledTimes(1);
-    expect(dismiss).not.toHaveBeenCalled();
-  });
-
-  it("keeps a compact expandable setup dock over the opened summary", async () => {
-    const dismiss = vi.fn();
-    mocks.view = view({
-      phase: "ready",
-      chatId: "first-run-1",
-      summaryOpenedAt: "2026-08-19T17:00:00.000Z",
-      dismiss,
-    });
-    render(<FirstRunLearningBanner />);
-
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("first-run-search-shortcut-start"),
-      ).toBeEnabled(),
-    );
-
-    expect(screen.getByTestId("first-run-setup-dock")).toBeInTheDocument();
-    expect(
-      screen.queryByText("screenpipe learned enough to help"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("first-run-next-steps"),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId("first-run-toggle-setup"));
-    expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId("first-run-hide-setup"));
     expect(dismiss).toHaveBeenCalledTimes(1);
-    expect(
-      JSON.parse(
-        window.localStorage.getItem(FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY) ||
-          "{}",
-      ),
-    ).toMatchObject({ status: "dismissed" });
   });
 
-  it("offers the state-aware daily setup after learning resolves", () => {
+  it("does not repeat onboarding setup after learning resolves", () => {
     const dismiss = vi.fn();
     mocks.view = view({
       phase: "ready",
@@ -284,12 +291,14 @@ describe("first-run learning banner", () => {
     expect(
       screen.getByText("screenpipe learned enough to help"),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("first-run-next-steps"),
+    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "this is ready" }));
     expect(dismiss).toHaveBeenCalled();
   });
 
-  it("ends a foreground empty result with useful setup choices", () => {
+  it("ends a foreground empty result without repeating onboarding setup", () => {
     const dismiss = vi.fn();
     for (const emptyReason of [
       "not_recording",
@@ -308,7 +317,9 @@ describe("first-run learning banner", () => {
       });
       const rendered = render(<FirstRunLearningBanner />);
       expect(screen.getByText("screenpipe is ready")).toBeInTheDocument();
-      expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("first-run-next-steps"),
+      ).not.toBeInTheDocument();
       expect(
         screen.queryByTestId("first-run-open-summary"),
       ).not.toBeInTheDocument();

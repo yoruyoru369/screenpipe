@@ -37,7 +37,7 @@ use chrono::{
 use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -51,6 +51,34 @@ const PIPE_LOG_ARCHIVE_DIR: &str = "archive";
 const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
 /// Stable prefix returned when an install would exceed the configured pipe cap.
 pub const PIPE_LIMIT_ERROR_CODE: &str = "free_pipe_limit_reached";
+
+fn validate_pipe_identifier(name: &str) -> Result<()> {
+    let path = Path::new(name);
+    let mut components = path.components();
+    let is_single_normal_component = matches!(
+        components.next(),
+        Some(Component::Normal(component)) if component == std::ffi::OsStr::new(name)
+    ) && components.next().is_none();
+    let has_windows_drive_prefix = name
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':');
+
+    if name.trim().is_empty()
+        || name.contains(['/', '\\'])
+        || path.is_absolute()
+        || has_windows_drive_prefix
+        || !is_single_normal_component
+    {
+        return Err(anyhow!(
+            "invalid pipe identifier '{}': expected one portable path component",
+            name
+        ));
+    }
+
+    Ok(())
+}
+
 const AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES: &[&str] = &[
     // v2.5.52: always created and enabled exactly three hourly pipes.
     "2d4dde284dafc774",
@@ -89,6 +117,10 @@ const BUNDLED_BUILTIN_PIPES: &[(&str, &str)] = &[
     (
         "meeting-summary",
         include_str!("../../assets/pipes/meeting-summary/pipe.md"),
+    ),
+    (
+        "speaker-reconciliation",
+        include_str!("../../assets/pipes/speaker-reconciliation/pipe.md"),
     ),
     (
         "commitments",
@@ -1610,10 +1642,19 @@ fn read_chatgpt_token_from_legacy_file() -> Option<String> {
         .unwrap_or(0);
 
     if now >= expires_at.saturating_sub(60) {
-        refresh_chatgpt_token(&mut token_data, now);
-        if let Ok(updated) = serde_json::to_string_pretty(&token_data) {
-            let _ = std::fs::write(&path, updated);
+        if refresh_chatgpt_token(&mut token_data, now) {
+            if let Ok(updated) = serde_json::to_string_pretty(&token_data) {
+                let _ = std::fs::write(&path, updated);
+            }
         }
+    }
+
+    if token_data
+        .get("reauth_required")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
     }
 
     token_data
@@ -1642,6 +1683,14 @@ fn read_chatgpt_token_from_secrets() -> Option<String> {
             let bytes = store.get("oauth:chatgpt").await.ok()??;
             let mut token_data: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
 
+            if token_data
+                .get("reauth_required")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                return None;
+            }
+
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1652,12 +1701,69 @@ fn read_chatgpt_token_from_secrets() -> Option<String> {
                 .unwrap_or(0);
 
             if now >= expires_at.saturating_sub(60) {
-                refresh_chatgpt_token(&mut token_data, now);
-                // Write refreshed token back to secrets store
-                if let Ok(updated_bytes) = serde_json::to_vec(&token_data) {
-                    if let Err(e) = store.set("oauth:chatgpt", &updated_bytes).await {
-                        tracing::warn!("failed to write refreshed ChatGPT token to secrets: {}", e);
+                let lease_owner = uuid::Uuid::new_v4().simple().to_string();
+                let mut acquired = false;
+                for _ in 0..140 {
+                    acquired = store
+                        .try_acquire_refresh_lease("oauth:chatgpt", &lease_owner, 45)
+                        .await
+                        .ok()?;
+                    if acquired {
+                        break;
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                if !acquired {
+                    tracing::warn!("timed out waiting for another ChatGPT token refresh");
+                    return None;
+                }
+
+                // The lease winner may have refreshed while we waited. Always
+                // reread before redeeming a rotating refresh token.
+                let refresh_result = async {
+                    let latest = store.get("oauth:chatgpt").await.ok()??;
+                    token_data = serde_json::from_slice(&latest).ok()?;
+                    if token_data
+                        .get("reauth_required")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                    {
+                        return None;
+                    }
+                    let latest_expires_at = token_data
+                        .get("expires_at")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                    if now >= latest_expires_at.saturating_sub(60) {
+                        if !refresh_chatgpt_token(&mut token_data, now) {
+                            return None;
+                        }
+                        let updated_bytes = serde_json::to_vec(&token_data).ok()?;
+                        if let Err(error) = store.set("oauth:chatgpt", &updated_bytes).await {
+                            tracing::warn!(
+                                "failed to write refreshed ChatGPT token to secrets: {error}"
+                            );
+                            return None;
+                        }
+                    }
+                    Some(())
+                }
+                .await;
+
+                if let Err(error) = store
+                    .release_refresh_lease("oauth:chatgpt", &lease_owner)
+                    .await
+                {
+                    tracing::warn!("failed to release ChatGPT refresh lease: {error}");
+                }
+                refresh_result?;
+
+                if token_data
+                    .get("reauth_required")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    return None;
                 }
             }
 
@@ -1677,14 +1783,24 @@ fn read_chatgpt_token_from_secrets() -> Option<String> {
 
 /// Refresh an expired ChatGPT OAuth token using the refresh_token grant.
 /// Mutates `token_data` in place with the new access_token, refresh_token, and expires_at.
-fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) {
+fn chatgpt_refresh_requires_reauth(body: &str) -> bool {
+    let code = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.pointer("/error/code")?.as_str().map(str::to_owned));
+    matches!(
+        code.as_deref(),
+        Some("refresh_token_reused" | "invalid_grant")
+    )
+}
+
+fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) -> bool {
     let refresh_token = match token_data
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
     {
         Some(t) => t,
-        None => return,
+        None => return false,
     };
 
     tracing::info!("ChatGPT OAuth token expired, refreshing...");
@@ -1693,7 +1809,7 @@ fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) {
         .build()
     {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     let refresh_res = client
@@ -1709,28 +1825,48 @@ fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) {
 
     match refresh_res {
         Ok(resp) if resp.status().is_success() => {
-            if let Ok(v) = resp.json::<serde_json::Value>() {
-                if let Some(new_token) = v.get("access_token").and_then(|t| t.as_str()) {
-                    let new_refresh = v
-                        .get("refresh_token")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or(refresh_token.as_str());
-                    let new_expires_in =
-                        v.get("expires_in").and_then(|t| t.as_u64()).unwrap_or(3600);
+            let Ok(v) = resp.json::<serde_json::Value>() else {
+                token_data["reauth_required"] = serde_json::Value::Bool(true);
+                tracing::warn!(
+                    "ChatGPT refresh response could not be read; reauthentication required"
+                );
+                return true;
+            };
+            let Some(new_token) = v.get("access_token").and_then(|t| t.as_str()) else {
+                token_data["reauth_required"] = serde_json::Value::Bool(true);
+                tracing::warn!(
+                    "ChatGPT refresh response omitted the access token; reauthentication required"
+                );
+                return true;
+            };
+            let new_refresh = v
+                .get("refresh_token")
+                .and_then(|t| t.as_str())
+                .unwrap_or(refresh_token.as_str());
+            let new_expires_in = v.get("expires_in").and_then(|t| t.as_u64()).unwrap_or(3600);
 
-                    token_data["access_token"] = serde_json::Value::String(new_token.to_string());
-                    token_data["refresh_token"] =
-                        serde_json::Value::String(new_refresh.to_string());
-                    token_data["expires_at"] = serde_json::json!(now + new_expires_in);
-                    tracing::info!("ChatGPT token refreshed successfully");
-                }
-            }
+            token_data["access_token"] = serde_json::Value::String(new_token.to_string());
+            token_data["refresh_token"] = serde_json::Value::String(new_refresh.to_string());
+            token_data["expires_at"] = serde_json::json!(now + new_expires_in);
+            token_data["reauth_required"] = serde_json::Value::Bool(false);
+            tracing::info!("ChatGPT token refreshed successfully");
+            true
         }
         Ok(resp) => {
-            tracing::error!("ChatGPT token refresh failed ({})", resp.status());
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            if chatgpt_refresh_requires_reauth(&body) {
+                token_data["reauth_required"] = serde_json::Value::Bool(true);
+                tracing::warn!("ChatGPT session requires reauthentication");
+                true
+            } else {
+                tracing::error!("ChatGPT token refresh failed ({status}): {body}");
+                false
+            }
         }
         Err(e) => {
             tracing::error!("ChatGPT token refresh request failed: {}", e);
+            false
         }
     }
 }
@@ -2614,6 +2750,7 @@ async fn setup_pipe_permissions(
     pipe_dir: &Path,
     config: &PipeConfig,
     token_registry: Option<&Arc<dyn permissions::PipeTokenRegistry>>,
+    read_only: bool,
 ) -> Option<String> {
     if let Err(e) = PiExecutor::ensure_permissions_extension(pipe_dir, config) {
         warn!("failed to install permissions extension: {}", e);
@@ -2638,6 +2775,9 @@ async fn setup_pipe_permissions(
     }
 
     let mut perms = permissions::PipePermissions::from_config(config);
+    if read_only {
+        restrict_api_permissions_to_read_only(&mut perms);
+    }
     perms.pipe_dir = Some(pipe_dir.to_string_lossy().to_string());
 
     // Always write permissions JSON when filesystem sandbox is active.
@@ -2672,6 +2812,23 @@ async fn setup_pipe_permissions(
         // No restrictions — clean up any stale permissions file
         let _ = std::fs::remove_file(pipe_dir.join(".screenpipe-permissions.json"));
         None
+    }
+}
+
+fn event_runs_are_read_only(config: &PipeConfig) -> bool {
+    config
+        .config
+        .get("event_read_only")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn restrict_api_permissions_to_read_only(perms: &mut permissions::PipePermissions) {
+    for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        perms.deny_rules.push(permissions::PermissionRule::Api {
+            method: method.to_string(),
+            path: "/*".to_string(),
+        });
     }
 }
 
@@ -3815,6 +3972,7 @@ impl PipeManager {
         event_context: Option<BackgroundEventContext>,
         trigger_details: Option<TriggerDetails>,
     ) -> Result<Option<i64>> {
+        validate_pipe_identifier(name)?;
         let (config, body, _raw) = {
             let pipes = self.pipes.lock().await;
             match pipes.get(name).cloned() {
@@ -4106,8 +4264,13 @@ impl PipeManager {
             }
         }
         if matches!(run_agent.as_str(), "pi" | "acp") {
-            pipe_token =
-                setup_pipe_permissions(&pipe_dir, &config, self.token_registry.as_ref()).await;
+            pipe_token = setup_pipe_permissions(
+                &pipe_dir,
+                &config,
+                self.token_registry.as_ref(),
+                trigger == "event" && event_runs_are_read_only(&config),
+            )
+            .await;
         }
         let token_registry_ref = self.token_registry.clone();
 
@@ -4434,6 +4597,7 @@ impl PipeManager {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PipeRunOutcome>> + Send + 'a>>
     {
         Box::pin(async move {
+            validate_pipe_identifier(name)?;
             let (config, body, _raw) = {
                 let pipes = self.pipes.lock().await;
                 match pipes.get(name).cloned() {
@@ -4778,6 +4942,7 @@ impl PipeManager {
                     &self.pipes_dir.join(name),
                     &config,
                     self.token_registry.as_ref(),
+                    trigger == "event" && event_runs_are_read_only(&config),
                 )
                 .await;
             }
@@ -5108,6 +5273,7 @@ impl PipeManager {
 
     /// Enable or disable a pipe (writes back to pipe.md front-matter).
     pub async fn enable_pipe(&self, name: &str, enabled: bool) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let pipe_md = self.pipes_dir.join(name).join("pipe.md");
         if !pipe_md.exists() {
             return Err(self.pipe_not_found_error(name));
@@ -5161,6 +5327,7 @@ impl PipeManager {
         name: &str,
         updates: HashMap<String, serde_json::Value>,
     ) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let pipe_md = self.pipes_dir.join(name).join("pipe.md");
         if !pipe_md.exists() {
             return Err(anyhow!("pipe '{}' not found", name));
@@ -5416,6 +5583,8 @@ impl PipeManager {
                     name
                 };
 
+                validate_pipe_identifier(&name)?;
+
                 let dest_dir = self.pipes_dir.join(&name);
                 let dest_file = dest_dir.join("pipe.md");
                 let dest_canonical = dest_file
@@ -5442,6 +5611,7 @@ impl PipeManager {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
+                validate_pipe_identifier(&name)?;
                 let dest_dir = self.pipes_dir.join(&name);
                 let dest_canonical = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.clone());
                 let candidate_content = std::fs::read_to_string(source_path.join("pipe.md")).ok();
@@ -5467,6 +5637,7 @@ impl PipeManager {
         }
         if source.starts_with("https://") {
             let name = url_to_pipe_name(source);
+            validate_pipe_identifier(&name)?;
             let response = reqwest::get(source).await?;
             if !response.status().is_success() {
                 return Err(anyhow!(
@@ -5499,6 +5670,7 @@ impl PipeManager {
         slug: &str,
         version: i64,
     ) -> Result<String> {
+        validate_pipe_identifier(slug)?;
         // Parse the source_md to get config + body
         let (mut config, body) = parse_frontmatter(source_md)?;
 
@@ -5532,6 +5704,7 @@ impl PipeManager {
         slug: &str,
         version: i64,
     ) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let dest_dir = self.pipes_dir.join(name);
         if !dest_dir.exists() {
             return Err(anyhow!("pipe '{}' not found", name));
@@ -5575,6 +5748,7 @@ impl PipeManager {
     /// Writes a tombstone so the pipe is not restored by builtin installation
     /// or cloud sync.
     pub async fn delete_pipe(&self, name: &str) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let dir = self.pipes_dir.join(name);
         if !dir.exists() {
             return Err(self.pipe_not_found_error(name));
@@ -5636,6 +5810,7 @@ impl PipeManager {
 
     /// Clear a pipe's chat history by deleting its Pi session files.
     pub async fn clear_pipe_history(&self, name: &str) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let pipe_dir = self.pipes_dir.join(name);
         if !pipe_dir.exists() {
             return Err(anyhow!("pipe '{}' not found", name));
@@ -6574,6 +6749,7 @@ impl PipeManager {
                             &pipes_dir.join(name),
                             config,
                             token_registry.as_ref(),
+                            triggered_by_event && event_runs_are_read_only(config),
                         )
                         .await;
                     }
@@ -9219,6 +9395,19 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::Ordering;
 
+    #[test]
+    fn rotating_chatgpt_token_errors_require_reauthentication() {
+        assert!(chatgpt_refresh_requires_reauth(
+            r#"{"error":{"code":"refresh_token_reused"}}"#
+        ));
+        assert!(chatgpt_refresh_requires_reauth(
+            r#"{"error":{"code":"invalid_grant"}}"#
+        ));
+        assert!(!chatgpt_refresh_requires_reauth(
+            r#"{"error":{"code":"temporarily_unavailable"}}"#
+        ));
+    }
+
     struct SequencedExecutor {
         outputs: std::sync::Mutex<VecDeque<AgentOutput>>,
         attempts: std::sync::Mutex<Vec<(String, Option<String>)>>,
@@ -9611,12 +9800,375 @@ mod tests {
     }
 
     #[test]
+    fn portable_pipe_identifier_is_exactly_one_safe_component() {
+        for invalid in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "../victim",
+            "nested/pipe",
+            "nested\\pipe",
+            "C:relative",
+        ] {
+            assert!(
+                validate_pipe_identifier(invalid).is_err(),
+                "{invalid:?} should be rejected"
+            );
+        }
+
+        for valid in ["daily-recap", "release..notes", "pipe.v2"] {
+            assert!(
+                validate_pipe_identifier(valid).is_ok(),
+                "{valid:?} should be accepted"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PipeMutation {
+        Delete,
+        StoreInstall,
+        StoreUpdate,
+        ClearHistory,
+        Enable,
+        UpdateConfig,
+        Run,
+        StartBackground,
+    }
+
+    async fn invoke_pipe_mutation(
+        manager: &PipeManager,
+        mutation: PipeMutation,
+        identifier: &str,
+    ) -> Result<()> {
+        let source = pipe_source(false, "updated prompt");
+        match mutation {
+            PipeMutation::Delete => manager.delete_pipe(identifier).await,
+            PipeMutation::StoreInstall => manager
+                .install_pipe_from_store(&source, identifier, 1)
+                .await
+                .map(|_| ()),
+            PipeMutation::StoreUpdate => {
+                manager
+                    .update_pipe_from_store(identifier, &source, "store-slug", 2)
+                    .await
+            }
+            PipeMutation::ClearHistory => manager.clear_pipe_history(identifier).await,
+            PipeMutation::Enable => manager.enable_pipe(identifier, false).await,
+            PipeMutation::UpdateConfig => {
+                manager
+                    .update_config(
+                        identifier,
+                        HashMap::from([("prompt_body".to_string(), serde_json::json!("changed"))]),
+                    )
+                    .await
+            }
+            PipeMutation::Run => manager.run_pipe(identifier).await.map(|_| ()),
+            PipeMutation::StartBackground => manager.start_pipe_background(identifier).await,
+        }
+    }
+
+    #[tokio::test]
+    async fn pipe_mutations_reject_non_component_identifiers_before_touching_disk() {
+        let mutations = [
+            PipeMutation::Delete,
+            PipeMutation::StoreInstall,
+            PipeMutation::StoreUpdate,
+            PipeMutation::ClearHistory,
+            PipeMutation::Enable,
+            PipeMutation::UpdateConfig,
+            PipeMutation::Run,
+            PipeMutation::StartBackground,
+        ];
+
+        for mutation in mutations {
+            for identifier_kind in [
+                "empty",
+                "whitespace",
+                "dot",
+                "dotdot",
+                "traversal",
+                "forward-separator",
+                "back-separator",
+                "drive-prefix",
+                "absolute",
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let pipes_dir = root.path().join("pipes");
+                let victim_dir = root.path().join("victim");
+                std::fs::create_dir_all(&pipes_dir).unwrap();
+                std::fs::create_dir_all(&victim_dir).unwrap();
+                std::fs::write(victim_dir.join("pipe.md"), pipe_source(false, "sentinel")).unwrap();
+                std::fs::write(
+                    victim_dir.join(".screenpipe-acp-sessions.json"),
+                    "history sentinel",
+                )
+                .unwrap();
+
+                let identifier = match identifier_kind {
+                    "empty" => String::new(),
+                    "whitespace" => "   ".to_string(),
+                    "dot" => ".".to_string(),
+                    "dotdot" => "..".to_string(),
+                    "traversal" => "../victim".to_string(),
+                    "forward-separator" => "nested/pipe".to_string(),
+                    "back-separator" => "nested\\pipe".to_string(),
+                    "drive-prefix" => "C:relative".to_string(),
+                    "absolute" => victim_dir.to_string_lossy().into_owned(),
+                    _ => unreachable!(),
+                };
+                let manager = PipeManager::new(pipes_dir, HashMap::new(), None, 0);
+
+                let error = invoke_pipe_mutation(&manager, mutation, &identifier)
+                    .await
+                    .expect_err("non-component pipe identifier must be rejected")
+                    .to_string();
+                assert!(
+                    error.contains("invalid pipe identifier"),
+                    "{mutation:?} returned an untruthful error for {identifier_kind}: {error}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(victim_dir.join("pipe.md")).unwrap(),
+                    pipe_source(false, "sentinel"),
+                    "{mutation:?} changed the outside pipe for {identifier_kind}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(victim_dir.join(".screenpipe-acp-sessions.json"))
+                        .unwrap(),
+                    "history sentinel",
+                    "{mutation:?} changed outside history for {identifier_kind}"
+                );
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let pipes_dir = root.path().join("pipes");
+        std::fs::create_dir_all(&pipes_dir).unwrap();
+        let manager = PipeManager::new(pipes_dir.clone(), HashMap::new(), None, 0);
+        let name = "release..notes";
+
+        manager
+            .install_pipe_from_store(&pipe_source(false, "installed"), name, 1)
+            .await
+            .unwrap();
+        manager
+            .update_pipe_from_store(name, &pipe_source(false, "updated"), "store-slug", 2)
+            .await
+            .unwrap();
+        manager.enable_pipe(name, false).await.unwrap();
+        manager
+            .update_config(
+                name,
+                HashMap::from([("prompt_body".to_string(), serde_json::json!("configured"))]),
+            )
+            .await
+            .unwrap();
+        std::fs::write(
+            pipes_dir.join(name).join(".screenpipe-acp-sessions.json"),
+            "history",
+        )
+        .unwrap();
+        manager.clear_pipe_history(name).await.unwrap();
+        assert!(!pipes_dir
+            .join(name)
+            .join(".screenpipe-acp-sessions.json")
+            .exists());
+        assert!(
+            std::fs::read_to_string(pipes_dir.join(name).join("pipe.md"))
+                .unwrap()
+                .contains("configured")
+        );
+        manager.delete_pipe(name).await.unwrap();
+        assert!(!pipes_dir.join(name).exists());
+
+        let error = manager
+            .delete_pipe("missing-pipe")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not found"));
+        assert!(!error.contains("invalid pipe identifier"));
+    }
+
+    #[tokio::test]
+    async fn install_pipe_rejects_unportable_derived_identifiers_before_io() {
+        let root = tempfile::tempdir().unwrap();
+        let pipes_dir = root.path().join("pipes");
+        std::fs::create_dir_all(&pipes_dir).unwrap();
+        let manager = PipeManager::new(pipes_dir.clone(), HashMap::new(), None, 0);
+
+        for source in [
+            "https://example.invalid/",
+            "https://example.invalid/C:relative.md",
+        ] {
+            let error = manager.install_pipe(source).await.unwrap_err().to_string();
+            assert!(
+                error.contains("invalid pipe identifier"),
+                "{source} returned an untruthful error: {error}"
+            );
+        }
+
+        #[cfg(unix)]
+        for filename in ["C:relative.md", "nested\\pipe.md"] {
+            let source = root.path().join(filename);
+            std::fs::write(&source, pipe_source(false, "source")).unwrap();
+            let error = manager
+                .install_pipe(source.to_str().unwrap())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("invalid pipe identifier"),
+                "{filename} returned an untruthful error: {error}"
+            );
+        }
+
+        assert!(std::fs::read_dir(pipes_dir).unwrap().next().is_none());
+    }
+
+    #[test]
     fn explicitly_installs_only_known_bundled_pipes() {
         let dir = tempfile::tempdir().unwrap();
         assert!(install_bundled_pipe(dir.path(), "time-breakdown").unwrap());
         assert!(dir.path().join("time-breakdown/pipe.md").exists());
         assert!(!install_bundled_pipe(dir.path(), "time-breakdown").unwrap());
         assert!(install_bundled_pipe(dir.path(), "not-a-builtin").is_err());
+    }
+
+    #[test]
+    fn explicit_install_migrates_existing_meeting_speaker_rules_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe_dir = dir.path().join("meeting-summary");
+        std::fs::create_dir_all(&pipe_dir).unwrap();
+        let bundled = BUNDLED_BUILTIN_PIPES
+            .iter()
+            .find_map(|(name, source)| (*name == "meeting-summary").then_some(*source))
+            .expect("meeting-summary should be bundled");
+        let naming_start = bundled
+            .find("step 2d — give every distinct speaker")
+            .expect("bundled naming step should start");
+        let naming_end = naming_start
+            + bundled[naming_start..]
+                .find("step 3 — write the summary")
+                .expect("bundled naming step should end");
+        let audio_shape = bundled
+            .lines()
+            .find(|line| line.starts_with("  - audio `content`:"))
+            .expect("bundled audio shape should exist");
+        let audio_render = bundled
+            .lines()
+            .find(|line| line.starts_with("  bun -e 'const d=await Bun.file(\"/tmp/audio.json\")"))
+            .expect("bundled audio renderer should exist");
+        let stale = format!(
+            "{}{}{}",
+            &bundled[..naming_start],
+            builtin_migrations::LEGACY_ACTIVE_SPEAKER_ONLY_MEETING_NAMING,
+            &bundled[naming_end..]
+        )
+        .replace(
+            audio_shape,
+            builtin_migrations::LEGACY_DEVICELESS_MEETING_AUDIO_SHAPE,
+        )
+        .replace(
+            audio_render,
+            builtin_migrations::LEGACY_DEVICELESS_MEETING_AUDIO_RENDER,
+        );
+        std::fs::write(pipe_dir.join("pipe.md"), stale).unwrap();
+        std::fs::write(
+            pipe_dir.join("memory.md"),
+            "# memory\n\n## Lessons\n- user note\n",
+        )
+        .unwrap();
+
+        assert!(!install_bundled_pipe(dir.path(), "meeting-summary").unwrap());
+
+        let installed = std::fs::read_to_string(pipe_dir.join("pipe.md")).unwrap();
+        assert!(installed.contains("`device_type` (`Input` or `Output`)"));
+        assert!(installed.contains(r#"id=${c.speaker?.id??"?"}"#));
+        assert!(installed.contains("deterministic call topology"));
+        assert!(installed.contains("`device_type=Input` rows as the local participant"));
+        assert!(installed.contains("never emit an unnamed, blank, `unknown`"));
+        assert!(!installed.contains("leave the speaker unnamed"));
+        assert!(!installed.contains("\n  jq "));
+        assert_eq!(
+            std::fs::read_to_string(pipe_dir.join("memory.md")).unwrap(),
+            "# memory\n\n## Lessons\n- user note\n"
+        );
+
+        // A second install is a no-op, proving startup-safe idempotence.
+        let once = installed.clone();
+        assert!(!install_bundled_pipe(dir.path(), "meeting-summary").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(pipe_dir.join("pipe.md")).unwrap(),
+            once
+        );
+    }
+
+    #[test]
+    fn speaker_reconciliation_bundle_is_preview_only_by_default() {
+        let source = BUNDLED_BUILTIN_PIPES
+            .iter()
+            .find_map(|(name, source)| (*name == "speaker-reconciliation").then_some(*source))
+            .expect("speaker reconciliation should be bundled");
+        let (config, body) = parse_frontmatter(source).expect("pipe frontmatter should parse");
+
+        assert!(!config.enabled);
+        assert_eq!(
+            config.config.get("template"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            config.preset,
+            vec!["screenpipe-cloud".to_string(), "*".to_string()]
+        );
+        assert!(event_runs_are_read_only(&config));
+        assert!(config
+            .trigger
+            .as_ref()
+            .is_some_and(|trigger| trigger.events.iter().any(|event| event == "meeting_ended")));
+        assert!(body.contains("Automatic event runs are always preview-only"));
+        assert!(body.contains("APPROVE SPEAKER <numeric_id> AS <display name> FROM <proposal_id>"));
+        assert!(body.contains("GET /meetings/<id>/transcript"));
+        assert!(body.contains("no more than 5 minutes before this run began"));
+        assert!(body.contains("duration of at least 2\n   minutes"));
+        assert!(body.contains("Meeting-local mappings"));
+        assert!(body.contains("must never\nemit an `APPROVE SPEAKER` command"));
+        assert!(body.contains("Never call `/feedback`, send a\nnotification, or call port 11435"));
+        assert!(body.contains("content_type=accessibility&on_screen=true"));
+        assert!(body.contains("content_type=parsed"));
+        assert!(body.contains("Never call `content_type=ocr`"));
+        let permissions = permissions::PipePermissions::from_config(&config);
+        assert!(permissions.is_endpoint_allowed("GET", "/meetings/42"));
+        assert!(permissions.is_endpoint_allowed("GET", "/meetings/42/transcript"));
+        assert!(permissions.is_endpoint_allowed("GET", "/search"));
+        assert!(permissions.is_endpoint_allowed("POST", "/speakers/update"));
+        assert!(permissions.is_content_type_allowed("audio"));
+        assert!(permissions.is_content_type_allowed("accessibility"));
+        assert!(permissions.is_content_type_allowed("parsed"));
+        assert!(!permissions.is_content_type_allowed("ocr"));
+        assert!(!permissions.is_content_type_allowed("input"));
+        assert!(!permissions.is_endpoint_allowed("POST", "/speakers/reassign"));
+        assert!(!permissions.is_endpoint_allowed("POST", "/speakers/merge"));
+        assert!(!permissions.is_endpoint_allowed("POST", "/raw_sql"));
+        assert!(!permissions.is_endpoint_allowed("PUT", "/meetings/42"));
+        let mut event_permissions = permissions.clone();
+        restrict_api_permissions_to_read_only(&mut event_permissions);
+        assert!(event_permissions.is_endpoint_allowed("GET", "/search"));
+        assert!(!event_permissions.is_endpoint_allowed("POST", "/speakers/update"));
+        assert!(source.contains("Api(POST /speakers/update)"));
+        for forbidden in [
+            "Api(POST /speakers/reassign)",
+            "Api(POST /speakers/undo-reassign)",
+            "Api(POST /speakers/merge)",
+            "Api(POST /speakers/delete)",
+            "Api(POST /raw_sql)",
+            "Api(GET /feedback)",
+            "Api(POST /notify)",
+            "Content(input, ocr)",
+        ] {
+            assert!(source.contains(forbidden), "missing deny rule: {forbidden}");
+        }
     }
 
     #[test]
