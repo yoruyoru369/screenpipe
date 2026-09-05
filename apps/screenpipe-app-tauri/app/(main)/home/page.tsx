@@ -1143,8 +1143,7 @@ function HomeContent() {
   // is exactly when the compact chrome-strip icon takes over — so the two can
   // never both render, and neither survives policy hiding the section.
   const meetingsInSidebar = visibleSidebarIds.includes("meetings");
-  const meetingsInToolbar =
-    !meetingsInSidebar && availableSidebarIds.includes("meetings");
+  const meetingsInToolbar = false;
 
   const persistSidebarLayout = (next: ReturnType<typeof normalizeSidebarNavLayout>) => {
     void updateSettings({ sidebarNavLayout: next });
@@ -1342,9 +1341,9 @@ function HomeContent() {
               lights: sidebar toggle, search, meetings and recording-status dot.
               No wordmark, no header row (Claude / Codex style). When
               the sidebar is collapsed it is hidden entirely and the
-              strip floats over the content, reduced to toggle + status
-              dot. The persistent main shell owns dragging in blank parts of
-              this top band and excludes these controls. Fixed
+              strip floats over the content, reduced to the sidebar
+              toggle. The persistent main shell owns dragging in blank parts
+              of this top band and excludes these controls. Fixed
               positioning anchors the strip to the viewport so it isn't
               clipped by AppSidebar's overflow. The notification bell
               lives in the Pipes view header (pipe-store.tsx) since
@@ -1479,23 +1478,24 @@ function HomeContent() {
               </Tooltip>
             )}
 
-            <RecordingStatus
-              devices={recordingDevices}
-              onDevicesChange={setRecordingDevices}
-              meetingActive={meetingState.active ?? false}
-              onPauseRecording={pauseRecording}
-              onResumeRecording={resumeRecording}
-              isGloballyPaused={isCapturePaused}
-              isTranslucent={isTranslucent}
-              floatingOverMedia={sidebarCollapsed && activeSection === "timeline"}
-              allCaptureDisabled={!!(settings.disableAudio && settings.disableVision)}
-              onOpenRecordingSettings={() => openSettings("recording")}
-            />
+            {!sidebarCollapsed && (
+              <RecordingStatus
+                devices={recordingDevices}
+                onDevicesChange={setRecordingDevices}
+                meetingActive={meetingState.active ?? false}
+                onPauseRecording={pauseRecording}
+                onResumeRecording={resumeRecording}
+                isGloballyPaused={isCapturePaused}
+                isTranslucent={isTranslucent}
+                allCaptureDisabled={!!(settings.disableAudio && settings.disableVision)}
+                onOpenRecordingSettings={() => openSettings("recording")}
+              />
+            )}
           </div>
 
           {/* Collapsed = hidden. No icon-rail fallback — the floating
-              strip above (toggle + status dot) is the entire collapsed
-              chrome, Claude-style. */}
+              sidebar toggle above is the entire collapsed chrome,
+              Claude-style. */}
           {!sidebarCollapsed && (
           <AppSidebar className="pl-1">
             {/* Navigation.

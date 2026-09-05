@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-31.1",
+  "dataset_version": "2026-09-04.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -833,6 +833,157 @@
           { "source_path": "apps/screenpipe-app-tauri/components/__tests__/pipe-ndjson-to-chat.test.ts" }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/pipe-ndjson-to-chat.test.ts"
+      }
+    },
+    {
+      "id": "app-log-share-redaction-false-positive",
+      "name": "Preserve accessibility telemetry while redacting shared logs",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "08feb4df5db8c6d95f58f5f1fe02930a450885c3"
+      },
+      "base_ref": "3828e565d41de1df99a24c26e69da0121f8c71c1",
+      "oracle_ref": "08feb4df5db8c6d95f58f5f1fe02930a450885c3",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/share-logs-button.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/redact-pii.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/share-logs-button.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/redact-pii.ts",
+        "crates/screenpipe-core/src/pii_removal.rs"
+      ],
+      "tags": ["regression", "escaped-failure", "privacy", "log-sharing", "redaction", "accessibility", "false-positive", "data-integrity"],
+      "prompt": "A shared support bundle includes recent chat context after removing personal information, but its phone-number detector also replaces bare accessibility coordinates and numeric telemetry. Preserve structured bounds, frame and monitor identifiers, hashes, process identifiers, pixel dimensions, and other unformatted numeric values in the uploaded bundle. Continue to remove formatted phone numbers, email addresses, government identifiers, payment-card numbers, bearer tokens, API credentials, IP addresses, and home-directory usernames. Do not solve the problem by disabling redaction or omitting the chat context.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          {
+            "local_path": "graders/app-log-share-redaction.test.tsx",
+            "destination_path": "apps/screenpipe-app-tauri/components/__tests__/app-log-share-redaction.eval.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/app-log-share-redaction.eval.test.tsx"
+      }
+    },
+    {
+      "id": "app-startup-auth-not-required",
+      "name": "Start signup-free builds without a false sign-in gate",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "27fb5d84707fc778b6d5740f54943ee25b6128b5",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6810"
+      },
+      "base_ref": "7ded3c132196a0ce3b347469843b4693d6765ff6",
+      "oracle_ref": "27fb5d84707fc778b6d5740f54943ee25b6128b5",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/app-entitlement-gate.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/app-entitlement-gate.tsx",
+        "apps/screenpipe-app-tauri/components/providers/app-init-provider.tsx",
+        "apps/screenpipe-app-tauri/src-tauri/src/startup_auth.rs",
+        "apps/screenpipe-app-tauri/src-tauri/src/main.rs"
+      ],
+      "tags": ["regression", "escaped-failure", "auth", "startup", "signup-free", "false-gate", "recording"],
+      "prompt": "A signup-free desktop build has already resolved startup authentication as not required, but the protected app still renders a sign-in gate because no user account exists. Make an explicit no-auth-required startup reach the application without stopping the recorder. Ordinary signed-out builds must still require sign-in; authenticated, enterprise, onboarding, development-skip, entitlement, hydration, recovery, and non-primary-window behavior must remain unchanged.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          {
+            "source_ref": "27fb5d84707fc778b6d5740f54943ee25b6128b5",
+            "source_path": "apps/screenpipe-app-tauri/components/app-entitlement-gate.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/app-entitlement-gate.test.tsx"
+      }
+    },
+    {
+      "id": "app-enterprise-account-handoff-recording",
+      "name": "Keep recording authorized during enterprise account handoff",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "666dd855cd1e6539f700426990e90114d06e97d8",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6841"
+      },
+      "base_ref": "c6721aae2caefb59ce7d8a839c732107332bb773",
+      "oracle_ref": "666dd855cd1e6539f700426990e90114d06e97d8",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-enterprise-policy.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-enterprise-policy.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/__tests__/use-enterprise-policy.test.tsx"
+      ],
+      "tags": ["regression", "escaped-failure", "enterprise", "auth", "recording", "account-handoff", "race", "fail-closed"],
+      "prompt": "An enterprise desktop has a previously verified device grant, a policy that now requires account sign-in, and a saved account credential ready to check. During startup, evaluating the device credential first revokes native recording authorization before the viable account credential finishes, stopping capture and racing the later account grant. Keep recording authorized through that account handoff, then grant account authorization when verification succeeds. Preserve immediate fail-closed behavior for key-only devices, explicit account denial, invalid or missing credentials, rotated keys, transient failures, policy changes, and ordinary non-enterprise startup.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          {
+            "source_ref": "666dd855cd1e6539f700426990e90114d06e97d8",
+            "source_path": "apps/screenpipe-app-tauri/lib/hooks/__tests__/use-enterprise-policy.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/hooks/__tests__/use-enterprise-policy.test.tsx"
+      }
+    },
+    {
+      "id": "ai-gateway-nested-json-schema",
+      "name": "Accept standard nested JSON Schema response formats",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "28da95884640708ced5db107a4e08b587c2e32d6",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6873"
+      },
+      "base_ref": "05a801d6103426108817849f99b26edb94e5be42",
+      "oracle_ref": "28da95884640708ced5db107a4e08b587c2e32d6",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/openai.ts",
+        "packages/ai-gateway/src/providers/openrouter.ts",
+        "packages/ai-gateway/src/types.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/providers/openai.ts",
+        "packages/ai-gateway/src/providers/openrouter.ts",
+        "packages/ai-gateway/src/types.ts",
+        "packages/ai-gateway/src/index.ts"
+      ],
+      "tags": ["regression", "escaped-failure", "ai-gateway", "structured-output", "json-schema", "openai", "openrouter", "compatibility"],
+      "prompt": "Valid structured-output requests using the standard nested response_format.json_schema shape are rejected before provider dispatch, although the equivalent legacy flattened form works. Accept the nested form for both OpenAI and OpenRouter while preserving flattened compatibility. When both forms are present, nested fields must take precedence; json_object requests must stay unchanged; and incomplete schemas must still fail before dispatch.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "packages/ai-gateway/node_modules", "destination_path": "packages/ai-gateway/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "local_path": "graders/ai-gateway-nested-json-schema.test.ts",
+            "destination_path": "packages/ai-gateway/src/test/eval-nested-json-schema.test.ts"
+          },
+          {
+            "source_ref": "28da95884640708ced5db107a4e08b587c2e32d6",
+            "source_path": "packages/ai-gateway/src/test/openai-models.unit.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && bun test src/test/eval-nested-json-schema.test.ts src/test/openai-models.unit.test.ts --timeout=10000"
       }
     }
   ]
