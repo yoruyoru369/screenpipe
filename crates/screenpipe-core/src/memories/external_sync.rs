@@ -751,10 +751,22 @@ mod tests {
     #[test]
     fn obsidian_heading_escape_does_not_change_agent_digests() {
         let memory = entry("# Meeting\n## Summary", 0.9, "2026-01-01T00:00:00Z");
+
+        // Obsidian owns its note and renders rows, so an opening heading
+        // marker is escaped there.
+        let obsidian = render_digest(std::slice::from_ref(&memory), &Destination::OBSIDIAN);
+        assert!(
+            obsidian.contains("\n- \\# Meeting ## Summary\n"),
+            "{obsidian}"
+        );
+
+        // Agent destinations carry recall guidance instead of memory rows, so
+        // neither the row nor its Obsidian-only escape can reach them.
         for dest in [Destination::CLAUDE_CODE, Destination::CODEX] {
             let digest = render_digest(std::slice::from_ref(&memory), &dest);
-            assert!(digest.contains("\n- # Meeting ## Summary _(updated: 2026-01-01)_\n"));
-            assert!(!digest.contains("\\#"));
+            assert_eq!(digest_entry_count(std::slice::from_ref(&memory), &dest), 0);
+            assert!(!digest.contains("Meeting"), "{digest}");
+            assert!(!digest.contains("\\#"), "{digest}");
         }
     }
 
