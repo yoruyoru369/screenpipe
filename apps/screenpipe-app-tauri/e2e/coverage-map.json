@@ -1832,6 +1832,7 @@
       "features": [
         "app-launch",
         "home-navigation",
+        "sidebar-collapse",
         "timeline",
         "settings-recording",
         "pipes"
@@ -1839,7 +1840,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Clicks through Home, Pipes, Timeline, Help, and Settings."
+      "notes": "Clicks through Home, Pipes, Timeline, Help, and Settings; verifies collapsed sidebar chrome hides recording status and restores it on expand."
     },
     {
       "spec": "html-artifact-render.spec.ts",
@@ -2021,6 +2022,27 @@
       "confidence": "strong",
       "ux": "real-user-flow",
       "notes": "Runs the production calendar matcher and DB write with the reported back-to-back boundary shape: an outgoing URL-less event overlaps a target event starting in 40 seconds whose normalized Meet room exactly matches the detector URL. Verifies the persisted title and attendees, then proves the visible Meetings row uses the target rather than the outgoing event."
+    },
+    {
+      "spec": "meeting-back-to-back-rooms.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api",
+        "tauri-command"
+      ],
+      "features": [
+        "meeting-detection",
+        "meeting-calendar-association"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Replays a back-to-back boundary through the production room-change rule and lifecycle: a Google Meet meeting bound to calendar event A, then the same browser audio session re-acquiring the mic in a different Meet room whose URL matches event B. Proves the ordinary transition alone would have revived meeting A, that A is closed with end_reason room_changed exactly where B starts, that B carries event B's title and attendees, that the 120s merge window cannot reopen A, and that the Meetings view shows two rows."
     },
     {
       "spec": "meeting-note-bottom-click.spec.ts",
@@ -2237,7 +2259,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Isolated agent-home CI lane verifies private native config writes, the resolved local API credential, a real authenticated MCP tool call, skills setup, and removal of the connection slide."
+      "notes": "Isolated agent-home CI lane verifies private native config writes, the resolved local API credential, a real authenticated MCP tool call, skills setup, and migration from the removed connection slide through engine startup to optional recommended setup and completion."
     },
     {
       "spec": "onboarding-first-run.spec.ts",

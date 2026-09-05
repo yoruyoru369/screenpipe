@@ -1285,12 +1285,11 @@ async openGoogleCalendarAuthWindow(authUrl: string) : Promise<Result<null, strin
 },
 /**
  * Open the screenpipe.com login page.
- * macOS: ASWebAuthenticationSession (system-managed sheet, forwards callback).
- * Windows/Linux: in-app WebView that intercepts the screenpipe:// redirect.
+ * Normal login opens the user's default browser and returns through the
+ * versioned app-specific deep-link callback.
  *
- * `fresh_session` is used by "use different account": macOS asks
- * ASWebAuthenticationSession for an ephemeral browser session instead of
- * reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
+ * `fresh_session` is used by "use different account": macOS uses an ephemeral
+ * ASWebAuthenticationSession and Windows/Linux use a throwaway webview profile.
  * Returns the device code when this call started the browser device-code flow,
  * and an empty string for every path that needs no out-of-band confirmation
  * (macOS auth session, embedded WebView fallback).
@@ -2247,6 +2246,18 @@ async restartAfterScreenRecordingPermission() : Promise<void> {
     await TAURI_INVOKE("restart_after_screen_recording_permission");
 },
 /**
+ * Restart the app after an explicit user action so an exact short-read
+ * quarantine can be verified in a fresh process before recording resumes.
+ */
+async restartDatabaseVerification() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restart_database_verification") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Banner-click restart. Mirror the auto-update path: gate, stop server, then
  * spawn the replacement app and `_exit` the old process so C/C++ atexit
  * handlers cannot abort during restart. See 2026-06-10 and 2026-07-02 reports.
@@ -2367,6 +2378,9 @@ async searchNavigateToTimeline(timestamp: string, frameId: number | null, search
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async setActivitySyncEnabled(activities: boolean) : Promise<void> {
+    await TAURI_INVOKE("set_activity_sync_enabled", { activities });
 },
 /**
  * Persist the user's explicit Settings choice. Automatic launch reconciliation

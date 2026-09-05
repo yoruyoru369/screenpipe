@@ -649,6 +649,7 @@ mod tests {
             source_slug: None,
             installed_version: None,
             source_hash: None,
+            run_in: None,
             subagent: false,
             history: false,
             privacy_filter: false,
